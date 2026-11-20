@@ -9,7 +9,8 @@
 @   4. INSTALL or OK with a good header -> that slot (INSTALL is first recorded as TRIAL);
 @      TRIAL (started before, never confirmed) -> the newest other slot recorded OK with a good
 @      header; anything else -> slot F (factory); F bad too -> wait with the power held (SWD);
-@   5. lock the flash, VTOR = slot + 0x200, MSP and PC from that table.
+@   5. lock the flash, VTOR = slot + 0x200, MSP and PC from that table, interrupts unmasked again
+@      (the starter runs with PRIMASK set; the code it starts expects the reset state).
 @
 @ Flash writes: only appending a record and erasing the other record page when one is full; both
 @ go through flash_erase / flash_word, which refuse every address outside the record pages.
@@ -65,7 +66,9 @@
         .equ    SRAM_LO,        0x20000000
         .equ    SRAM_HI,        0x20024000
         .equ    STACK_TOP,      0x20002000
-        .equ    FLAG,           0x20002020
+        .equ    FLAG,           0x2001FFF0      @ last words of main SRAM: used by neither the
+                                                @ slots (below 0x20002B00) nor V1.1 (below
+                                                @ 0x200163A8), not retention SRAM
         .equ    FLAG_MAGIC,     0x464C5446
         .equ    TAB,            0x20000000      @ 3 x {seq, state, version, cell address}
         .equ    CELL,           0x20000030      @ record being written (4 words)
@@ -172,6 +175,7 @@ start_slot:
         ldr     r0, [r7, #0]
         ldr     r1, [r7, #4]
         msr     msp, r0
+        cpsie   i                       @ hand over with interrupts unmasked, as after a reset
         bx      r1
 
         @ no slot can be started: keep the power held so that SWD reaches the chip

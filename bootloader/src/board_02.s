@@ -200,7 +200,9 @@ fn_08001b20:
 @ returns. Otherwise: FLASH register at 0x40022000 has bits 2:0 cleared and
 @ then bit 2 set; RCC_CFG (0x40021004) is rewritten with itself, bit 13 and
 @ bits 10 and 8 set, bits 27 and 21:18 and 15:14 cleared (mask 0xF7C0FFFF) and
-@ then bit 16 and the 0x08040000 pattern set; RCC_CTRL bit 24 is set and
+@ then bit 16 (PLLSRC: HSE) and the 0x08040000 pattern set (bits 27 and 18:
+@ PLLMULFCT = 10001b, PLL input x 18; a register value, not an address);
+@ RCC_CTRL bit 24 is set and
 @ polled until bit 25 is set; RCC_CFG bits 1:0 are cleared and bit 1 set, and
 @ the function waits until RCC_CFG bits 3:2 read 2. Returns nothing.
 @ ----------------------------------------------------------------------------
@@ -258,7 +260,7 @@ fn_080020c4:
 	ands	r1, r2
 	str	r1, [r0, #4]
 	ldr	r1, [r0, #4]
-	ldr	r2, .L08002188		@ 0x08040000
+	ldr	r2, .L08002188		@ 0x08040000: RCC_CFG PLLMULFCT bits 27 and 18 (x 18)
 	orr	r1, r1, #0x10000
 	orrs	r1, r2
 	str	r1, [sp, #0]
@@ -298,7 +300,7 @@ fn_080020c4:
 .L08002184:
 	.word	0xf7c0ffff
 .L08002188:
-	.word	0x08040000
+	.word	0x08040000		@ RCC_CFG bits, not a flash address
 .L0800218c:
 	.word	0x007a1200		@ 8000000
 .L08002190:
@@ -332,6 +334,10 @@ fn_080021dc:
 @ clears bit 28 of 0x4002101C again; sets 0x90 in the word at 0x40022000;
 @ calls fn_080020c4 (system clock setup); finally writes 0x08000000 to the
 @ word at 0xE000ED08 (VTOR). Returns nothing.
+@ Slot build: VTOR gets the address of this image's own vector table (slot +
+@ 0x200), then interrupts are unmasked (cpsie i): the starter enters the slot
+@ with PRIMASK set, and neither this code nor the application (no cps
+@ instruction in V1.1) unmasks them otherwise.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_08002598,"ax",%progbits
 	.p2align 2
@@ -384,9 +390,16 @@ fn_08002598:
 	str	r1, [r0, #0]
 	bl	fn_080020c4
 	ldr	r1, .L08002610		@ r1 = 0xE000ED88
+.ifdef SLOT
+	ldr.n	r0, .Lslot_vectors	@ slot build: this image's own vector table
+	subs	r1, #0x80		@ r1 = 0xE000ED08
+	str	r0, [r1, #0]
+	cpsie	i			@ the starter runs with interrupts masked; unmask them
+.else
 	mov.w	r0, #0x8000000
 	subs	r1, #0x80		@ r1 = 0xE000ED08
 	str	r0, [r1, #0]
+.endif
 	pop	{r4, pc}
 	.short	0x0000			@ padding
 .L08002610:
@@ -403,6 +416,10 @@ fn_08002598:
 	.word	0x40007000
 .L08002628:
 	.word	0x40022000
+.ifdef SLOT
+.Lslot_vectors:
+	.word	vectors			@ slot build: address of this image's vector table
+.endif
 
 @ ----------------------------------------------------------------------------
 @ fn_0800262c - enable and then reset a peripheral by its base address.

@@ -4,6 +4,9 @@
 	.arch armv7e-m
 	.fpu fpv4-sp-d16
 	.thumb
+.ifdef SLOT
+	.include "src/slot.inc"
+.endif
 
 @ ----------------------------------------------------------------------------
 @ fn_08000772 - apply one of three presets to two helper calls.
@@ -318,6 +321,8 @@ fn_08000e14:
 @ no error): sets PER (bit 1) in FLASH_CTRL (0x40022010), writes the address to
 @ FLASH_ADD (0x40022014), sets START (bit 6), waits again with fn_08000f14
 @ (0xb0000) and clears PER by and-ing FLASH_CTRL with 0x3ffd.
+@ Slot build: flash_gate first; an address outside the application area and
+@ the record pages returns at once and nothing is erased.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_08000e24,"ax",%progbits
 	.p2align 2
@@ -327,6 +332,10 @@ fn_08000e14:
 fn_08000e24:
 	push	{r4, r5, r6, lr}
 	mov	r5, r0			@ r5 = page address
+.ifdef SLOT
+	bl	flash_gate		@ slot build: only the application area and the record pages
+	cbnz	r0, .L08000e60		@ refused: nothing is erased
+.endif
 	movs	r0, #0x7c
 	bl	fn_08000e14
 	mov.w	r6, #0xb0000		@ wait count
@@ -350,7 +359,9 @@ fn_08000e24:
 	str	r1, [r4, #0x10]
 .L08000e60:
 	pop	{r4, r5, r6, pc}
-	.short	0x0000			@ padding
+.ifndef SLOT
+	.short	0x0000			@ padding (in the slot build the gate call takes its place)
+.endif
 .L08000e64:
 	.word	0x40022000
 
@@ -431,6 +442,8 @@ fn_08000ea4:
 @ Steps: fn_08000e14(0x7c) clears the error flags, fn_08000f14(0x2000) waits,
 @ then PG (bit 0 of FLASH_CTRL, 0x40022010) is set, the word is stored to the
 @ address, fn_08000f14(0x2000) waits, and PG is cleared (FLASH_CTRL and 0x3ffe).
+@ Slot build: flash_gate first; an address outside the application area and
+@ the record pages returns 8 and nothing is written.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_08000eb4,"ax",%progbits
 	.p2align 2
@@ -443,6 +456,11 @@ fn_08000eb4:
 	movs	r0, #0
 	str	r0, [sp, #0]
 	mov	r6, r1			@ r6 = value
+.ifdef SLOT
+	mov	r0, r5
+	bl	flash_gate		@ slot build: only the application area and the record pages
+	cbnz	r0, .L08000ec4		@ refused: returns 8, nothing is written
+.endif
 	lsls	r0, r5, #0x1e		@ test the low two address bits
 	beq.n	.L08000ec6
 	movs	r0, #9			@ not aligned
@@ -533,7 +551,9 @@ fn_08000f14:
 @ ----------------------------------------------------------------------------
 @ fn_0800159c - store the update-drive geometry in RAM and return 0.
 @ Stores 0xc4 to 0x20000198, 0x800 to 0x20000194 and 0x62000 to 0x20000190.
-@ Returns r0 = 0.
+@ Returns r0 = 0. The word at 0x20000198 is the sector count that READ
+@ CAPACITY (fn_08001e84), READ FORMAT CAPACITIES (fn_08001ee4) and the range
+@ check (fn_08001d2c) use; the slot build stores DRIVE_SECTORS (512) instead.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800159c,"ax",%progbits
 	.p2align 2
@@ -542,7 +562,11 @@ fn_08000f14:
 	.type fn_0800159c, %function
 fn_0800159c:
 	ldr	r0, .L080015b4		@ r0 = 0x20000190
+.ifdef SLOT
+	mov.w	r1, #DRIVE_SECTORS	@ slot build: the larger drive (slot.inc)
+.else
 	movs	r1, #0xc4
+.endif
 	str	r1, [r0, #8]		@ 0x20000198 = 0xc4
 	mov.w	r1, #0x800
 	str	r1, [r0, #4]		@ 0x20000194 = 0x800
@@ -550,13 +574,17 @@ fn_0800159c:
 	str	r1, [r0, #0]		@ 0x20000190 = 0x62000
 	movs	r0, #0
 	bx	lr
-	.short	0x0000			@ padding
+.ifndef SLOT
+	.short	0x0000			@ padding (in the slot build the wider mov takes its place)
+.endif
 .L080015b4:
 	.word	0x20000190
 
 @ ----------------------------------------------------------------------------
 @ fn_080015b8 - call fn_08003bd8 and return 0.
-@ Takes no arguments; the result of fn_08003bd8 is ignored.
+@ Takes no arguments; the result of fn_08003bd8 is ignored. The registers are
+@ passed on unchanged (r0 = byte offset, r1 = buffer). Slot build: calls
+@ slot_read_sector, which adds the status file to the stock sector image.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_080015b8,"ax",%progbits
 	.global fn_080015b8
@@ -564,13 +592,19 @@ fn_0800159c:
 	.type fn_080015b8, %function
 fn_080015b8:
 	push	{r4, lr}
+.ifdef SLOT
+	bl	slot_read_sector	@ slot build: stock sector image plus the status file
+.else
 	bl	fn_08003bd8
+.endif
 	movs	r0, #0
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
 @ fn_080015c2 - call fn_08003d5c and return 0.
-@ Takes no arguments; the result of fn_08003d5c is ignored.
+@ Takes no arguments; the result of fn_08003d5c is ignored. The registers are
+@ passed on unchanged (r0 = byte offset, r1 = sector data, r2 = length).
+@ Slot build: calls uf2_sector instead (fn_08003d5c is not in the slot build).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_080015c2,"ax",%progbits
 	.global fn_080015c2
@@ -578,7 +612,11 @@ fn_080015b8:
 	.type fn_080015c2, %function
 fn_080015c2:
 	push	{r4, lr}
+.ifdef SLOT
+	bl	uf2_sector		@ slot build: every written sector to the UF2 path
+.else
 	bl	fn_08003d5c
+.endif
 	movs	r0, #0
 	pop	{r4, pc}
 

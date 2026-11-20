@@ -693,6 +693,10 @@ fn_0800302c:
 .L080030f8:
 	.word	0x20000184
 
+.ifndef SLOT
+@ fn_08003b10 and fn_08003ba8 are not part of the slot build: its update path
+@ (slot_10.s, UF2) takes no directory entry and keeps its own state.
+
 @ ----------------------------------------------------------------------------
 @ fn_08003b10 - take the directory entry of the file the host is writing.
 @ In: r0 unused, r1 = pointer to the received directory sector, r2 = number
@@ -822,6 +826,7 @@ fn_08003ba8:
 	.word	0x20000250
 .L08003bd4:
 	.word	0x08006000
+.endif
 
 @ ----------------------------------------------------------------------------
 @ fn_08003bd8 - build the content of one 0x800-byte sector of the update
@@ -905,6 +910,10 @@ fn_08003bd8:
 	.word	0x20000014
 .L08003c5c:
 	.word	d_08004464
+
+.ifndef SLOT
+@ fn_08003c60, fn_08003d5c and fn_08003d88 are not part of the slot build: its
+@ writes go to uf2_sector (slot_10.s) through fn_080015c2.
 
 @ ----------------------------------------------------------------------------
 @ fn_08003c60 - receive one write of file data on the update drive and
@@ -1164,3 +1173,4 @@ fn_08003d88:
 	b.n	.L08003da8
 .L08003dfc:
 	.word	0x20000250
+.endif

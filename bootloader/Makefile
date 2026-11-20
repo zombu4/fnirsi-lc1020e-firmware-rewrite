@@ -9,9 +9,19 @@
 #                 (0x467C = 18044 bytes)
 #   make check    build/BOOT.bin, then its size and SHA-256 compared with bytes 0x0000..0x467B of the
 #                 stock bootloader (the byte proof of the port)
+#   make slot     the slot bootloader: build/slot/BOOT_F.bin, BOOT_A.bin, BOOT_B.bin, each the
+#                 0x200-byte slot header (../tools/slot_header.py) and the image assembled with
+#                 --defsym SLOT=1 (src/slot_10.s and every .ifdef SLOT change) and the slot index,
+#                 linked for slot + 0x200 (link_slot.ld); then ../tools/slot_check.py: functions at
+#                 their stock address modulo 4, no word in 0x08000000..0x08005FFF, each image at
+#                 most 0x5E00 bytes
+#   make slot-check RWDATA=<file>
+#                 make slot, plus the typed initial RAM image compared with the stock one
+#                 (0x220 bytes unpacked from a dump, not part of this repository) with its 39
+#                 pointers moved to the slot addresses and the drive's sector count changed
 #   make clean    remove build/
 #
-# Needs the GNU Arm Embedded binutils (arm-none-eabi-as, -ld, -objcopy) and shasum.
+# Needs the GNU Arm Embedded binutils (arm-none-eabi-as, -ld, -objcopy, -nm), shasum and python3.
 # The application area from 0x08006000 is not part of this image and is never linked
 # (link.ld ends FLASH at 0x08006000).
 
@@ -55,7 +65,7 @@ vendor-data:
 build/%.o: src/%.s $(BLOBS) | build
 	$(AS) $(ASFLAGS) -o $@ $<
 
-build/boot.elf: $(OBJ) link.ld
+build/boot.elf: $(OBJ) link.ld link_units.ld
 	@test -n "$(OBJ)" || { echo "src/ holds no .s file"; exit 1; }
 	$(LD) --no-warn-rwx-segments -T link.ld -Map build/boot.map -o $@ $(OBJ)
 
@@ -69,7 +79,50 @@ check: build/BOOT.bin
 	@test `wc -c < build/BOOT.bin` -eq $(BOOT_SIZE) || { echo "BOOT.bin is not $(BOOT_SIZE) bytes"; exit 1; }
 	@echo "$(BOOT_SHA256)  build/BOOT.bin" | shasum -a 256 -c -
 
+# ---- slot build ----
+# slot index (fixed per image) and slot base; the header goes at the base, the image at base + 0x200
+SLOT_INDEX_F := 0
+SLOT_BASE_F  := 0x08069000
+SLOT_INDEX_A := 1
+SLOT_BASE_A  := 0x0806F000
+SLOT_INDEX_B := 2
+SLOT_BASE_B  := 0x08075000
+SLOT_VERSION ?= 1
+SLOT_BLOBS   := assets/vendor/08003f65.bin assets/vendor/080044f2.bin
+SLOT_BOOTS   := build/slot/BOOT_F.bin build/slot/BOOT_A.bin build/slot/BOOT_B.bin
+SLOT_SPECS    = $(foreach s,F A B,$(SLOT_BASE_$(s)):build/slot/$(s)/boot.elf:build/slot/BOOT_$(s).bin)
+
+define SLOT_RULES
+build/slot/$(1)/%.o: src/%.s src/slot.inc $$(SLOT_BLOBS) | build/slot/$(1)
+	$$(AS) $$(ASFLAGS) --defsym SLOT=1 --defsym SLOT_INDEX=$$(SLOT_INDEX_$(1)) -o $$@ $$<
+
+build/slot/$(1)/boot.elf: $$(patsubst src/%.s,build/slot/$(1)/%.o,$$(SRC)) link_slot.ld link_units.ld
+	$$(LD) --no-warn-rwx-segments -T link_slot.ld --defsym SLOT_BASE=$$(SLOT_BASE_$(1)) \
+		-Map build/slot/$(1)/boot.map -o $$@ $$(patsubst src/%.s,build/slot/$(1)/%.o,$$(SRC))
+
+build/slot/$(1)/image.bin: build/slot/$(1)/boot.elf
+	$$(OBJCOPY) -O binary $$< $$@
+
+build/slot/BOOT_$(1).bin: build/slot/$(1)/image.bin ../tools/slot_header.py
+	python3 -I ../tools/slot_header.py $$< $$(SLOT_BASE_$(1)) $$(SLOT_VERSION) $$@
+
+build/slot/$(1):
+	mkdir -p $$@
+endef
+$(eval $(call SLOT_RULES,F))
+$(eval $(call SLOT_RULES,A))
+$(eval $(call SLOT_RULES,B))
+
+slot: $(SLOT_BOOTS) build/boot.elf ../tools/slot_check.py
+	python3 -I ../tools/slot_check.py build/boot.elf src/slot.inc $(SLOT_SPECS)
+
+slot-check: $(SLOT_BOOTS) build/boot.elf ../tools/slot_check.py
+	@test -n "$(RWDATA)" || { echo "usage: make slot-check RWDATA=<stock initial RAM image, 0x220 bytes>"; exit 1; }
+	python3 -I ../tools/slot_check.py build/boot.elf src/slot.inc --rwdata "$(RWDATA)" $(SLOT_SPECS)
+
+.PRECIOUS: build/slot/%/boot.elf build/slot/%/image.bin
+
 clean:
 	rm -rf build
 
-.PHONY: all vendor-data check clean
+.PHONY: all vendor-data check slot slot-check clean

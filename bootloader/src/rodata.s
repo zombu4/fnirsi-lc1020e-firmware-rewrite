@@ -14,6 +14,10 @@
 @ last byte (0x0800467C).
 @ ----------------------------------------------------------------------------
 	.section .rodata.fixed,"a",%progbits
+.ifdef SLOT
+	.include "src/slot.inc"
+	.p2align 2			@ slot build: the region table is read with ldm
+.endif
 	.global rodata_start
 rodata_start:
 
@@ -67,6 +71,9 @@ d_08004498:
 	.short 0x0020, 0x0040, 0x0080, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100
 
 @ 0x080044D8: USB device descriptor (18 bytes).
+.ifdef SLOT
+usb_device_desc:			@ slot build: named for the typed RAM image
+.endif
 	.byte 0x12			@ bLength
 	.byte 0x01			@ bDescriptorType: device
 	.short 0x0200			@ bcdUSB
@@ -111,7 +118,11 @@ d_08004574:
 	.word d_08004594		@ entry 0 source: compressed initial RAM image
 	.word 0x20000000		@ entry 0 destination: start of RAM
 	.word 0x00000220		@ entry 0 size: 0x220 bytes
+.ifdef SLOT
+	.word copy_init_addr		@ entry 0 handler (slot build): copy of the typed image
+.else
 	.word decompress_addr		@ entry 0 handler: decompress
+.endif
 @ Entry 1 clears the next RAM range with the zero-fill handler.
 	.word image_end			@ entry 1 source: end of the image
 	.word 0x20000220		@ entry 1 destination: RAM right after the unpacked image
@@ -124,10 +135,101 @@ d_08004574:
 @ stay at its original address.
 	.global d_08004594
 d_08004594:
+.ifdef SLOT
+@ Slot build: the initial RAM image typed out (0x220 bytes for 0x20000000..
+@ 0x2000021F, copied by copy_init). It equals the unpacked stock image except
+@ that its 39 flash pointers are symbols (they follow the code and data to the
+@ slot's link address) and the FAT sector count is DRIVE_SECTORS.
+ram_image:
+	@ 0x20000000: application reset vector holder (start_application), flag
+	@ byte 0x20000008, two saved words 0x2000000C / 0x20000010
+	.word 0x00000000, 0x00000000, 0x00000000, 0x00000000
+	.word 0x00000000
+	@ 0x20000014: boot sector fields of the update drive (0x3E bytes, copied
+	@ to sector 0 by fn_08003bd8)
+	.byte 0xeb, 0x3c, 0x90		@ jump instruction
+	.ascii "MSDOS5.0"		@ OEM name
+	.short 0x0800			@ bytes per sector
+	.byte 0x01			@ sectors per cluster
+	.short 0x0006			@ reserved sectors (FATs at 0x3000 / 0x3800)
+	.byte 0x02			@ number of FATs
+	.short 0x0200			@ root entries (root at 0x4000, data at 0x8000)
+	.short DRIVE_SECTORS		@ total sectors (stock 0x00C4)
+	.byte 0xf8			@ media descriptor
+	.short 0x0001			@ sectors per FAT
+	.short 0x0001			@ sectors per track
+	.short 0x0001			@ heads
+	.word 0x00000000		@ hidden sectors
+	.word 0x00000000		@ total sectors, 32-bit field
+	.byte 0x00			@ drive number
+	.byte 0x00			@ reserved
+	.byte 0x29			@ extended boot signature
+	.byte 0x96, 0x16, 0x66, 0xd3	@ volume serial number
+	.ascii "           "		@ volume label field (11 spaces)
+	.ascii "FAT16   "		@ file system type text
+	@ 0x20000052: name of the first root entry (fn_08003bd8)
+	.ascii "Ready   TXT"
+	.byte 0x00, 0x00, 0x00
+	@ 0x20000060: core clock in Hz (144 MHz; main divides it by 100 for SysTick)
+	.word 0x08954400
+	.word 0x00000000, 0x00000000, 0x00000000, 0x00000000
+	.word 0x00000000, 0x00000000, 0x00000000, 0x00000000
+	.word 0x00000000
+	@ 0x20000088: USB string descriptor in RAM (0x1A bytes, "QPLCR5 ")
+	.word 0x0051031a, 0x004c0050, 0x00520043, 0x00200035
+	.word 0x00000000, 0x00000000, 0x00000000, 0x00000000
+	@ 0x200000A8: 14 handler pointers
+	.word fn_08000d90, fn_08002d98, fn_08002d98, fn_08002d98
+	.word fn_08002d98, fn_08002d98, fn_08002d98, fn_08002d98
+	.word fn_08000d94, fn_08002d98, fn_08002d98, fn_08002d98
+	.word fn_08002d98, fn_08002d98
+	@ 0x200000E0
+	.word 0x00000103, 0x00000000
+	@ 0x200000E8: descriptor table: {address, length} pairs
+	.word usb_device_desc, 0x00000012		@ device descriptor
+	.word d_080044ea, 0x00000020			@ configuration descriptor
+	@ 0x200000F8: function table (fn_08002c10 stores 0x200000F8 to 0x20000070)
+	.word fn_08001778, fn_080016a0, fn_08001774, fn_08001776
+	.word fn_080015cc, fn_08001650, fn_08001644, fn_08001618
+	.word fn_0800160c, fn_08001624
+	.word 0x00000000, 0x00000040
+	@ 0x20000128: string descriptors {address, length}
+	.word d_080044ea + 0x20, 0x00000004		@ 0x0800450A language ID
+	.word d_080044ea + 0x24, 0x00000026		@ 0x0800450E string 1
+	.word d_080044ea + 0x4a, 0x00000026		@ 0x08004534 string 2
+	.word 0x20000088, 0x0000001a			@ string 3, in RAM
+	.word d_080044ea + 0x70, 0x0000001a		@ 0x0800455A
+	@ 0x20000150: function table (fn_08002c10 stores 0x20000150 to 0x20000074)
+	.word fn_08002d98, fn_08001890, fn_08002d98, fn_08002d98
+	.word fn_08002d98, fn_080017b0, fn_08002d98, fn_08002d98
+	.word fn_080018c4
+	.word 0x00000000, 0x00000001, 0x00000000
+	.word 0x00000000, 0x00000000, 0x00000000, 0x00000000
+	.word 0x00000000, 0x00000000, 0x00000000, 0x00000000
+	@ 0x200001A0
+	.byte 0x00
+	@ 0x200001A1: SCSI INQUIRY data (36 bytes)
+	.byte 0x00, 0x80, 0x02, 0x02, 0x20, 0x00, 0x00, 0x00
+	.ascii "FNIRSI  "			@ vendor
+	.ascii "HRM-10   IAP    "		@ product
+	.ascii "1.0 "				@ revision
+	@ 0x200001C5
+	.byte 0x03, 0x00, 0x00
+	.word 0x00060000, 0x00000000
+	.word 0x00007000, 0x00000000, 0x0000000a, 0x00000000
+	.word 0x00000000, 0x00000000, 0x00000000, 0x00080000
+	.word 0x02000000, 0x00000000, 0x00000000, 0x00000000
+	.word 0x00000000, 0x00000000, 0x00000000, 0x00000000
+	.word 0x00000000, 0x00000000, 0x00000000, 0x00000000
+	.if . - ram_image != 0x220
+	.error "the typed RAM image must be 0x220 bytes"
+	.endif
+.else
 	.incbin "assets/vendor/08004594.bin"
 
 @ 0x0800467B: one padding byte (0x00) that aligns the end of the image to 4 bytes.
 	.byte 0x00
+.endif
 
 	.global image_end
 image_end:

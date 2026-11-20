@@ -22,9 +22,11 @@ What exists now:
 
 | Bootloader port | [`bootloader/`](bootloader/) | The vendor bootloader (USB update drive, flash programming, start of the application) in symbolic assembly, 208 functions in nine source files plus the vector table and the data, every function commented. Linked at 0x08000000 it reproduces the vendor bootloader byte for byte (`make check`); it is the base of the slot bootloader. Its three larger data blocks come from your own meter's flash: `make vendor-data DUMP=<your 0x08000000 dump>`. |
 
-What follows, in this order: the slot bootloader (the port changed for its slot: own update path,
-confirmation records, flash gate), the installation of the two-part bootloader, then the
-application.
+| Slot bootloader | [`bootloader/`](bootloader/) (`make slot`) | The port built for the three slots F, A and B: linked for its slot with its own vector table, the packed RAM image typed with symbols, the confirmation records of the starter, a flash gate inside the erase and program routines (application area and record pages only), checks of the application's vector table before it is started, and its own update path: UF2 (each 512-byte block names its address, so host write order, cluster layout and extra files do not matter; the application's vector page is written last and only after the rest is verified, so an interrupted update leaves the meter in update mode). `tools/bin2uf2.py` converts a `.bin`, `tools/iap_write.py` writes the `.uf2` to the drive. |
+| Tests | [`tests/`](tests/) | Emulator tests of the whole chain (starter, slot, application start; records, faults, power cuts after every record write) and of the UF2 path (any block order, junk, repeated and foreign blocks, flash errors, power cuts), and a static never-brick check of every image (no option-byte or protection register, nothing in the settings page, flash-controller access only in the listed routines). |
+
+What follows: the installation of the two-part bootloader on the meter (`swd/install_bootloader.tcl`,
+`tools/make_install.py`), then the application.
 
 ## Start here
 

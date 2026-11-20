@@ -935,6 +935,11 @@ zero_fill:
 @   7. Calls fn_08003ba8, fn_08002c48, fn_080021dc and fn_08002c10, then
 @      loops calling fn_08001150 until the byte at 0x20000274 (0x20000250 +
 @      0x24) equals 2, calls fn_0800320e(1000) and system_reset.
+@ Slot build: step 2 calls slot_app_start instead of the SP test (its checks,
+@ the OK record, flash lock, start_application); step 7 calls uf2_init in
+@ place of fn_08003ba8 and slot_confirm after fn_08002c10 (OK record after the
+@ USB start); the alignment nop before the loop and the two literals of the
+@ SP test are left out.
 @ ----------------------------------------------------------------------------
 	.section .text.main,"ax",%progbits
 	.p2align 2
@@ -950,6 +955,9 @@ main:
 	mov	r0, r6
 	bl	fn_080007a4
 	cbz	r0, .L08003e4e
+.ifdef SLOT
+	bl	slot_app_start		@ slot build: checks, OK record, flash lock, start
+.else
 	ldr	r0, .L08003f10
 	ldr	r1, [r0, #0]
 	ldr	r2, .L08003f14
@@ -957,6 +965,7 @@ main:
 	cmp.w	r1, #0x20000000
 	bne.n	.L08003e4e
 	bl	start_application
+.endif
 .L08003e4e:
 	movs	r0, #0x64
 	bl	fn_0800320e
@@ -1017,6 +1026,15 @@ main:
 	movs	r0, #7
 	str	r0, [r1, #0x10]
 .L08003edc:
+.ifdef SLOT
+	bl	uf2_init		@ slot build: clear the UF2 transfer state
+	bl	fn_08002c48
+	bl	fn_080021dc
+	bl	fn_08002c10
+	bl	slot_confirm		@ slot build: OK record after the USB start
+	ldr	r4, .L08003f3c
+	mov.w	r5, #0x3e8
+.else
 	bl	fn_08003ba8
 	bl	fn_08002c48
 	bl	fn_080021dc
@@ -1024,6 +1042,7 @@ main:
 	ldr	r4, .L08003f3c
 	mov.w	r5, #0x3e8
 	nop
+.endif
 .L08003ef4:
 	bl	fn_08001150
 	ldrb.w	r0, [r4, #0x24]
@@ -1035,10 +1054,12 @@ main:
 	b.n	.L08003ef4
 .L08003f0c:
 	.word 0x40011000	@ GPIOC base
+.ifndef SLOT
 .L08003f10:
 	.word 0x08006000	@ word tested for an application stack pointer
 .L08003f14:
 	.word 0x2ffe0000	@ mask applied to that word
+.endif
 .L08003f18:
 	.word 0x40010800	@ GPIOA base
 .L08003f1c:
