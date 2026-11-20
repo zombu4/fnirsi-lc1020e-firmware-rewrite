@@ -25,7 +25,16 @@ What exists now:
 
 The two-part bootloader runs on a meter: installed over SWD (`swd/install_bootloader.tcl`,
 `tools/make_install.py`), started the vendor application through slot A and confirmed it, and the
-vendor bootloader pages were erased. What follows: the application.
+vendor bootloader pages were erased.
+
+The application is ported too: [`firmware/`](firmware/) holds the vendor application V1.1 in
+assembly, 1107 functions in 46 source files plus the vector table and the fixed data, every
+function commented. `make check` rebuilds it byte for byte (309080 bytes). Its fonts, pictures and
+the packed initial RAM image are not part of this repository; `make vendor-data
+IMAGE=<LC1020E_V1.1_250702.bin>` copies them out of your own copy of the vendor update file (each
+block checked by SHA-256, `firmware/vendor_blobs.tsv`). What follows: our own build on this base
+(the fixed settings save, USB control with a full API for a companion application, the vendor
+defects fixed).
 
 ## Start here
 
@@ -51,6 +60,8 @@ same on every push.
 
     bootloader/  bootloader port and slot build: src/, link*.ld, Makefile (vendor-data, check, slot)
     dumper/      sram_dumper.s, Makefile, test_sram_dumper.py, check_dump.py
+    firmware/    application port: src/, link.ld, link_units.ld, link_rodata.ld, Makefile
+                 (vendor-data, check, uf2), vendor_blobs.tsv
     starter/     starter.s, Makefile, test_starter.py
     swd/         OpenOCD scripts and the probe configuration
     tests/       emulator chain and UF2 tests, chip model, never-brick check

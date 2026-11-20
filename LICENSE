@@ -62,7 +62,11 @@ Copyright (c) 2026 zombu4. All rights reserved except as granted below.
    trademarks of their owners. The bootloader port in `bootloader/` is written from the
    disassembly of the vendor's bootloader and is derived from it; its three larger data blocks
    (font bitmaps, a table, the packed initial RAM image) are not included and are extracted from
-   your own meter's flash (`make vendor-data`). The rest of the repository contains no code or
+   your own meter's flash (`make vendor-data`). The application port in `firmware/` is written
+   from the disassembly of the vendor's application V1.1 and is derived from it; its larger data
+   blocks (fonts, pictures, tables, the packed initial RAM image; listed in
+   `firmware/vendor_blobs.tsv`) are not included and are extracted from your own copy of the
+   vendor's update file (`make vendor-data`). The rest of the repository contains no code or
    data derived from the vendor's firmware; it names vendor addresses as facts about the meter and
    does not include the vendor application or bootloader images. No license for vendor-derived
    content is granted here; its use is at your own responsibility.
