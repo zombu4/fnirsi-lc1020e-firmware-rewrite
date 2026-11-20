@@ -1175,8 +1175,12 @@ fn_0800781c:
 	.thumb_func
 	.type __scatterload, %function
 __scatterload:
-	.inst.n	0x4c06				@ ldr r4, [0x08007868]
-	.inst.n	0x4d07				@ ldr r5, [0x0800786c]
+	@ The two literal loads stay as .inst.n: this section (which also holds the
+	@ following 64-bit shift routines) ends at 0x0800788e, not on a 4-byte
+	@ boundary, so it cannot carry .p2align 2, and without it the assembler
+	@ warns that the section is not aligned enough for PC-relative loads.
+	.inst.n	0x4c06				@ ldr r4, .L08007868
+	.inst.n	0x4d07				@ ldr r5, .L0800786c
 	b.n	.L08007860
 .L08007852:
 	ldr	r0, [r4, #12]
@@ -1188,7 +1192,9 @@ __scatterload:
 	cmp	r4, r5
 	bcc.n	.L08007852
 	bl	fn_08006260
+.L08007868:
 	.word	d_08051510			@ region table start (literal at 0x08007868)
+.L0800786c:
 	.word	d_08051530			@ region table end (literal at 0x0800786c)
 
 @ ----------------------------------------------------------------------------

@@ -748,7 +748,7 @@ fn_08014758:
 .L0801499e:
 	subs r0, r4, #2			@ j = entry count - 2
 	b.n .L080149c0
-	.byte 0x00, 0xbf		@ padding
+	nop				@ padding
 .L080149a4:
 	ldrh.w r2, [r8, r0, lsl #1]
 	strh.w r2, [r9, r4, lsl #1]	@ X[new] = Y[j]
@@ -1107,7 +1107,7 @@ fn_08014bd4:
 	mov r0, r1
 	mov r2, r1
 	b.n .L08014cb0
-	.byte 0x00, 0xbf		@ padding
+	nop				@ padding
 .L08014ca4:
 	ldrh.w r3, [r5, r2, lsl #1]
 	cmp r3, r0
@@ -1955,7 +1955,7 @@ fn_08015110:
 	cmp r0, r5
 	bge.n .L080152c8
 	b.n .L08015492
-	.byte 0x00, 0xbf		@ padding
+	nop				@ padding
 .L08015324:
 	ldrh.w r0, [sp, #6]
 	ldrsh.w r1, [sp, #0x16]

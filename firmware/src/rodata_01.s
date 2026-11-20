@@ -1,4 +1,4 @@
-@ rodata_01.s - read-only data part 1 of 4: number and lookup tables, USB descriptors, font and bitmap data (0x0802ae94..0x080371f3)
+@ rodata_01.s - read-only data part 1 of 4: number and lookup tables, USB descriptors, font and descriptor data blocks (0x0802ae94..0x080371f3)
 @ Part of the FNIRSI LC1020E firmware rewrite: port of the application V1.1 (Thumb-2 assembly).
 	.syntax unified
 	.arch armv7e-m
@@ -143,7 +143,8 @@ d_0802ce5c:
 @ 0x0802d1bf: string of 14 equals signs plus NUL.
 	.asciz "=============="
 
-@ 0x0802d1ce: bitmap data.
+@ 0x0802d1ce: rest of the glyph bitmap block that starts at 0x0802ce78 (font at 0x0802f0d8),
+@ read as [dsc+0] + bitmap_index by fn_08020894.
 	.incbin "assets/vendor/0802d1ce.bin"
 
 @ 0x0802e790: glyph entry table.
@@ -184,7 +185,8 @@ d_0802f0d8:
 	.byte 0xc0, 0xf0, 0x02, 0x08, 0x00, 0x00, 0x00, 0x00
 	.byte 0x00, 0x00, 0x00, 0x00
 
-@ 0x0802f0f4: bitmap data.
+@ 0x0802f0f4: glyph bitmap block of the font at 0x0802f5e8 (word 0x0802f0f4 in the descriptor
+@ at 0x0802f5d0), read as [dsc+0] + bitmap_index by fn_08020894.
 	.incbin "assets/vendor/0802f0f4.bin"
 
 @ 0x0802f550: glyph entry table.
@@ -205,99 +207,137 @@ d_0802f0d8:
 	.byte 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x04
 	.byte 0x54, 0x04, 0x00, 0x20
 
-@ 0x0802f5e8: object with two function pointers followed by a bitmap image (header and pixel data).
+@ 0x0802f5e8: record of two function pointers (fn_08020968, fn_08020894) and its fields,
+@ followed by 2340 bytes read as the data of the descriptor at 0x0802ff28 (pointer word
+@ 0x0802f604). The address is passed as r1 to the call 0x080266ac.
 	.global d_0802f5e8
 d_0802f5e8:
 	.word fn_08020968
 	.word fn_08020894
 	.incbin "assets/vendor/0802f5f0.bin"
 
-@ 0x0802ff28: bitmap image.
+@ 0x0802ff28: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x0802f604) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 0; the block is passed as r1 to fn_08021c14.
 	.global d_0802ff28
 d_0802ff28:
 	.incbin "assets/vendor/0802ff28.bin"
 
-@ 0x08030858: bitmap image.
+@ 0x08030858: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x0802ff34) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 1.
 	.global d_08030858
 d_08030858:
 	.incbin "assets/vendor/08030858.bin"
 
-@ 0x08031188: bitmap image.
+@ 0x08031188: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x08030864) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 2.
 	.global d_08031188
 d_08031188:
 	.incbin "assets/vendor/08031188.bin"
 
-@ 0x08031ab8: bitmap image.
+@ 0x08031ab8: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x08031194) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 3.
 	.global d_08031ab8
 d_08031ab8:
 	.incbin "assets/vendor/08031ab8.bin"
 
-@ 0x080323e8: bitmap image.
+@ 0x080323e8: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x08031ac4) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 4.
 	.global d_080323e8
 d_080323e8:
 	.incbin "assets/vendor/080323e8.bin"
 
-@ 0x08032d18: bitmap image.
+@ 0x08032d18: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x080323f4) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 5.
 	.global d_08032d18
 d_08032d18:
 	.incbin "assets/vendor/08032d18.bin"
 
-@ 0x08033648: bitmap image.
+@ 0x08033648: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x08032d24) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 6.
 	.global d_08033648
 d_08033648:
 	.incbin "assets/vendor/08033648.bin"
 
-@ 0x08033f78: bitmap image.
+@ 0x08033f78: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x08033654) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 7.
 	.global d_08033f78
 d_08033f78:
 	.incbin "assets/vendor/08033f78.bin"
 
-@ 0x080348a8: bitmap image.
+@ 0x080348a8: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x08033f84) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 8.
 	.global d_080348a8
 d_080348a8:
 	.incbin "assets/vendor/080348a8.bin"
 
-@ 0x080351d8: bitmap image.
+@ 0x080351d8: data block of 220 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x080348b4) followed by 208 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 9.
 	.global d_080351d8
 d_080351d8:
 	.incbin "assets/vendor/080351d8.bin"
 
-@ 0x080352b4: bitmap image.
+@ 0x080352b4: data block of 1116 bytes: 12-byte descriptor (words 0x05e01809, 205,
+@ 0x080351e4) followed by 1104 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 11.
 	.global d_080352b4
 d_080352b4:
 	.incbin "assets/vendor/080352b4.bin"
 
-@ 0x08035710: bitmap image.
+@ 0x08035710: data block of 2352 bytes: 12-byte descriptor (words 0x00c0340a, 1102,
+@ 0x080352c0) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 12.
 	.global d_08035710
 d_08035710:
 	.incbin "assets/vendor/08035710.bin"
 
-@ 0x08036040: bitmap image.
+@ 0x08036040: data block of 2352 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x0803571c) followed by 2340 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 13.
 	.global d_08036040
 d_08036040:
 	.incbin "assets/vendor/08036040.bin"
 
-@ 0x08036970: bitmap image.
+@ 0x08036970: data block of 436 bytes: 12-byte descriptor (words 0x05e0700a, 2340,
+@ 0x0803604c) followed by 424 bytes. fn_0800d14c stores the address as the table entry
+@ for glyph index 10.
 	.global d_08036970
 d_08036970:
 	.incbin "assets/vendor/08036970.bin"
 
-@ 0x08036b24: bitmap image.
+@ 0x08036b24: data block of 436 bytes: 12-byte descriptor (words 0x02a08409, 421,
+@ 0x0803697c) followed by 424 bytes. Loaded by fn_0800d294 and fn_0800d3d8 and passed as
+@ r1 to fn_08021c14.
 	.global d_08036b24
 d_08036b24:
 	.incbin "assets/vendor/08036b24.bin"
 
-@ 0x08036cd8: bitmap image.
+@ 0x08036cd8: data block of 436 bytes: 12-byte descriptor (words 0x02a08409, 421,
+@ 0x08036b30) followed by 424 bytes. Loaded by fn_0800d294 and fn_0800d3d8 and passed as
+@ r1 to fn_08021c14.
 	.global d_08036cd8
 d_08036cd8:
 	.incbin "assets/vendor/08036cd8.bin"
 
-@ 0x08036e8c: bitmap image.
+@ 0x08036e8c: data block of 436 bytes: 12-byte descriptor (words 0x02a08409, 421,
+@ 0x08036ce4) followed by 424 bytes. Loaded by fn_0800d294 and fn_0800d3d8 and passed as
+@ r1 to fn_08021c14.
 	.global d_08036e8c
 d_08036e8c:
 	.incbin "assets/vendor/08036e8c.bin"
 
-@ 0x08037040: bitmap image (ends the part at 0x080371f3).
+@ 0x08037040: data block of 436 bytes: 12-byte descriptor (words 0x02a08409, 421,
+@ 0x08036e98) followed by 424 bytes (ends the part at 0x080371f3). Loaded by fn_0800d294
+@ and fn_0800d3d8 and passed as r1 to fn_08021c14.
 	.global d_08037040
 d_08037040:
 	.incbin "assets/vendor/08037040.bin"

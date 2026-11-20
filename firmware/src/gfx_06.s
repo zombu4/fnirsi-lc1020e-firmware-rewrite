@@ -701,7 +701,7 @@ fn_08016580:
 	add r0, r1
 	.inst.n 0x1e40  @ subs r0, r0, #1
 	b.n .L08016972
-	.byte 0x00, 0xbf  @ padding
+	nop  @ padding
 .L08016910:
 	ldrsh.w r1, [sp, #0xc]
 	ldrh r0, [r4, #0x28]
@@ -1242,7 +1242,7 @@ fn_08016c6c:
 	mov r0, r10
 	mov r3, r1
 	b.n .L08016daa
-	.byte 0x00, 0xbf  @ padding
+	nop  @ padding
 .L08016d7c:
 	ldrsh.w r2, [r4, #0x4]
 	cmp r2, r0
@@ -1606,7 +1606,7 @@ fn_08016de0:
 	sxth r1, r0
 	mov r2, r5
 	b.n .L08016f58
-	.byte 0x00, 0xbf  @ padding
+	nop  @ padding
 .L08017070:
 	ldrsh.w r1, [sp, #0x58]
 	add.w r0, r11, r5

@@ -35,8 +35,8 @@ fn_0800c848:
 @ ----------------------------------------------------------------------------
 @ fn_0800c86c - no parameters, no return value (ends with a tail call to
 @ 0x0802285c). Builds the object tree of a two-entry selector screen.
-@ r9 = 0x2000057c (base of the words addressed with offsets).
-@ Stores 0 to the words 0x20001168 (r9+0xbec), 0x200011a8 (+0xc2c),
+@ r9 = 0x2000057c (base of the words addressed with offsets; the settings block).
+@ Stores 0 to the words 0x20001168 (screen state; r9+0xbec), 0x200011a8 (+0xc2c),
 @ 0x200011b4 (+0xc38) and 0x200011b8 (+0xc3c).
 @ Root object: r0 = 0x08023678(0) stored to the word 0x20000288; then
 @ 0x0801ddd0, 0x080263a8(root, 0x140, 0xf0), 0x0801d7f2(0,0,0) giving a colour
@@ -55,7 +55,7 @@ fn_0800c848:
 @   0x080266ac(C, 0x0802f0d8, 0).
 @ After the loop: 0x0801d7f2(0xfd, 0xd0, 0x1b) twice; the first result goes to
 @ 0x0802659c(0x20005a08[w], v, 0), the second to 0x08026694(0x20005a18[w], v,
-@ 0), where w is the word 0x2000115c (r9+0xbe0).
+@ 0), where w is the word 0x2000115c (language: 0 Chinese, 1 English; r9+0xbe0).
 @ Finally 0x0802285c(word 0x20005a28, the 6 UTF-8 bytes at 0x0800ca1c) and, as
 @ tail call, 0x0802285c(word 0x20005a2c, the string "English").
 @ ----------------------------------------------------------------------------
@@ -226,9 +226,10 @@ fn_0800c86c:
 @ ----------------------------------------------------------------------------
 @ fn_0800ca2c - no parameters, no return value. Builds the object tree of a
 @ settings screen.
-@ Writes 1 to the word 0x20001168, calls 0x08009f10, then 0x08008350(0x40010c00,
+@ Writes 1 to the word 0x20001168 (screen state: 1 = measure screen), calls
+@ 0x08009f10, then 0x08008350(0x40010c00,
 @ 0x2000, 1) and 0x08008350(0x40010c00, 0x1000, 1), then 0x0800b164. Clears the
-@ words 0x200011a8, 0x200011a4 and 0x200011b4.
+@ words 0x200011a8, 0x200011a4 (hold toggle) and 0x200011b4.
 @ Root object = 0x08023678(0) stored to the word 0x200001d8 (0x200001d4+4);
 @ 0x0802657a(root, low 16 bits of 0x0801d7c2(0,0,0), 0), 0x08026380(root, 0),
 @ 0x0801ddd0(root).
@@ -237,21 +238,25 @@ fn_0800c86c:
 @   word 0x200001fc = 0x0802122c(A), placed (9, -143, 0)
 @   word 0x200001f0 = 0x08021f5c(A), placed (9, -96, 2), 0x080266ac(obj,
 @   0x0802ce5c, 0), 0x080228d0(obj, "%s", word[0x20000258 + word[0x2000115c]*0x18
-@   + word[0x20001148]*4])
+@   + word[0x20001148]*4]) (0x20000258 = RAM text table of the Func names;
+@   0x2000115c = language; 0x20001148 = Func: 0 AUTO, 1 R, 2 C, 3 L, 4 Z)
 @   word 0x200001dc = 0x0802122c(A), placed (9, -38, 0), source 0x0803c404,
 @   0x08023050(obj, 1)
 @   word 0x200001e0 = 0x0802122c(A), placed (9, 10, 1); its source depends on the
-@   word 0x20001150 and on whether the word 0x2000115c is zero: 0x20001150 = 0
+@   word 0x20001150 (speed, 0..2) and on whether the word 0x2000115c (language)
+@   is zero: 0x20001150 = 0
 @   gives 0x0803c690 (zero) or 0x08040f10 (non-zero), 1 gives 0x0803c91c or
 @   0x08041184, 2 gives 0x0803cba8 or 0x08040c9c, other values set no source
 @   word 0x20000200 = 0x0802122c(A), placed (9, 0x3a, 0), source 0x0803e250, then
-@   0x08023050(obj, 1) when the word 0x200011a0 is 0, else 0x08023558(obj, 1)
+@   0x08023050(obj, 1) when the word 0x200011a0 (correction flag) is 0, else
+@   0x08023558(obj, 1)
 @   word 0x200001e4 = 0x0802122c(A), placed (9, 0x68, 0), source selected by the
-@   word 0x20001154: 0 gives 0x0803cdc4, 1 gives 0x0803cff4, 2 gives 0x0803d224,
+@   word 0x20001154 (circuit mode: 0 auto, 1 series, 2 parallel): 0 gives 0x0803cdc4, 1 gives 0x0803cff4, 2 gives 0x0803d224,
 @   other values set none
 @ Loop i = 0..3: H = 0x0802122c(root) stored at 0x200059e8[i]; I = 0x08021f5c(H)
 @ kept in a stack slot (sp+8+4*i); 0x080266ac(I, 0x0802ce5c, 0);
-@ 0x080228d0(I, "%s", word[0x20000224 + word[0x2000115c]*16 + 4*i]); I placed
+@ 0x080228d0(I, "%s", word[0x20000224 + word[0x2000115c]*16 + 4*i]) (0x20000224 =
+@ RAM table of the cursor labels); I placed
 @ (9, 0, -11); J = 0x08021f5c(H) stored at 0x200059f8[i], placed (9, 0, 12),
 @ 0x080266ac(J, 0x0802ce5c, 0).
 @ Then 0x200059e8[0..3] are placed with 0x08023170(obj, 5, x, 0) for x = -120,
@@ -264,8 +269,9 @@ fn_0800c86c:
 @ (9, 134, 42).
 @ Array 0x200059a8[2][8]: each element = 0x0802122c(root), placed (8, 0, -40)
 @ for row 0 and (8, 0, 30) for row 1.
-@ Switch on the word 0x20001148: values 1, 2, 3, 4 store the value to the byte
-@ 0x200011e4 and to the word 0x200011e8 and set the sources of 0x200001fc and
+@ Switch on the word 0x20001148 (Func): values 1, 2, 3, 4 store the value to the byte
+@ 0x200011e4 (selects the main row) and to the word 0x200011e8 (secondary
+@ value: 0 R/ESR, 1 X, 2 D, 3 Q, 4 theta) and set the sources of 0x200001fc and
 @ 0x200001e8 to (0x0803da44, 0x0803d2fc), (0x0803dd04, 0x0803d3d4), (0x0803de64,
 @ 0x0803d584), (0x0803dfc4, 0x0803d8e4); any other value sets only the source of
 @ 0x200001fc to 0x0803dba4.
@@ -723,8 +729,8 @@ fn_0800ca2c:
 @ popping r1..r7 and lr), so the return value and the return to the caller are
 @ those of 0x080269f0.
 @ Calls 0x08009ba0(0x50, 0x6a, 0xa0, 0x1b, stack: 0, 0, 0x08046c9c). Then a loop
-@ r5 = 0.. while the signed word 0x20001158 (0x2000057c+0xbdc) is greater than
-@ r5: 0x08011c68(2), 0x08009e60(r5).
+@ r5 = 0.. while the signed word 0x20001158 (brightness setting, backlight
+@ percent; 0x2000057c+0xbdc) is greater than r5: 0x08011c68(2), 0x08009e60(r5).
 @ Three loops with r6 = 1..0x69 (r5 = 1 and r4 = 0 from 0x0800ce8c); each pass
 @ calls 0x08009ba0(x, r6-1, w, 8, stack: 1, 0, data), then 0x08009ba0(x, r6, w,
 @ 8, stack: 0, 0, data), then 0x08011c68(2):
@@ -869,7 +875,7 @@ fn_0800ce54:
 @ 0x08026662, 0x0802666c, 0x08026676, 0x08026658, 0x080265c8, 0x08026694 and
 @ 0x080266ac(.., 0x0802f0d8, 0); the text of the object 0x200002a0 is set with
 @ 0x0802285c from the pointer table at 0x200002a8, indexed by the word
-@ 0x2000115c (0x2000057c+0xbe0).
+@ 0x2000115c (language: 0 Chinese, 1 English; 0x2000057c+0xbe0).
 @ In every case it ends by tail-calling 0x080228d0(word 0x200002a4, "%d", r1).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800cf68,"ax",%progbits
@@ -1269,19 +1275,20 @@ fn_0800d14c:
 @ Zeroes the five stack words [sp+0..0x10]. The switch is on the word 0x200011e8
 @ (0x2000057c+0xc6c):
 @   0: 0x08021c14(word 0x200001ec, image 0x0803d2fc), then
-@      0x0800e028(abs(float 0x200050b8), sp+4, sp+0xc, sp)
+@      0x0800e028(abs(float 0x200050b8 = displayed R), sp+4, sp+0xc, sp)
 @   1: 0x08021c14(0x200001ec, image 0x0803d80c), sets the word 0x20001198 to 2
-@      around 0x0800e028(float 0x200050c8, ...) and then writes 0 back
-@   2: 0x08021c14(0x200001ec, image 0x0803d4ac), 0x0800dd44(float 0x200050d4,
+@      around 0x0800e028(float 0x200050c8 = X, ...) and then writes 0 back
+@   2: 0x08021c14(0x200001ec, image 0x0803d4ac), 0x0800dd44(float 0x200050d4 = D,
 @      ...)
-@   3: 0x08021c14(0x200001ec, image 0x0803d734), 0x0800dd44(float 0x200050d0,
+@   3: 0x08021c14(0x200001ec, image 0x0803d734), 0x0800dd44(float 0x200050d0 = Q,
 @      ...)
 @   4: 0x08021c14(word 0x20000220, 0x08040a28), 0x08021c14(0x200001ec,
-@      0x0803d65c), then 0x0800dfc4(float 0x200050cc, ...)
+@      0x0803d65c), then 0x0800dfc4(float 0x200050cc = theta in degrees, ...)
 @ For the modes 0 and 1 the unit index [sp] = 4..7 selects the images 0x08036b24,
 @ 0x08036cd8, 0x08036e8c, 0x08037040 for the object 0x20000220 (word at r4+4).
 @ Then calls fn_0800d14c(1, text at sp+4) and, when the unit index is 0,
-@ 0x08023050(0x20000220, 1); otherwise, when the word 0x20001168 equals 1,
+@ 0x08023050(0x20000220, 1); otherwise, when the word 0x20001168 (screen state)
+@ equals 1,
 @ 0x08023558(0x20000220, 1).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800d294,"ax",%progbits
@@ -1441,14 +1448,15 @@ fn_0800d294:
 @ ----------------------------------------------------------------------------
 @ fn_0800d3d8 - no parameters. Updates the first display row (row 0).
 @ r4 = 0x2000021c (object of row 0). Zeroes the five stack words [sp+0..0x10].
-@ The switch is on the signed byte 0x200011e4 (0x2000057c+0xc68):
-@   4: 0x0800e028(float 0x200050c4, sp+4, sp+0xc, sp)
-@   1: 0x0800e028(float 0x200050b8, ...)
+@ The switch is on the signed byte 0x200011e4 (main row selector; 0x2000057c+0xc68):
+@   4: 0x0800e028(float 0x200050c4 = |Z|, sp+4, sp+0xc, sp)
+@   1: 0x0800e028(float 0x200050b8 = displayed R, ...)
 @      (for 1 and 4 the unit index [sp] = 4..7 selects the images 0x08036b24,
 @      0x08036cd8, 0x08036e8c, 0x08037040)
-@   2: 0x0800db24(float 0x200050bc, ...); unit index 1..4 selects the images
-@      0x080371f4, 0x080373a8, 0x0803756c, 0x08037720
-@   3: 0x0800de2c(float 0x200050c0, ...); unit index 3..5 selects the images
+@   2: 0x0800db24(float 0x200050bc = displayed C in nF, ...); unit index 1..4
+@      selects the images 0x080371f4, 0x080373a8, 0x0803756c, 0x08037720
+@   3: 0x0800de2c(float 0x200050c0 = displayed L in uH, ...); unit index 3..5
+@      selects the images
 @      0x080378d4, 0x08037a88, 0x08037c3c
 @ The chosen image is set on the object 0x2000021c with 0x08021c14, then
 @ fn_0800d14c(0, text at sp+4) is called, and 0x08023050(object, 1) when the

@@ -1681,14 +1681,14 @@ fn_08021168:
 	.byte	(.L08021184 - .L08021174)/2
 	.byte	(.L08021188 - .L08021174)/2
 	.byte	(.L08021184 - .L08021174)/2
-	.byte	0x0c
-	.byte	0x0e
-	.byte	0x10
-	.byte	0x12
-	.byte	0x0c
-	.byte	0x0e
-	.byte	0x10
-	.byte	0x12
+	.byte	(.L0802118c - .L08021174)/2
+	.byte	(.L08021190 - .L08021174)/2
+	.byte	(.L08021194 - .L08021174)/2
+	.byte	(.L08021198 - .L08021174)/2
+	.byte	(.L0802118c - .L08021174)/2
+	.byte	(.L08021190 - .L08021174)/2
+	.byte	(.L08021194 - .L08021174)/2
+	.byte	(.L08021198 - .L08021174)/2
 	.byte	0x00	@ padding
 .L08021184:
 	movs	r0, #0x10
@@ -1697,12 +1697,16 @@ fn_08021168:
 .L08021188:
 	movs	r0, #0x18
 	bx	lr
+.L0802118c:
 	movs	r0, #0x1
 	bx	lr
+.L08021190:
 	movs	r0, #0x2
 	bx	lr
+.L08021194:
 	movs	r0, #0x4
 	bx	lr
+.L08021198:
 	movs	r0, #0x8
 	bx	lr
 
@@ -1726,17 +1730,17 @@ fn_0802119c:
 .L080211aa:
 	.byte	(.L080211b8 - .L080211aa)/2
 	.byte	(.L080211ba - .L080211aa)/2
-	.byte	0x08
-	.byte	0x07
-	.byte	0x08
-	.byte	0x07
-	.byte	0x07
-	.byte	0x07
-	.byte	0x07
-	.byte	0x07
-	.byte	0x07
-	.byte	0x07
-	.byte	0x07
+	.byte	(.L080211ba - .L080211aa)/2
+	.byte	(.L080211b8 - .L080211aa)/2
+	.byte	(.L080211ba - .L080211aa)/2
+	.byte	(.L080211b8 - .L080211aa)/2
+	.byte	(.L080211b8 - .L080211aa)/2
+	.byte	(.L080211b8 - .L080211aa)/2
+	.byte	(.L080211b8 - .L080211aa)/2
+	.byte	(.L080211b8 - .L080211aa)/2
+	.byte	(.L080211b8 - .L080211aa)/2
+	.byte	(.L080211b8 - .L080211aa)/2
+	.byte	(.L080211b8 - .L080211aa)/2
 	.byte	0x00	@ padding
 .L080211b8:
 	movs	r0, #0x1

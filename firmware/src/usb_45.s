@@ -1539,8 +1539,9 @@ fn_0800adcc:
 
 @ ----------------------------------------------------------------------------
 @ fn_0800aea0 - r0 = index, r1 = flag. Reads the word at 0x40002000 + r0 * 4
-@ (0x40002000 is the OPAMP block of the N32G455 memory map), clears bit 0 when
-@ r1 is 0 and sets bit 0 otherwise, writes it back.
+@ (the datasheet memory map lists OPAMP at 0x40002000; the use of this word
+@ array is not established), clears bit 0 when r1 is 0 and sets bit 0 otherwise,
+@ writes it back.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800aea0,"ax",%progbits
 	.p2align 2
@@ -1566,8 +1567,9 @@ fn_0800aea0:
 
 @ ----------------------------------------------------------------------------
 @ fn_0800aec0 - r0 = index, r1 = pointer to 4 bytes; no return value.
-@ Reads the word w at 0x40002000 + r0 * 4 (OPAMP block) and keeps it in a
-@ stack slot [sp]. Clears bits 0x38 and ors byte 2 of r1. Byte 1 = 1 sets bit
+@ Reads the word w at 0x40002000 + r0 * 4 (the datasheet memory map lists
+@ OPAMP at 0x40002000; the use of this word array is not established) and
+@ keeps it in a stack slot [sp]. Clears bits 0x38 and ors byte 2 of r1. Byte 1 = 1 sets bit
 @ 0x8000, otherwise it is cleared. Byte 0 = 1 sets bit 0x10000, otherwise it is
 @ cleared. Clears bits 0x6, ors byte 3 and writes the word back to
 @ 0x40002000 + r0 * 4.
@@ -1617,8 +1619,10 @@ fn_0800aec0:
 	.word	0x40002000
 
 @ ----------------------------------------------------------------------------
-@ fn_0800af10 - r0 = index, r1 = bits. Word at 0x40002000 + r0 * 4 (OPAMP
-@ block) = (word & 0xffffff3f) | r1; the value is also kept in a stack slot.
+@ fn_0800af10 - r0 = index, r1 = bits. Word at 0x40002000 + r0 * 4 (the
+@ datasheet memory map lists OPAMP at 0x40002000; the use of this word array is
+@ not established) = (word & 0xffffff3f) | r1; the value is also kept in a
+@ stack slot.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800af10,"ax",%progbits
 	.p2align 2
@@ -1640,8 +1644,10 @@ fn_0800af10:
 	.word	0x40002000
 
 @ ----------------------------------------------------------------------------
-@ fn_0800af2c - r0 = index, r1 = bits. Word at 0x40002000 + r0 * 4 (OPAMP
-@ block) = (word & 0xfffff8ff) | r1; the value is also kept in a stack slot.
+@ fn_0800af2c - r0 = index, r1 = bits. Word at 0x40002000 + r0 * 4 (the
+@ datasheet memory map lists OPAMP at 0x40002000; the use of this word array is
+@ not established) = (word & 0xfffff8ff) | r1; the value is also kept in a
+@ stack slot.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800af2c,"ax",%progbits
 	.p2align 2

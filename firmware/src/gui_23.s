@@ -448,33 +448,33 @@ fn_08024d50:
 	ldrsh.w	r3, [sp, #0x0]
 	ldrsh.w	r0, [sp, #0x4]
 	cmp	r3, r0
-	bge	.L08024dc8
+	bge.n	.L08024dc8
 	mov	r5, r3
-	b	.L08024dca
+	b.n	.L08024dca
 .L08024dc8:
 	mov	r5, r0
 .L08024dca:
 	ldrsh.w	r1, [sp, #0x8]
 	ldrsh.w	r2, [sp, #0xc]
 	cmp	r1, r2
-	bge	.L08024dda
+	bge.n	.L08024dda
 	mov	r6, r1
-	b	.L08024ddc
+	b.n	.L08024ddc
 .L08024dda:
 	mov	r6, r2
 .L08024ddc:
 	cmp	r5, r6
-	bge	.L08024dec
+	bge.n	.L08024dec
 	cmp	r3, r0
-	bge	.L08024de8
+	bge.n	.L08024de8
 	mov	r2, r3
-	b	.L08024df2
+	b.n	.L08024df2
 .L08024de8:
 	mov	r2, r0
-	b	.L08024df2
+	b.n	.L08024df2
 .L08024dec:
 	cmp	r1, r2
-	bge	.L08024df2
+	bge.n	.L08024df2
 	mov	r2, r1
 .L08024df2:
 	strh	r2, [r4, #0x0]
@@ -482,33 +482,33 @@ fn_08024d50:
 	ldrsh.w	r3, [sp, #0x0]
 	ldrsh.w	r1, [sp, #0x4]
 	cmp	r3, r1
-	ble	.L08024e04
+	ble.n	.L08024e04
 	mov	r5, r3
-	b	.L08024e06
+	b.n	.L08024e06
 .L08024e04:
 	mov	r5, r1
 .L08024e06:
 	ldrsh.w	r0, [sp, #0x8]
 	ldrsh.w	r2, [sp, #0xc]
 	cmp	r0, r2
-	ble	.L08024e16
+	ble.n	.L08024e16
 	mov	r6, r0
-	b	.L08024e18
+	b.n	.L08024e18
 .L08024e16:
 	mov	r6, r2
 .L08024e18:
 	cmp	r5, r6
-	ble	.L08024e28
+	ble.n	.L08024e28
 	cmp	r3, r1
-	ble	.L08024e24
+	ble.n	.L08024e24
 	mov	r2, r3
-	b	.L08024e2e
+	b.n	.L08024e2e
 .L08024e24:
 	mov	r2, r1
-	b	.L08024e2e
+	b.n	.L08024e2e
 .L08024e28:
 	cmp	r0, r2
-	ble	.L08024e2e
+	ble.n	.L08024e2e
 	mov	r2, r0
 .L08024e2e:
 	strh	r2, [r4, #0x4]
@@ -516,33 +516,33 @@ fn_08024d50:
 	ldrsh.w	r3, [sp, #0x2]
 	ldrsh.w	r2, [sp, #0x6]
 	cmp	r3, r2
-	bge	.L08024e40
+	bge.n	.L08024e40
 	mov	r5, r3
-	b	.L08024e42
+	b.n	.L08024e42
 .L08024e40:
 	mov	r5, r2
 .L08024e42:
 	ldrsh.w	r1, [sp, #0xa]
 	ldrsh.w	r0, [sp, #0xe]
 	cmp	r1, r0
-	bge	.L08024e52
+	bge.n	.L08024e52
 	mov	r6, r1
-	b	.L08024e54
+	b.n	.L08024e54
 .L08024e52:
 	mov	r6, r0
 .L08024e54:
 	cmp	r5, r6
-	bge	.L08024e64
+	bge.n	.L08024e64
 	cmp	r3, r2
-	bge	.L08024e60
+	bge.n	.L08024e60
 	mov	r0, r3
-	b	.L08024e6a
+	b.n	.L08024e6a
 .L08024e60:
 	mov	r0, r2
-	b	.L08024e6a
+	b.n	.L08024e6a
 .L08024e64:
 	cmp	r1, r0
-	bge	.L08024e6a
+	bge.n	.L08024e6a
 	mov	r0, r1
 .L08024e6a:
 	strh	r0, [r4, #0x2]
@@ -550,33 +550,33 @@ fn_08024d50:
 	ldrsh.w	r3, [sp, #0x2]
 	ldrsh.w	r1, [sp, #0x6]
 	cmp	r3, r1
-	ble	.L08024e7c
+	ble.n	.L08024e7c
 	mov	r5, r3
-	b	.L08024e7e
+	b.n	.L08024e7e
 .L08024e7c:
 	mov	r5, r1
 .L08024e7e:
 	ldrsh.w	r0, [sp, #0xa]
 	ldrsh.w	r2, [sp, #0xe]
 	cmp	r0, r2
-	ble	.L08024e8e
+	ble.n	.L08024e8e
 	mov	r6, r0
-	b	.L08024e90
+	b.n	.L08024e90
 .L08024e8e:
 	mov	r6, r2
 .L08024e90:
 	cmp	r5, r6
-	ble	.L08024ea0
+	ble.n	.L08024ea0
 	cmp	r3, r1
-	ble	.L08024e9c
+	ble.n	.L08024e9c
 	mov	r0, r3
-	b	.L08024ea6
+	b.n	.L08024ea6
 .L08024e9c:
 	mov	r0, r1
-	b	.L08024ea6
+	b.n	.L08024ea6
 .L08024ea0:
 	cmp	r0, r2
-	bgt	.L08024ea6
+	bgt.n	.L08024ea6
 	mov	r0, r2
 .L08024ea6:
 	strh	r0, [r4, #0x6]

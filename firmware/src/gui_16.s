@@ -751,9 +751,9 @@ clear_sign_bit_64:
 	strd	r0, r1, [sp]
 	bic.w	r0, r1, #0x80000000
 	str	r0, [sp, #4]
-	.inst.w	0xed9d0b00			@ vldr.64 d0, [sp]
+	vldr	d0, [sp]
 	add	sp, #8
-	.inst.w	0xec510b10			@ vmov r0, r1, d0
+	vmov	r0, r1, d0
 	bx	lr
 	.short	0x0000				@ padding
 
