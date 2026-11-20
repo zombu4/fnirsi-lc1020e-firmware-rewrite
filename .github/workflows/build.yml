@@ -1,0 +1,42 @@
+# Build and test the SRAM dumper on every push and pull request.
+#
+#   Installs the Arm binutils, builds dumper/sram_dumper.bin, runs its emulator test (Unicorn)
+#   and attaches the binary to the run (Actions -> the run -> Artifacts).
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils-arm-none-eabi make python3 python3-venv
+          arm-none-eabi-as --version | head -1
+
+      - name: Build the dumper
+        run: make -C dumper
+
+      - name: Emulator test
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install unicorn
+          "$RUNNER_TEMP/venv/bin/python" -I dumper/test_sram_dumper.py dumper/sram_dumper.bin
+
+      - name: Python syntax
+        run: python3 -m py_compile dumper/check_dump.py dumper/test_sram_dumper.py tools/iap_raw.py tools/iap_write.py tools/make_restore.py
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sram_dumper
+          path: dumper/sram_dumper.bin

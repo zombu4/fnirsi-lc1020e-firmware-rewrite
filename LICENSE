@@ -1,0 +1,66 @@
+FNIRSI LC1020E Firmware Rewrite - Non-Commercial License
+
+Copyright (c) 2026 zombu4. All rights reserved except as granted below.
+
+1. Scope
+
+   "The Work" means the original contributions of the copyright holder in this repository: source
+   code, scripts, build files and documentation, including the SRAM dumper (`dumper/`), the SWD
+   scripts (`swd/`), the update-drive tools (`tools/`) and the guide. Content derived from the
+   vendor's firmware (see section 8) is not licensed by this document.
+
+2. Permitted use
+
+   Individuals may, free of charge, for personal, home, hobby, enthusiast, educational and research
+   purposes that are not commercial:
+
+   a) use the Work and install firmware built from it on devices they own;
+   b) study and modify the Work;
+   c) share the Work, modified or unmodified, free of charge, provided that this license and the
+      copyright notice are kept in full, modified files are marked as modified, and the source is
+      made available with any shared build.
+
+3. Not permitted without prior written authorization from the copyright holder
+
+   a) any use by or on behalf of a company, business, organization or government body, or any use
+      in connection with a commercial activity;
+   b) selling, reselling, renting or licensing the Work or any build of it, alone or as part of
+      anything else;
+   c) bundling, pre-installing or distributing the Work or any build of it with hardware, devices,
+      software products or services, whether paid or free;
+   d) offering flashing, installation or repair services that use the Work for payment;
+   e) removing or altering this license or the copyright notice;
+   f) using the Work, or parts of it, in another product, firmware or project that is not
+      distributed under this same license.
+
+   Authorization is valid only in writing from the copyright holder and only for the use it names.
+
+4. No warranty
+
+   THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+   LIMITED TO MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+
+5. Limitation of liability
+
+   IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGE OR OTHER LIABILITY ARISING
+   FROM THE WORK OR ITS USE, INCLUDING DAMAGE TO DEVICES, LOSS OF CALIBRATION OR DATA, OR INCORRECT
+   MEASUREMENTS. Flashing firmware or bootloaders, and removing the flash read protection (which
+   erases the whole flash), can make a device unusable; you do it at your own risk.
+
+6. Termination
+
+   Any use outside sections 2 and 3 ends all rights under this license automatically.
+
+7. Contributions
+
+   Contributions submitted to this repository are accepted under this license, and the contributor
+   grants the copyright holder the right to use them under any terms.
+
+8. Vendor-derived content
+
+   This project is not affiliated with or endorsed by FNIRSI. FNIRSI and the product names are
+   trademarks of their owners. This repository contains no code or data derived from the vendor's
+   firmware: it names vendor addresses (for example in the dumper's comments) as facts about the
+   meter, and it does not include the vendor application or bootloader images; you supply them
+   from your own meter and the vendor's download. Should vendor-derived content be added later, no
+   license for it is granted here and its use is at your own responsibility.

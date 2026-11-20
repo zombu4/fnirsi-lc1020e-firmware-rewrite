@@ -1,0 +1,9 @@
+build/
+dumps
+vendor
+dumper/sram_dumper.o
+dumper/sram_dumper.elf
+dumper/sram_dumper.bin
+__pycache__/
+.DS_Store
+.claude/
