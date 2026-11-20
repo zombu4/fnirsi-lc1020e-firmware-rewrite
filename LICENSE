@@ -59,8 +59,10 @@ Copyright (c) 2026 zombu4. All rights reserved except as granted below.
 8. Vendor-derived content
 
    This project is not affiliated with or endorsed by FNIRSI. FNIRSI and the product names are
-   trademarks of their owners. This repository contains no code or data derived from the vendor's
-   firmware: it names vendor addresses (for example in the dumper's comments) as facts about the
-   meter, and it does not include the vendor application or bootloader images; you supply them
-   from your own meter and the vendor's download. Should vendor-derived content be added later, no
-   license for it is granted here and its use is at your own responsibility.
+   trademarks of their owners. The bootloader port in `bootloader/` is written from the
+   disassembly of the vendor's bootloader and is derived from it; its three larger data blocks
+   (font bitmaps, a table, the packed initial RAM image) are not included and are extracted from
+   your own meter's flash (`make vendor-data`). The rest of the repository contains no code or
+   data derived from the vendor's firmware; it names vendor addresses as facts about the meter and
+   does not include the vendor application or bootloader images. No license for vendor-derived
+   content is granted here; its use is at your own responsibility.

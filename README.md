@@ -20,8 +20,11 @@ What exists now:
 | Update-drive installer | [`tools/`](tools/) | `iap_write.py` installs an image through the vendor bootloader's USB update drive (macOS), `make_restore.py` builds and checks the images `program.tcl` writes. |
 | Starter | [`starter/`](starter/) | First stage of the two-part bootloader, flash page 0 (1020 bytes). It holds the power latch, reads the control records and starts one of three bootloader slots (factory F, A, B): an installed slot is first recorded as on trial, a slot that never confirmed is replaced by the newest confirmed one, and slot F is the fallback. Every slot is checked (header, CRC-32 of the image, vector table) before it is started. The emulator test covers every record state, bad headers, a full record page and a power cut after every single flash operation. |
 
-What follows, in this order: the port of the vendor bootloader as the slot bootloader, the
-installation of the two-part bootloader, then the application.
+| Bootloader port | [`bootloader/`](bootloader/) | The vendor bootloader (USB update drive, flash programming, start of the application) in symbolic assembly, 208 functions in nine source files plus the vector table and the data, every function commented. Linked at 0x08000000 it reproduces the vendor bootloader byte for byte (`make check`); it is the base of the slot bootloader. Its three larger data blocks come from your own meter's flash: `make vendor-data DUMP=<your 0x08000000 dump>`. |
+
+What follows, in this order: the slot bootloader (the port changed for its slot: own update path,
+confirmation records, flash gate), the installation of the two-part bootloader, then the
+application.
 
 ## Start here
 
@@ -44,6 +47,7 @@ same on every push.
 
 ## Repository layout
 
+    bootloader/  port of the vendor bootloader: src/, link.ld, Makefile (vendor-data, check)
     dumper/   sram_dumper.s, Makefile, test_sram_dumper.py, check_dump.py
     starter/  starter.s, Makefile, test_starter.py
     swd/      OpenOCD scripts and the probe configuration
