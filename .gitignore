@@ -7,3 +7,5 @@ dumper/sram_dumper.bin
 __pycache__/
 .DS_Store
 .claude/
+**/assets/vendor/
+starter/build/
