@@ -223,7 +223,52 @@ It must print `read back identical` for all three images.
 The meter restarts into the vendor bootloader and the vendor application. The meter now stays at
 level 0: SWD can read and write its flash at any time.
 
-## 10. Recovery
+## 10. Install the two-part bootloader
+
+The starter goes into flash page 0, slots F and A of the bootloader and the first control record
+into 0x08068000..0x08074FFF. The settings page 0x0807F000 is never addressed.
+
+Build and test first (README, "Build and test", plus `make -C bootloader slot` and the tests in
+`tests/`), then, from the repository root:
+
+    python3 -I tools/make_install.py
+
+Expected: four lines, `STARTER.bin`, `BOOT_F.bin`, `BOOT_A.bin`, `record.bin`, each with its size
+and SHA-256. With the meter switched on:
+
+    cd swd
+    DAP_HOST=<probe-ip> DAP_PORT=4441 STAGE=slots openocd -f probe-cmsis-dap-tcp.cfg -f install_bootloader.tcl
+    cd .. && python3 -I tools/make_install.py --check
+
+`BOOT_F.bin`, `BOOT_A.bin` and `record.bin` must print `read back identical`; `STARTER.bin` prints
+`MISMATCH` until the next stage. Page 0 still holds the old start code, so a cut up to here changes
+nothing. Then:
+
+    cd swd
+    DAP_HOST=<probe-ip> DAP_PORT=4441 STAGE=starter openocd -f probe-cmsis-dap-tcp.cfg -f install_bootloader.tcl
+    cd .. && python3 -I tools/make_install.py --check
+
+All four must print `read back identical`. The scripts leave the core halted. Release it (debug
+registers DEMCR 0xE000EDFC = 0, DBG_CTRL 0xE0042004 = 0, DHCSR 0xE000EDF0 = 0xA05F0000) rather
+than resetting over SWD: a reset drops the power latch. Switch the meter off and on with the power
+key. On the first start the starter records slot A as on trial and the slot records it as
+confirmed before it starts the application; the application appears as usual.
+
+Check over SWD: VTOR 0xE000ED08 = 0x08006000 and, at 0x08068000, three records of slot A
+(word 0 `4C520101`, `4C520102`, `4C520103`). Only then remove the vendor bootloader, which the new
+chain never uses:
+
+    cd swd
+    DAP_HOST=<probe-ip> DAP_PORT=4441 STAGE=clean openocd -f probe-cmsis-dap-tcp.cfg -f install_bootloader.tcl
+
+It refuses unless page 0 holds the starter and the confirmation record exists, erases
+0x08000800..0x08005FFF and prints `0x08000800..0x08005FFF erased and read 0xFF`. Release the core
+again and switch the meter off and on. Your backup still holds the vendor bootloader.
+
+To update the application afterwards: hold the up key while switching on, the meter shows the
+update drive; convert the image with `tools/bin2uf2.py` and copy it with `tools/iap_write.py`.
+
+## 11. Recovery
 
 - **No SWD answer on the blank chip:** hold the power key and retry; the blank chip cannot latch
   its own power.

@@ -374,11 +374,12 @@ scan_records:
 
 @ ---- append_record: r0 = slot, r1 = state, r2 = version ----
 @ Writes the next record after the last used cell of the page holding the newest record; when that
-@ page has no free cell, erases the other page and writes the record as its first cell. Called
-@ only when a record exists (TAB has a cell address).
+@ page has no free cell, erases the other page and writes the record as its first cell. The cell
+@ is read back; when it differs, the record is written again in the next free cell (three
+@ attempts in all). Called only when a record exists (TAB has a cell address).
         .thumb_func
 append_record:
-        push    {r4, r5, r6, r7, lr}
+        push    {r4, r5, r6, r7, r8, lr}
         ldr     r4, =CELL
         movw    r3, #REC_TAG
         orr     r3, r1, r3, lsl #16
@@ -408,7 +409,9 @@ append_record:
         @ page of the newest record; free cell above its last used cell
         bic     r6, r6, #0x7F0
         bic     r6, r6, #0xF            @ r6 = page base
-        mov     r5, r6                  @ r5 = first cell above the last used one
+        mov     r8, #3                  @ write attempts; a cell that fails its read-back
+                                        @ stays used (not all 0xFF) and fails its CRC
+60:     mov     r5, r6                  @ r5 = first cell above the last used one
         mov     r7, r6                  @ r7 = cell being looked at
 17:     ldm     r7, {r0, r1, r2, r3}
         and     r0, r0, r1
@@ -443,7 +446,19 @@ append_record:
         ldr     r0, =FLASH_CTRL
         movs    r1, #0x80
         str     r1, [r0]
-        pop     {r4, r5, r6, r7, pc}
+        @ read back the cell; on a difference write the record again in the next free cell
+        movs    r7, #0
+61:     ldr     r0, [r5, r7]
+        ldr     r1, [r4, r7]
+        cmp     r0, r1
+        bne     62f
+        adds    r7, r7, #4
+        cmp     r7, #16
+        blo     61b
+        b       63f
+62:     subs    r8, r8, #1
+        bne     60b
+63:     pop     {r4, r5, r6, r7, r8, pc}
 
 @ ---- flash primitives; every address outside REC0..REC_END is refused ----
         .thumb_func
@@ -508,6 +523,11 @@ flash_word:
         movs    r1, #0x01
         str     r1, [r0]
         str     r5, [r4]
+        nop                             @ five NOPs after the store: no flash read while
+        nop                             @ the word programs (N32G45x user manual 3.2.1.4.2)
+        nop
+        nop
+        nop
         bl      flash_wait
         ldr     r0, =FLASH_CTRL
         movs    r1, #0x00

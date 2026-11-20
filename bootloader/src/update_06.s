@@ -479,6 +479,13 @@ fn_08000eb4:
 	orr.w	r0, r0, #1		@ PG
 	str	r0, [r4, #0x10]
 	str	r6, [r5, #0]		@ program the word
+.ifdef SLOT
+	nop				@ slot build: five NOPs after the store, no flash read
+	nop				@ while the word programs (N32G45x user manual
+	nop				@ 3.2.1.4.2)
+	nop
+	nop
+.endif
 	mov	r0, r7
 	bl	fn_08000f14
 	ldr	r1, [r4, #0x10]

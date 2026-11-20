@@ -289,6 +289,22 @@ def c11_slot_fault_sets_flag_next_start_slot_f():
     return True
 
 
+@case
+def c12_failed_record_word_written_again_in_next_cell():
+    # one word of the TRIAL cell (starter) and one of the OK cell (slot) do not program as stored,
+    # as the version word of the OK cell on a meter on 2026-11-20: each record is read back and
+    # written again in the next free cell
+    m = Meter(records=[(REC0, cell(1, ST_INSTALL, 1))], app=app_stub())
+    m.stuck[REC0 + 0x14] = 0x100
+    m.stuck[REC0 + 0x34] = 0x100
+    m.boot()
+    clean(m, 'start')
+    app_reached(m, 'start')
+    check(recs(m) == [(1, ST_INSTALL, 1), (1, ST_TRIAL, 2), (1, ST_OK, 3)], 'records %r' % recs(m))
+    check([r[0] for r in m.records()] == [REC0, REC0 + 32, REC0 + 64], 'cells %r' % m.records())
+    return True
+
+
 def main():
     bad = 0
     for fn in CASES:
