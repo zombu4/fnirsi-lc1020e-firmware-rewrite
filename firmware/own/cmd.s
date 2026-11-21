@@ -2717,7 +2717,9 @@ cmd_table:
 	.word	h_boot_status
 	.short	0xFFFF, 0
 
-@ battery icon thresholds 3.4, 3.6, 3.8, 4.0 V (0x0800C724, signed compares of the bits)
+@ battery icon thresholds 3.4, 3.6, 3.8, 4.0 V (0x0800C724, signed compares of the bits); also
+@ read by power.s batt_level
+	.global	tab_batt
 tab_batt:
 	.word	0x4059999A, 0x40666666, 0x40733333, 0x40800000
 

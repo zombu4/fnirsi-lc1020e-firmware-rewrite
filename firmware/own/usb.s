@@ -60,7 +60,7 @@
 @ Exports. Calling convention: AAPCS; r0..r3, r12 and the flags clobbered, r4..r11 kept, no FPU
 @ register used.
 @   usb_start() -> r0 = 0 started (or already started), 1 not started (system clock is not the
-@     PLL). Every call before the device is up clears OWN_USB. Main context, once, from own_start. Stack 16 bytes
+@     PLL). Every call before the device is up clears OWN_USB. Main context, once, from ctl_loop's first pass. Stack 16 bytes
 @     plus 16 (helpers).
 @   usb_irq20_handler - vector word 36 (IRQ 20). Stack 16 bytes plus at most 16 (helpers), not
 @     counting the exception frame.

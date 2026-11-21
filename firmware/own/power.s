@@ -38,7 +38,11 @@
 @       0): 0x20005118 = 0 and the popup removed as 0x0800C7D8..0x0800C7E8 (0x08023690 of the
 @       objects 0x20000290 and 0x20000294), each only while it still exists (below);
 @   (c) Off Time 1 / 2 / 3 (other values: never) and the idle time at 5 / 15 / 30 min: the
-@       power-off is requested.
+@       power-off is requested. Before (c), after (b): the battery icon (F8, pwr_icon_step):
+@       0x0800C724 sets the icon's picture only when a screen is built, so while the icon exists
+@       (PF_ICON, set by own_batt_icon at fn_0800c848, cleared by pwr_obj_del when it or an
+@       ancestor is deleted) every 30 s its level is worked out again and the picture changed
+@       only when the level differs (owner, 2026-11-21: 30 s, not every second).
 @   A requested power-off is final: it is started with ctl.s power_path (event 0xFE with mask 1
 @   and the guard off, the path of POWER_OFF: 0x08009452 save through own_save, beep, 0x0800B274
 @   PA8 low; on USB power off_step's powered-off mode), again once a second while it has not
@@ -84,7 +88,8 @@
 	.equ	PW_LIVE,	0x10		@ PL_* bits: popup objects that exist
 	.equ	PW_REASON,	0x14		@ why the power-off was requested: RS_*
 	.equ	PW_STARTS,	0x18		@ number of power_path calls
-	.equ	PW_END,		0x1C
+	.equ	PW_ICON_T,	0x1C		@ tick of the last battery icon check (F8)
+	.equ	PW_END,		0x20
 
 	.if	PW_END > PWR_SIZE
 	.error	"power.s: its RAM does not fit O_PWR"
@@ -92,6 +97,9 @@
 
 	.equ	PF_PRIMED,	0x01		@ first pass done (ticks taken)
 	.equ	PF_REQ,		0x02		@ power-off requested
+	.equ	PF_ICON,	0x100		@ the battery icon object 0x2000028C exists (F8)
+	.equ	PF_LVL_SHIFT,	9		@ bits 9..11: the level the icon shows, 0..4
+	.equ	PF_LVL_MASK,	0xE00
 	.equ	PL_BG,		0x01		@ 0x20000290 exists
 	.equ	PL_PANEL,	0x02		@ 0x20000294 exists
 	.equ	PL_TRACK,	0x80		@ the popup is tracked
@@ -101,6 +109,7 @@
 	.equ	RS_LOWV,	2		@ low-voltage countdown at 0
 
 	.equ	SEC_MS,		1000		@ the once-a-second period, GUI tick ms
+	.equ	ICON_MS,	30000		@ the battery icon period (owner, 2026-11-21)
 	.equ	LOWV_FLOOR,	0x404CCCCD	@ 3.2f (0x0800C7FC, literal of 0x0800C724)
 	.equ	LOWV_COUNT,	10		@ start of the countdown (0x0800C7B8)
 	.equ	LR_VENDOR_DEL,	0x0800C7E3	@ return address of the bl fn_08023690 at 0x0800C7DE
@@ -233,8 +242,9 @@ pwr_step:
 	cmp	r8, #0
 	beq	.Lps_idle
 	bl	pwr_popup_off
-@ (c) Off Time
+@ (c) Off Time; before it the battery icon (F8, every 30 s)
 .Lps_idle:
+	bl	pwr_icon_step
 	ldr	r0, =V_OFFTIME
 	ldr	r0, [r0]
 	subs	r0, r0, #1		@ 1..3 -> 0..2; 0 (off) wraps above 2
@@ -361,8 +371,123 @@ pwr_obj_del:
 	bic	r2, r2, #PL_PANEL
 .Lpd_store:
 	str	r2, [r1, #PW_LIVE]
-.Lpd_out:
+.Lpd_out:				@ every exit that carries out the deletion (r1 = OWN_PWR)
+	ldr	r2, [r1, #PW_FLAGS]
+	tst	r2, #PF_ICON
+	beq	.Lpd_done
+	ldr	r12, =V_POPUP_OBJS
+	ldr	r12, [r12]		@ the battery icon
+.Lpd_icon_up:
+	cmp	r12, #0
+	beq	.Lpd_done
+	cmp	r12, r0
+	beq	.Lpd_icon_gone
+	ldr	r12, [r12, #4]		@ its parent
+	b	.Lpd_icon_up
+.Lpd_icon_gone:
+	bic	r2, r2, #PF_ICON	@ goes away with r0
+	str	r2, [r1, #PW_FLAGS]
+.Lpd_done:
 	movs	r12, #0			@ carry out the deletion
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ own_batt_icon - replaces the tail call `b.w fn_0800c724` of fn_0800c848 (ui_41.s, .ifdef OWN):
+@   fn_0800c848 has just made the battery icon object 0x2000028C (on a build of the measure
+@   screen or of the first screen). fn_0800c724 runs as before (voltage refreshed, the icon
+@   picture of its level, the low-voltage popup); then the icon is marked as existing (PF_ICON)
+@   with the level it shows (from 0x20005100 as fn_0800c724 left it, batt_level: the same
+@   compares), and the 30 s period of pwr_icon_step starts now. Returns fn_0800c724's r0.
+@ ----------------------------------------------------------------------------
+	.global	own_batt_icon
+	.thumb_func
+	.type	own_batt_icon, %function
+own_batt_icon:
+	push	{r4, r5, r6, lr}
+	bl	fn_0800c724
+	mov	r5, r0			@ its result
+	ldr	r0, =V_SUPPLY
+	ldr	r0, [r0]
+	bl	batt_level
+	ldr	r4, =OWN_PWR
+	ldr	r1, [r4, #PW_FLAGS]
+	bic	r1, r1, #(PF_ICON | PF_LVL_MASK)
+	orr	r1, r1, r0, lsl #PF_LVL_SHIFT
+	orr	r1, r1, #PF_ICON
+	str	r1, [r4, #PW_FLAGS]
+	bl	now
+	str	r0, [r4, #PW_ICON_T]
+	mov	r0, r5
+	pop	{r4, r5, r6, pc}
+
+@ ----------------------------------------------------------------------------
+@ pwr_icon_step - from pwr_step's once-a-second step (b), after the voltage refresh: while the
+@   icon exists (PF_ICON), every 30 s (since(PW_ICON_T) >= 30000; the next point 30 s on, or
+@   now when 60 s or more have passed) the level is worked out from 0x20005100 (batt_level);
+@   only when it differs from the level shown, the icon gets the picture of the new level
+@   (fn_08021c14(object, picture), as fn_0800c724 at 0x0800C786; it invalidates the old and the
+@   new area itself) and the shown level is stored. pwr_step and the GUI's timer walk both run
+@   in the main loop, so this never meets a half-done GUI call. AAPCS.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	pwr_icon_step, %function
+pwr_icon_step:
+	push	{r4, lr}
+	ldr	r4, =OWN_PWR
+	ldr	r0, [r4, #PW_FLAGS]
+	tst	r0, #PF_ICON
+	beq	.Lpi_out		@ no icon on this screen
+	ldr	r0, [r4, #PW_ICON_T]
+	bl	since
+	movw	r1, #ICON_MS
+	cmp	r0, r1
+	blo	.Lpi_out
+	ldr	r2, [r4, #PW_ICON_T]
+	add	r2, r2, r1		@ next point of the 30 s grid
+	cmp	r0, r1, lsl #1
+	blo	.Lpi_grid
+	bl	now			@ 60 s or more: the grid restarts now
+	mov	r2, r0
+.Lpi_grid:
+	str	r2, [r4, #PW_ICON_T]
+	ldr	r0, =V_SUPPLY
+	ldr	r0, [r0]
+	bl	batt_level
+	ldr	r1, [r4, #PW_FLAGS]
+	ubfx	r2, r1, #PF_LVL_SHIFT, #3
+	cmp	r0, r2
+	beq	.Lpi_out		@ the icon shows this level already
+	bic	r1, r1, #PF_LVL_MASK
+	orr	r1, r1, r0, lsl #PF_LVL_SHIFT
+	str	r1, [r4, #PW_FLAGS]
+	ldr	r1, =pwr_icon_pics
+	ldr	r1, [r1, r0, lsl #2]	@ picture of the level
+	ldr	r0, =V_POPUP_OBJS
+	ldr	r0, [r0]		@ the icon object
+	bl	fn_08021c14
+.Lpi_out:
+	pop	{r4, pc}
+
+@ ----------------------------------------------------------------------------
+@ batt_level - r0 = supply voltage float bits (0x20005100) -> r0 = icon level 0..4: the number
+@   of the thresholds 3.4, 3.6, 3.8, 4.0 V (cmd.s tab_batt) the value is above, compared as
+@   signed integers as 0x0800C724 does. Uses r1, r2, r12.
+@ ----------------------------------------------------------------------------
+	.global	batt_level
+	.thumb_func
+	.type	batt_level, %function
+batt_level:
+	ldr	r1, =tab_batt
+	movs	r2, #0
+.Lbl_next:
+	ldr	r12, [r1, r2, lsl #2]
+	cmp	r0, r12
+	ble	.Lbl_done
+	adds	r2, r2, #1
+	cmp	r2, #4
+	blo	.Lbl_next
+.Lbl_done:
+	mov	r0, r2
 	bx	lr
 
 	.ltorg
@@ -372,3 +497,7 @@ pwr_obj_del:
 @ Off Time limits in ms for the settings 1, 2, 3 (texts "5min / 15min / 30min", T_OFFTIME)
 pwr_off_ms:
 	.word	5 * 60000, 15 * 60000, 30 * 60000
+@ battery icon pictures of the levels 0..4, as 0x0800C724 picks them (app_02.s, descriptors in
+@ rodata_02.s)
+pwr_icon_pics:
+	.word	d_08044440, d_0804459c, d_080446e8, d_08044844, d_08044990

@@ -268,7 +268,41 @@ again and switch the meter off and on. Your backup still holds the vendor bootlo
 To update the application afterwards: hold the up key while switching on, the meter shows the
 update drive; convert the image with `tools/bin2uf2.py` and copy it with `tools/iap_write.py`.
 
-## 11. Recovery
+## 11. Slot bootloader version 2 and our application
+
+Our application needs slot bootloader version 2 (it keeps the meter on over a restart and serves
+the update request of the control channel). On a meter with the version-1 slots of section 10:
+
+    make -C bootloader slot
+    python3 -I tools/make_install.py --stage slot_a
+    cd swd
+    DAP_HOST=<probe-ip> DAP_PORT=4441 STAGE=slot_a openocd -f probe-cmsis-dap-tcp.cfg -f install_bootloader.tcl
+    cd .. && python3 -I tools/make_install.py --check --stage slot_a
+
+Expected: `BOOT_A.bin ... version 2 read back identical` and `newest INSTALL slot 1 version 2 ...
+INSTALL A as written`. Release the core as in section 10 and switch the meter off and on. At
+0x08068000 three more records of slot A follow the earlier ones (word 1 = 2, the version). Slot F,
+the fallback, follows only now:
+
+    python3 -I tools/make_install.py --stage slot_f
+    cd swd
+    DAP_HOST=<probe-ip> DAP_PORT=4441 STAGE=slot_f openocd -f probe-cmsis-dap-tcp.cfg -f install_bootloader.tcl
+    cd .. && python3 -I tools/make_install.py --check --stage slot_f
+
+`BOOT_F.bin ... read back identical`; release the core.
+
+Our application: `make -C firmware own` builds `firmware/build/own/APP_OWN.uf2`. Switch the meter
+off, hold the up key and switch it on until the drive `LC1020E-IAP` appears, then
+
+    python3 -I tools/iap_write.py firmware/build/own/APP_OWN.uf2
+
+The bootloader writes the application's vector page last and restarts into it. The meter appears as
+a USB serial device (19F5:1020, "LC1020E"); `python3 -I tools/lc1020e.py info` names slot A and slot
+bootloader version 2. Later updates need no key: `python3 -I tools/lc1020e.py update
+firmware/build/own/APP_OWN.uf2 --yes` puts the meter into update mode, copies the file and checks
+the result (PROTOCOL.md section 13).
+
+## 12. Recovery
 
 - **No SWD answer on the blank chip:** hold the power key and retry; the blank chip cannot latch
   its own power.

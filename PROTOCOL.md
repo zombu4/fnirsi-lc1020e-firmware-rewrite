@@ -28,6 +28,9 @@ All multi-byte numbers are little-endian. `u8`, `u16`, `u32` are unsigned intege
   an unplug DTR stays set until the next bus reset.
 - The control channel exists whenever our application runs and USB is connected; no menu setting
   is involved. The meter keeps working normally while no host is connected.
+- The device appears on the bus at the first pass of the meter's main loop, when requests are
+  served: the port is there only once the meter can answer (measured on a meter: back 4.1 s
+  after a RESET, the first INFO answered at once).
 - Flow control: the meter receives into a 1 KiB buffer; while it holds fewer than 64 free bytes the
   OUT endpoint answers NAK, so nothing sent by the host is lost. It sends from an 8 KiB buffer.
 
@@ -621,6 +624,11 @@ Other offsets of the block are reported as they change; their meaning is not spe
   a screenshot capture runs. A frame without room in the send buffer is dropped and counted.
 - A new result is detected each main-loop pass: the meter's new-result flag 0x20001200 was set in
   the previous pass and is 0 now, or \|Z\| or theta changed.
+- Timing (measured on a meter, STATE stream at 20 ms, time field of the records): steady on one
+  screen, every gap is the period (750 of 750 in 15 s). A screen change redraws the whole screen;
+  the streams are also served from each display flush of the redraw, so a gap then is at most 90 ms
+  (20 screen changes, 1659 records), and the next record follows sooner to keep the period on
+  average. A host should allow 100 ms plus the period between two records.
 
 ## 12. Screenshot
 

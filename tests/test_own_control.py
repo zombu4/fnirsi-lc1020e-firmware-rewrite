@@ -3,8 +3,11 @@
 
 Usage (from the repository root, after `make -C starter`, `make -C bootloader slot` and
 `make -C firmware own`):
-    <python with unicorn 2.1.4> tests/test_own_control.py [case-name-prefix ...] [--state NAME] [--key BIT]
---state / --key narrow k30 (the guard sweep: every key x short / hold x every state, the costly case)
+    <python with unicorn 2.1.4> tests/test_own_control.py [case-name-prefix ...] [--state NAME] [--key BIT] [--hold 0|1100] [--fresh]
+--state / --key / --hold narrow k30 (the guard sweep: every key x short / hold x every state, the costly case);
+k30 builds and navigates one rig per state, snapshots the whole machine (class Snapshot) and restores it
+before every key run; --fresh builds a new rig from power-on for every run instead (the slow reference).
+k30 prints one 'k30rec' line per run (state, bit, hold, answer status, refused, check values) in both modes.
 to one state and / or one key bit.
 
 Specification: USB_CONTROL_DESIGN.md revision 4 (section 9 decisions override the older text; section 7
@@ -38,9 +41,14 @@ first-start flag and the language word at 1, so screen 0 (the language chooser) 
 the settings menu shows the vendor items 0, 2, 3, 4, 5, 6 (own_menu).
 """
 
+import collections
+import functools
 import os
+import random
 import struct
 import sys
+import time
+import types
 import zlib
 
 from unicorn import UC_HOOK_MEM_WRITE, UC_HOOK_CODE
@@ -53,7 +61,7 @@ from usb_host import UsbDevice, UsbHost, UsbError, FR_STREAM, FR_EVENT, FR_ANSWE
 
 CASES = []
 NOTES = []
-OPTS = {'state': None, 'key': None}
+OPTS = {'state': None, 'key': None, 'hold': None, 'fresh': False}
 
 # ---- own.inc / ctl.inc / cmd.s ----
 V_BLOCK, BLK = 0x2000057C, 0xC14
@@ -275,6 +283,147 @@ def host_timeout(cmd, payload=b''):
     return _HOST.TIMEOUT.get(cmd, _HOST.T_FAST)
 
 
+# ---------------------------------------------------------------- whole-machine snapshot (k30)
+
+class Snapshot:
+    """A complete copy of the emulated machine reachable from `roots` (the Ctl rig): the unicorn CPU
+    context, the bytes of every RAM-like region, and a shallow copy of the contents of every mutable
+    Python object reachable from the roots (instance dicts, dict, list, set, bytearray, deque, Random,
+    closure cells of every function reachable, including the callbacks unicorn holds). restore()
+    writes each saved content back INTO THE SAME OBJECT, so every closure and unicorn hook keeps
+    pointing at live state; objects created after the snapshot are simply dropped. verify() compares
+    the live state with the saved one and returns the list of differences (empty when restored)."""
+
+    RAM_REGIONS = ((0x20000000, 0x24000), (0x60000000, 0x40000), (0xA0000000, 0x1000), (RET, 0x1000),
+                   (SYSMEM, 0x10000))          # the regions that are plain memory, not MMIO or code flash
+    ATOMS = (int, float, complex, str, bytes, bool, type(None), range, type, type(os), type(len))
+
+    def __init__(self, rig):
+        self.rig = rig
+        self.uc = rig.m.uc
+        self.objs = []                    # (object, kind, saved contents), in discovery order
+        self.seen = set()
+        self.keep = []
+        for r in (rig, self.uc._callbacks, self.uc._mmio_callbacks):
+            self._walk(r)
+        self.ctx = self.uc.context_save()
+        self.mem = [(lo, bytes(self.uc.mem_read(lo, n))) for lo, n in self.RAM_REGIONS]
+
+    def _walk(self, root):
+        todo = [root]
+        while todo:
+            o = todo.pop()
+            if isinstance(o, self.ATOMS) or id(o) in self.seen or o is self.uc:
+                continue
+            self.seen.add(id(o))
+            self.keep.append(o)
+            kids = self._record(o)
+            todo.extend(kids)
+
+    def _record(self, o):
+        """Record o's contents when it is a mutable container; return the objects it refers to."""
+        if isinstance(o, dict):
+            self.objs.append((o, 'dict', dict(o)))
+            return list(o.keys()) + list(o.values())
+        if isinstance(o, list):
+            self.objs.append((o, 'list', list(o)))
+            return list(o)
+        if isinstance(o, set):
+            self.objs.append((o, 'set', set(o)))
+            return list(o)
+        if isinstance(o, bytearray):
+            self.objs.append((o, 'bytearray', bytes(o)))
+            return []
+        if isinstance(o, collections.deque):
+            self.objs.append((o, 'deque', list(o)))
+            return list(o)
+        if isinstance(o, random.Random):
+            self.objs.append((o, 'random', o.getstate()))
+            return []
+        if isinstance(o, (tuple, frozenset)):
+            return list(o)
+        if isinstance(o, types.CellType):
+            try:
+                v = o.cell_contents
+            except ValueError:
+                self.objs.append((o, 'cell', _EMPTY))
+                return []
+            self.objs.append((o, 'cell', v))
+            return [v]
+        if isinstance(o, types.FunctionType):
+            kids = list(o.__closure__ or ())
+            kids += list(o.__defaults__ or ()) + list((o.__kwdefaults__ or {}).values())
+            return kids
+        if isinstance(o, types.MethodType):
+            return [o.__self__, o.__func__]
+        if isinstance(o, (types.ModuleType, types.BuiltinFunctionType)):
+            return []
+        if isinstance(o, functools.partial):
+            return [o.func] + list(o.args) + list((o.keywords or {}).values())
+        if hasattr(o, '__dict__') and not hasattr(o, '__slots__'):
+            d = o.__dict__
+            self.objs.append((o, 'obj', dict(d)))
+            return list(d.values())
+        raise TypeError('snapshot: no rule for %s object %r' % (type(o).__name__, o))
+
+    def restore(self):
+        self.uc.context_restore(self.ctx)
+        for lo, data in self.mem:
+            self.uc.mem_write(lo, data)
+        for o, kind, saved in self.objs:
+            if kind == 'dict':
+                o.clear()
+                o.update(saved)
+            elif kind == 'obj':
+                o.__dict__.clear()
+                o.__dict__.update(saved)
+            elif kind == 'list':
+                o[:] = saved
+            elif kind == 'set':
+                o.clear()
+                o.update(saved)
+            elif kind == 'bytearray':
+                o[:] = saved
+            elif kind == 'deque':
+                o.clear()
+                o.extend(saved)
+            elif kind == 'random':
+                o.setstate(saved)
+            elif kind == 'cell' and saved is not _EMPTY:
+                o.cell_contents = saved
+
+    def verify(self):
+        """Differences between the live state and the snapshot (after restore() this is empty)."""
+        bad = []
+        for lo, data in self.mem:
+            if bytes(self.uc.mem_read(lo, len(data))) != data:
+                bad.append('memory 0x%08X' % lo)
+        for o, kind, saved in self.objs:
+            if kind in ('dict', 'obj'):
+                cur = o if kind == 'dict' else o.__dict__
+                same = list(cur) == list(saved) and all(cur[k] is saved[k] or cur[k] == saved[k] for k in saved)
+            elif kind == 'cell':
+                try:
+                    same = saved is not _EMPTY and o.cell_contents is saved
+                except ValueError:
+                    same = saved is _EMPTY
+            elif kind == 'random':
+                same = o.getstate() == saved
+            elif kind == 'bytearray':
+                same = bytes(o) == saved
+            else:
+                same = (list(o) if kind in ('list', 'deque') else set(o)) == saved
+            if not same:
+                bad.append('%s %s' % (kind, type(o).__name__))
+        again = Snapshot(self.rig)
+        if {id(x) for x in again.keep} != self.seen:
+            bad.append('reachable object set changed')
+        return bad
+
+
+_EMPTY = object()
+
+
 class Ctl:
     """Our build in mode 'app' with timing, KeyPad, UsbDevice and UsbHost.
     chain: start through starter and slot (records as given) instead of the reset vector."""
@@ -410,7 +559,14 @@ def stretch_in(m, t0, t1):
 
 @case
 def k01_enumeration_and_descriptors():
-    rig = Ctl().up()
+    """Also: USB is started by ctl_loop's first pass, not before (the port appears only when
+    requests are served; on a meter the start-up before the main loop took 2 s)."""
+    rig = Ctl()
+    rig.m.watch(rig.s['usb_start'], 'usb_start')
+    rig.m.watch(rig.s['ctl_loop'], 'ctl_loop')
+    rig.up()
+    ev = [e for e in rig.m.events() if e in ('usb_start', 'ctl_loop')]
+    check(ev[:2] == ['ctl_loop', 'usb_start'], 'start order %r' % ev[:4])
     info = rig.info
     d = info['device']
     check(d['bcdUSB'] == 0x0200 and d['cls'] == 0x02 and d['subclass'] == 0 and d['protocol'] == 0,
@@ -782,8 +938,13 @@ def k12_state_and_measure_stream_framing():
     check(18 <= len(st) <= 21, '%d STATE stream frames in 1 s at 50 ms' % len(st))
     check(all(len(f['payload']) == STATE_SIZE for f in st), 'STATE stream payload sizes')
     times = [struct.unpack_from('<I', f['payload'], 28)[0] for f in st]
-    gaps = [b - a for a, b in zip(times, times[1:])]
-    check(all(45 <= g <= 70 for g in gaps), 'STATE stream time gaps %r' % gaps)
+    # stream_step keeps the period grid (ctl.s: the next point is the last one + the period, so a
+    # late record is followed by a sooner one and the average rate is kept; PROTOCOL.md section 11):
+    # every record lies on its grid point, at most 20 ms (two GUI ticks) after it
+    base = min(t - 50 * i for i, t in enumerate(times))
+    late = [t - 50 * i - base for i, t in enumerate(times)]
+    check(all(0 <= d <= 20 for d in late), 'STATE stream records behind the 50 ms grid by %r ms (times %r)'
+          % (late, times))
     running = [f for f in frames if f['type'] in (FR_STREAM, FR_EVENT)]
     seqs = [f['seq'] for f in running]
     check(all((b - a) & 0xFF == 1 for a, b in zip(seqs, seqs[1:])), 'stream / event seq not consecutive %r' % seqs)
@@ -1083,14 +1244,13 @@ class HseFails:
 @case
 def k19_hse_failure_no_usb_start():
     """fn_0800ba4c: HSE not ready after 0x8000 polls -> the branch 0x0800BAF8, no PLL, the core
-    stays on the HSI (8 MHz); usb_start (called by own_start) then returns 1 (SCLKSTS is not the
-    PLL): no USBEN, no pull-up. Run from the reset vector to the end of the start (3 s at most).
+    stays on the HSI (8 MHz). Our build latches the power at once (own_pa8_level: PA8 high while
+    SCLKSTS is not the PLL, VENDOR_FIXES_DESIGN.md F4) and ends in xtal_fault (k33), so ctl_loop,
+    which starts USB, is never reached: no USBEN, no pull-up over 3 s from the reset vector, PA8
+    high. Then usb_start is called directly in that HSI state: it returns 1 (SCLKSTS is not the
+    PLL) and starts nothing.
     Not checked: the word 0x200002B0 (fn_0800ba4c stores 8000000 at 0x0800BAFE before the
-    scatter-load __decompress / zero fill at 0x08007974 / 0x0800799A rewrite it to 144000000) and
-    the main loop (the vendor main loop's first pass, from 0x080281CC, runs 12.5 million
-    instructions without an IWDG feed at 144 MHz; at 8 MHz and one cycle per instruction the IWDG
-    reset came with no feed after it 0.667 s later at LSI 60 kHz and 1.334 s later at 30 kHz, so
-    the IWDG resets the meter in that pass at every LSI of 30..60 kHz)."""
+    scatter-load __decompress / zero fill at 0x08007974 / 0x0800799A rewrite it to 144000000)."""
     # cycles per instruction 1: meter_model counts 1 + FLASH_AC LATENCY cycles per instruction; on
     # this path LATENCY keeps its reset value 0 (manual 3.2.5.2.1, reset 0x00000030; fn_0800c274
     # only ors 0x90, the LATENCY write of fn_0800ba4c is on the HSE-ready path)
@@ -1100,7 +1260,13 @@ def k19_hse_failure_no_usb_start():
     m.watch(rig.s['usb_start'], 'usb_start')
     end = m.run_for(3.0)
     NOTES.append('k19: end %r at %.3f s' % (end, m.now()))
-    check('hse fallback' in m.events() and 'usb_start' in m.events(), 'events %r' % m.events())
+    check('hse fallback' in m.events(), 'events %r' % m.events())
+    check('usb_start' not in m.events(), 'usb_start reached on the HSE-failure path: %r' % m.events())
+    pa8 = [e[1] for e in m.st['log'] if e[0] == 'pa8']    # V1.1: 0 at 0x08008210, 1 only after the wait
+    check(pa8 and 0 not in pa8 and m.st['pa8'] == 1, 'PA8 levels driven %r, now %r' % (pa8, m.st['pa8']))
+    check(m.st['regs'].get(0x40021004, 0) & 3 != 2, 'system clock switched to the PLL')  # SWS = SW in the model
+    r = m.call(rig.s['usb_start'])
+    check(r == 1, 'usb_start on the HSI returned %r (end %r)' % (r, m.st['end']))
     check(not m.st['regs'].get(0x4002101C, 0) & (1 << 23), 'USBEN set')
     check(not dev.pullup and not [x for x in dev.log if x[0] in ('usben', 'pullup')], 'USB started: %r' % dev.log)
     check(rig.rd8(OWN_USB + UO_STARTED) == 0, 'UO_STARTED set')
@@ -1496,21 +1662,41 @@ def k30_guard_every_key_every_state():
     moment."""
     states = [s for s in STATES if OPTS['state'] in (None, s[0])]
     bits = [b for b in range(14) if OPTS['key'] in (None, b)]
+    holds = [h for h in (0, 1100) if OPTS['hold'] in (None, h)]
     count, refused = 0, 0
+
+    def build(lang, nav, reached, named, what):
+        """A rig from power-on, in the state: ready for the KEY command."""
+        blk = block_with(lang_set=lang)
+        rig = Ctl(a=copy_image(blk, 2), b=copy_image(blk, 1), named=named)
+        rig.m.watch(rig.s['ctl_loop'], 'pass')
+        rig.m.watch(rig.s['fn_0800bd5c'], 'sweep')
+        rig.to_main_loop()
+        nav(rig)
+        check(reached(rig), '%s: state not reached (screen %d item %d dialog %d cal %d)'
+              % (what, rig.rd(V_SCREEN), rig.rd(V_MENU), rig.rd(V_DIALOG), rig.rd(V_CAL_RUN)))
+        rig.info = rig.host.enumerate()
+        return rig, blk
+
     for name, lang, nav, reached, named in states:
+        t_state, snap, verified = time.time(), None, False
         for bit in bits:
-            for hold in (0, 1100):
+            for hold in holds:
                 what = '%s, key bit %d %s' % (name, bit, 'hold' if hold else 'short')
-                blk = block_with(lang_set=lang)
-                rig = Ctl(a=copy_image(blk, 2), b=copy_image(blk, 1), named=named)
+                if OPTS['fresh']:
+                    rig, blk = build(lang, nav, reached, named, what)
+                else:
+                    if snap is None:
+                        rig, blk = build(lang, nav, reached, named, what)
+                        snap = Snapshot(rig)
+                    else:
+                        snap.restore()
+                        rig = snap.rig
+                        if not verified:
+                            verified = True
+                            diff = snap.verify()
+                            check(not diff, '%s: snapshot restore incomplete: %r' % (what, diff))
                 m = rig.m
-                m.watch(rig.s['ctl_loop'], 'pass')
-                m.watch(rig.s['fn_0800bd5c'], 'sweep')
-                rig.to_main_loop()
-                nav(rig)
-                check(reached(rig), '%s: state not reached (screen %d item %d dialog %d cal %d)'
-                      % (what, rig.rd(V_SCREEN), rig.rd(V_MENU), rig.rd(V_DIALOG), rig.rd(V_CAL_RUN)))
-                rig.info = rig.host.enumerate()
                 b0 = rig.rd(V_BLOCK, BLK)
                 cal0 = b0[0x04:0xB44]
                 st, s = rig.ask('KEY', struct.pack('<BH', bit, hold), timeout=25.0)
@@ -1527,6 +1713,8 @@ def k30_guard_every_key_every_state():
                 bad = [o for o in block_diff(b0, b1) if o not in ALLOWED]
                 if name != 'calibration running':
                     check(not bad, '%s: block words changed outside the settings: %r' % (what, [hex(o) for o in bad]))
+                ev = m.events()
+                passes, sweeps = ev.count('pass') - p0, ev.count('sweep') - s0
                 rig.press(KEY_POWER, 1300)
                 # the power-off path saves first, then drops PA8: measured 0.48 s after the release
                 # (both builds), the save itself 0.77 s, 0.83 s with a retry (s20); wait for PA8 up to
@@ -1543,6 +1731,16 @@ def k30_guard_every_key_every_state():
                     if name != 'calibration running':
                         check(got[0x04:0xB44] == cal0, '%s: calibration tables of 0x%08X changed' % (what, base))
                 count += 1
+                # one record per run, the same in both modes: answer, refusal, loop passes and sweep calls
+                # after the key, changed block words, the end time of the run, log length, CRCs of the RAM
+                # block before / after the power-off and of both settings copies
+                print('k30rec %s|%d|%d|st=%d|refused=%d|passes=%d|sweeps=%d|bad=%d|pa8=%r|t=%.9f|log=%d|'
+                      'b1=%08x|off=%08x|A=%08x|B=%08x' % (
+                          name, bit, hold, st, st == S_SAFETY, passes, sweeps, len(bad), m.st['pa8'], m.now(),
+                          len(m.st['log']), zlib.crc32(b1), zlib.crc32(blk_off), zlib.crc32(m.get(SET_A, BLK)),
+                          zlib.crc32(m.get(SET_B, BLK))), flush=True)
+        print('k30time %s|%s|%.1f s' % (name, 'fresh' if OPTS['fresh'] else 'snapshot', time.time() - t_state),
+              flush=True)
     NOTES.append('k30: %d runs, %d keys refused with status 6' % (count, refused))
     return True
 
@@ -1594,6 +1792,209 @@ def k32_measurement_of_a_1_kohm_resistor():
     return True
 
 
+# ---------------------------------------------------------------- vendor fixes F4 / F9 (display)
+
+def fb_replay(flushes):
+    """Panel memory from the logged RAMWR windows (pixels fill the window row by row)."""
+    fb = {}
+    for x1, y1, x2, y2, px in flushes:
+        w = x2 - x1 + 1
+        for i, v in enumerate(px):
+            fb[(x1 + i % w, y1 + i // w)] = v
+    return fb
+
+
+def f1_draw(rig, fb, x, top, text, shades):
+    """Test's own rendering of text in font F1 (object d_0802ce5c) from the font data in the image,
+    by the format of RESOURCE_FACTS.md section 7 (ranges type 2 / 3, glyph entry, 2-bpp stream,
+    top = line top + line height - base line - box height - y offset). Returns the pen x after it."""
+    def rd(a, n):
+        return bytes(rig.m.uc.mem_read(a, n))
+
+    def u32(a):
+        return struct.unpack('<I', rd(a, 4))[0]
+    obj = rig.s['d_0802ce5c']
+    lh, base = struct.unpack('<hh', rd(obj + 8, 4))
+    rec = u32(obj + 0x10)
+    bm, ent, rng = u32(rec), u32(rec + 4), u32(rec + 8)
+    nr = struct.unpack('<H', rd(rec + 0x12, 2))[0] & 0x1FF
+    for ch in text:
+        c, gid = ord(ch), 0
+        for k in range(nr):
+            r = rng + 20 * k
+            first = u32(r)
+            ln, gbase = struct.unpack('<HH', rd(r + 4, 4))
+            typ = struct.unpack('<H', rd(r + 0x12, 2))[0]
+            if 0 <= c - first <= ln:
+                if typ == 2:
+                    gid = gbase + c - first
+                elif typ == 3:
+                    cnt = struct.unpack('<H', rd(r + 0x10, 2))[0]
+                    codes = struct.unpack('<%dH' % cnt, rd(u32(r + 8), 2 * cnt))
+                    gid = gbase + codes.index(c - first) if c - first in codes else 0
+                break
+        if not gid:
+            continue
+        e = ent + 8 * gid
+        w0 = u32(e)
+        bw, bh, ox, oy = struct.unpack('<BBbb', rd(e + 4, 4))
+        if bw and bh:
+            bits = rd(bm + (w0 & 0xFFFFF), (bw * bh * 2 + 7) // 8)
+            y0 = top + lh - base - bh - oy
+            for i in range(bw * bh):
+                fb[(x + ox + i % bw, y0 + i // bw)] = shades[(bits[i >> 2] >> (6 - 2 * (i & 3))) & 3]
+        x += ((w0 >> 20) + 8) >> 4
+    return x
+
+
+XT_WHITE = (0x0000, 0x52AA, 0xA554, 0xFFFF)
+XT_RED = (0x0000, 0x5000, 0xA000, 0xF800)
+XT_LINES = [(6, XT_RED, 'CRYSTAL FAULT'), (44, XT_WHITE, 'The 8 MHz crystal of the'),
+            (63, XT_WHITE, 'microcontroller does not start.'), (82, XT_WHITE, 'Without it the meter cannot'),
+            (101, XT_WHITE, 'measure or use USB.'), (139, XT_WHITE, 'Repair: resolder or replace the'),
+            (158, XT_WHITE, '8 MHz crystal on pins PD0 and'), (177, XT_WHITE, 'PD1 of the microcontroller.'),
+            (215, XT_WHITE, 'Switching off in ')]
+
+
+@case
+def k33_crystal_fault_screen_then_power_off():
+    """VENDOR_FIXES_DESIGN.md F4: HSE never ready (HseFails), started through starter and slot A on
+    trial (INSTALL A), so the slot's IWDG runs (hand-over bit 8) through the whole fault screen. The
+    model core runs at 8 MHz, one cycle per instruction (as k19). Expected: xtal_fault reached with
+    PA8 high; at the power-off (fn_0800b274) the panel shows the nine lines of xtal.s in F1 (this
+    test's own rendering, f1_draw) with "1 s" after the last one and black everywhere else; 20
+    clears of the 40 x 19 number area; 20 s (+-0.3 s) from the backlight on (fn_08009e60(100)) to
+    fn_0800b274; no IWDG reset, also 1 s after it (the loop feeds); PA8 low at the end."""
+    rig = Ctl(records=((REC0, cell(1, ST_INSTALL, 1)),), chain=True, usb=False, core_hz=8_000_000,
+              devices=(HseFails(),), cpi=1, panel=True)
+    m, p = rig.m, rig.m.panel
+    marks = {}
+
+    def at(name, cond=None):
+        def f(uc, addr, size, user):
+            if name not in marks and (cond is None or cond(uc)):
+                marks[name] = (m.now(), m.st['pa8'], len(p.flushes))
+        return f
+    for name, cond in (('xtal_fault', None), ('fn_08009e60', lambda uc: uc.reg_read(UC_ARM_REG_R0) == 100),
+                       ('fn_0800b274', None)):
+        a = rig.s[name] & ~1
+        m.uc.hook_add(UC_HOOK_CODE, at(name, cond), begin=a, end=a)
+    end = m.run_for(seconds=120.0, until=lambda mm: 'fn_0800b274' in marks and mm.now() > marks['fn_0800b274'][0] + 1.0)
+    check(end is None and 'fn_0800b274' in marks, 'run end %r, marks %r, violations %r' % (end, marks, m.st['viol']))
+    check(marks['xtal_fault'][1] == 1, 'PA8 low at xtal_fault')
+    kinds = [e['kind'] for e in m.iwdg_log]
+    check('start' in kinds and 'reset' not in kinds, 'IWDG log kinds %r' % sorted(set(kinds)))
+    want = {}
+    x = 16
+    for top, shades, text in XT_LINES:
+        x = f1_draw(rig, want, 16, top, text, shades)
+    f1_draw(rig, want, x, 215, '1 s', XT_WHITE)
+    fb = fb_replay(p.flushes[:marks['fn_0800b274'][2]])
+    bad = [(xy, fb.get(xy, 0), want.get(xy, 0)) for xy in ((i, j) for j in range(240) for i in range(320))
+           if fb.get(xy, 0) != want.get(xy, 0)]
+    check(not bad, '%d pixels differ, first %r' % (len(bad), bad[:4]))
+    clears = [f for f in p.flushes if f[2] - f[0] == 39 and f[3] - f[1] == 18 and f[1] == 215]
+    check(len(clears) == 20, '%d clears of the number area' % len(clears))
+    dt = marks['fn_0800b274'][0] - marks['fn_08009e60'][0]
+    check(19.7 <= dt <= 20.3, 'backlight on to power-off %.3f s' % dt)
+    check(m.st['pa8'] == 0, 'PA8 not low at the end')
+    check(not m.st['viol'], 'violations %r' % m.st['viol'])
+    NOTES.append('k33: xtal_fault at %.3f s, backlight on at %.3f s, power-off %.3f s later' % (
+        marks['xtal_fault'][0], marks['fn_08009e60'][0], dt))
+    return True
+
+
+def logo_compose(rig, pic, rows, table):
+    """Test's own composition of the start-up word from the piece table in the image (logo.s format:
+    count word, 8 bytes per piece), the brighter pixel staying (R + G / 2 + B). Returns
+    {(column, row): colour} for the 244 columns."""
+    mem = rig.m.uc
+    n = struct.unpack('<I', bytes(mem.mem_read(table, 4)))[0]
+    raw = bytes(mem.mem_read(table + 4, 8 * n))
+    src = struct.unpack('<%dH' % (160 * rows), bytes(mem.mem_read(pic, 2 * 160 * rows)))
+
+    def lum(c):
+        return ((c >> 6) & 31) + (c >> 11) + (c & 31)
+    out = {}
+    for k in range(n):
+        sx, sy, w, h, fl, dx, dy, rep = raw[8 * k:8 * k + 8]
+        check(sx + w <= 160 and sy + h <= rows and dy + h <= rows and dx + w * rep <= 244,
+              'piece %d %r outside the picture or the word' % (k, raw[8 * k:8 * k + 8]))
+        for r in range(rep):
+            for i in range(w):
+                col = sx + (w - 1 - i if fl & 1 else i)
+                for j in range(h):
+                    c = src[col * rows + sy + j]
+                    xy = (dx + r * w + i, dy + j)
+                    if lum(c) > lum(out.get(xy, 0)):
+                        out[xy] = c
+    return out
+
+
+@case
+def k34_start_up_logo_fu_nirsi():
+    """VENDOR_FIXES_DESIGN.md F9: own_logo (logo.s) draws the white word, the three drops and the blue
+    word. Expected (panel model, the windows between own_logo and the GUI set-up fn_08021e98):
+    244 one-column windows of 27 rows at x 38.., y 106 with this test's composition of the white
+    table, then 244 of 28 rows at y 105 with the blue one; the drops' one-pixel windows (fn_08009ba0)
+    between them at x 263..281, y 0..112; the start-up then reaches the main loop."""
+    rig = Ctl(panel=True, usb=False)
+    m, p = rig.m, rig.m.panel
+    marks = {}
+    for name in ('own_logo', 'fn_08021e98'):
+        def f(uc, addr, size, user, name=name):
+            marks.setdefault(name, len(p.flushes))
+        a = rig.s[name] & ~1
+        m.uc.hook_add(UC_HOOK_CODE, f, begin=a, end=a)
+    rig.to_main_loop()
+    check('own_logo' in marks and 'fn_08021e98' in marks, 'marks %r' % marks)
+    fl = p.flushes[marks['own_logo']:marks['fn_08021e98']]
+    cols = [f for f in fl if f[0] == f[2] and f[3] - f[1] + 1 in (27, 28)]
+    check(len(cols) == 488, '%d one-column windows' % len(cols))
+    for k0, rows, y, pic, table in ((0, 27, 106, 'd_08046c9c', 'logo_white'), (244, 28, 105, 'd_0804499c', 'logo_blue')):
+        want = logo_compose(rig, rig.s[pic], rows, rig.s[table])
+        for k in range(244):
+            x1, y1, x2, y2, px = cols[k0 + k]
+            check(x1 == 38 + k and y1 == y and y2 == y + rows - 1, '%s column %d: window %r' % (table, k, (x1, y1, x2, y2)))
+            exp = [want.get((k, j), 0) for j in range(rows)]
+            check(px == exp, '%s column %d: %r, expected %r' % (table, k, px, exp))
+    first_blue = next(i for i, f in enumerate(fl) if f is cols[244])
+    drops = [f for f in fl[:first_blue] if f[0] == f[2] and f[1] == f[3]]
+    xs, ys = sorted({f[0] for f in drops}), sorted({f[1] for f in drops})
+    check(drops and xs[0] == 263 and xs[-1] == 281 and ys[0] == 0 and ys[-1] == 112,
+          'drop pixels x %r..%r, y %r..%r' % (xs[:1], xs[-1:], ys[:1], ys[-1:]))
+    check(not m.st['viol'], 'violations %r' % m.st['viol'])
+    return True
+
+
+@case
+def k35_setting_events_of_the_block_compare():
+    """ev_detect compares the 0xC14-byte block 4 words at a time and falls back to the per-word
+    compare for a group with a change (ctl.s). Words changed between two passes (the rig stopped):
+    offset 0 (the first word), 4 / 8 / 0xC and 0xB40 (calibration tables 0x04..0xB43: one
+    ID_CAL_TABLES event with the number 4), 0xB44 (the first word after them), 0xC00 / 0xC04 (two
+    in one group), 0xC10 (the last word, the 773rd, outside every group of 4). Expected: one
+    SETTING_CHANGED per non-table word with its new value, in the order of the offsets, and the
+    ID_CAL_TABLES event with 4; the same again when the words are put back."""
+    rig = Ctl().up()
+    words = (0x000, 0x004, 0x008, 0x00C, 0xB40, 0xB44, 0xC00, 0xC04, 0xC10)
+    single = [o for o in words if not 0x04 <= o < 0xB44]
+    rig.run(0.2)
+    rig.drain(0.05)
+    old = {o: rig.rd(V_BLOCK + o) for o in words}
+    for step, vals in (('changed', {o: old[o] ^ 0x00010000 for o in words}), ('put back', old)):
+        for o, v in vals.items():
+            rig.wr(V_BLOCK + o, v)
+        ev = [f for f in rig.drain(0.3) if f['type'] == FR_EVENT and f['cmd'] == E_SETTING]
+        got = [struct.unpack_from('<HI', f['payload']) for f in ev]
+        mine = [g for g in got if g[0] in single or g[0] == 0xFFFE]
+        want = [(o, vals[o]) for o in single] + [(0xFFFE, 4)]
+        check(mine == want, '%s: events %r, expected %r' % (step, [(hex(a), hex(b)) for a, b in mine],
+                                                             [(hex(a), hex(b)) for a, b in want]))
+    check(not rig.m.st['viol'], 'violations %r' % rig.m.st['viol'])
+    return True
+
+
 def main():
     args = sys.argv[1:]
     sel = []
@@ -1603,6 +2004,10 @@ def main():
             OPTS['state'] = args.pop(0)
         elif a == '--key':
             OPTS['key'] = int(args.pop(0))
+        elif a == '--hold':
+            OPTS['hold'] = int(args.pop(0))
+        elif a == '--fresh':
+            OPTS['fresh'] = True
         else:
             sel.append(a)
     bad = run = 0

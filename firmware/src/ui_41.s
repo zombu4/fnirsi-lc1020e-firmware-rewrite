@@ -27,7 +27,11 @@ fn_0800c848:
 	movs	r1, #3
 	bl	fn_08023170
 	pop.w	{r4, lr}
+.ifdef OWN
+	b.w	own_batt_icon		@ our build: fn_0800c724, then the icon is tracked (own/power.s, F8)
+.else
 	b.w	fn_0800c724
+.endif
 	.short	0x0000	@ padding
 .L0800c868:
 	.word	0x2000028c
@@ -758,8 +762,12 @@ fn_0800ca2c:
 	.thumb_func
 	.type fn_0800ce54, %function
 fn_0800ce54:
+.ifdef OWN
+	b.w	own_logo		@ our build: the logo "FU**NIRSI" (own/logo.s, F9)
+.else
 	push	{r1, r2, r3, r4, r5, r6, r7, lr}
 	ldr	r0, .L0800cf50
+.endif
 	movs	r4, #0
 	str	r4, [sp]
 	strd	r4, r0, [sp, #4]

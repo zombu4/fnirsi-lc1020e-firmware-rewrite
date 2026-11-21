@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """test_own_power.py - the automatic power-off of our application build (firmware/own/power.s), in the
-emulator: Off Time (VENDOR_FIXES_DESIGN.md F2) and the low-voltage countdown (F3).
+emulator: Off Time (VENDOR_FIXES_DESIGN.md F2), the low-voltage countdown (F3) and the battery icon
+checked every 30 s (F8, p6).
 
 Usage (from the repository root, after `make -C starter`, `make -C bootloader slot` and
 `make -C firmware own`):
@@ -347,6 +348,74 @@ def p5_recovery_removes_the_popup():
           '(c) state after the recovery: PW_LIVE 0x%X, violations %r' % (rig.rd(PW_LIVE), rig.m.st['viol']))
     NOTES.append('p5: (a) deleted background and panel, (b) panel only, (c) the vendor removal of the freed '
                  'background not carried out, the panel deleted')
+    return True
+
+
+# ---------------------------------------------------------------- F8 battery icon
+PW_ICON_T = OWN_PWR + 0x1C
+PF_ICON, PF_LVL_SHIFT = 0x100, 9
+V_ICON = 0x2000028C              # the icon object of fn_0800c848 (V_POPUP_OBJS + 0)
+ICON_PICS = ('d_08044440', 'd_0804459c', 'd_080446e8', 'd_08044844', 'd_08044990')   # levels 0..4
+
+
+@case
+def p6_battery_icon_every_30_s():
+    """VENDOR_FIXES_DESIGN.md F8. Measure screen at 4.1 V (level 4: above 4.0 V); then 3.7 V (level 2:
+    above 3.6, not above 3.8). Expected: own_batt_icon marked the icon (PF_ICON, level 4, PW_ICON_T);
+    up to 28.5 s after PW_ICON_T no fn_08021c14 call from pwr_icon_step and the icon's picture
+    (object +0x24) still level 4; by 31.5 s exactly one call (the icon object, the level-2 picture)
+    and level 2 stored; by 61.5 s no further call (same level); a change to the settings screen and
+    back deletes the icon (a write of PW_FLAGS without PF_ICON) and makes a new one (PF_ICON set again,
+    level 2, its picture level 2). Core at cpi 30 after the start (slow_core) up to the screen
+    changes, which run at the default cpi 5 (a screen build at cpi 30 lasts longer than the IWDG
+    period at LSI 30 kHz, 1.334 s: k29 measured 346..445 ms at cpi 5); LSI 30 kHz."""
+    src = DutSource(supply_v=4.1)
+    rig = Ctl(lsi=LSI_SLOW, source=src).up()
+    m = rig.m
+    pics = [rig.s[n] for n in ICON_PICS]
+    lo, hi = rig.s['pwr_icon_step'] & ~1, rig.s['batt_level'] & ~1     # pwr_icon_step's code
+    calls, flag_w = [], []
+
+    def img(uc, addr, size, user):
+        calls.append((m.now(), uc.reg_read(UC_ARM_REG_R0), uc.reg_read(UC_ARM_REG_R1), uc.reg_read(UC_ARM_REG_LR)))
+    a = rig.s['fn_08021c14'] & ~1
+    m.uc.hook_add(UC_HOOK_CODE, img, begin=a, end=a)
+
+    def fw(uc, acc, addr, size, value, user):
+        flag_w.append(value)
+    m.uc.hook_add(UC_HOOK_MEM_WRITE, fw, begin=PW_FLAGS, end=PW_FLAGS + 3)
+
+    def mine():
+        return [c for c in calls if lo <= (c[3] & ~1) < hi]
+
+    def state():
+        fl, obj = rig.rd(PW_FLAGS), rig.rd(V_ICON)
+        return fl & PF_ICON, (fl >> PF_LVL_SHIFT) & 7, rig.rd(obj + 0x24)
+    check(state() == (PF_ICON, 4, pics[4]), 'start: %r' % (state(),))
+    obj = rig.rd(V_ICON)
+    t0 = rig.rd(PW_ICON_T)
+    slow_core(rig)
+    src.supply_v = 3.7
+    for limit in (28500, 31500, 61500):
+        end = m.run_for(seconds=40.0, until=lambda mm: (tick(rig) - t0) & 0xFFFFFFFF >= limit)
+        check(end is None, 'run to %d ms: end %r (violations %r)' % (limit, end, m.st['viol']))
+        if limit == 28500:
+            check(not mine() and state() == (PF_ICON, 4, pics[4]), 'before 30 s: calls %r, state %r' % (mine(), state()))
+        else:
+            check(len(mine()) == 1 and mine()[0][1:3] == (obj, pics[2]) and state() == (PF_ICON, 2, pics[2]),
+                  'by %d ms: calls %r, state %r' % (limit, [(round(c[0], 3), hex(c[1]), hex(c[2])) for c in mine()], state()))
+    at = mine()[0][0]
+    del flag_w[:]
+    slow_core(rig, 5)       # back to the default cpi: a screen build at cpi 30 outlasts the IWDG period
+    rig.ask_ok('SCREEN', bytes([3]))
+    rig.run(0.5)
+    rig.ask_ok('SCREEN', bytes([1]))
+    rig.run(0.5)
+    check([v for v in flag_w if not v & PF_ICON] and flag_w[-1] & PF_ICON, 'PW_FLAGS writes %r' % [hex(v) for v in flag_w])
+    check(state() == (PF_ICON, 2, pics[2]) and len(mine()) == 1, 'after the screen changes: %r, calls %d'
+          % (state(), len(mine())))
+    check(not m.st['viol'], 'violations %r' % m.st['viol'])
+    NOTES.append('p6: the icon changed to level 2 by pwr_icon_step at %.3f s (PW_ICON_T %d ms)' % (at, t0))
     return True
 
 

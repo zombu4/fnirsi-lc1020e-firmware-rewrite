@@ -91,6 +91,9 @@ PATCHES = [
     (0x0802636A, 4, 'hook'), (0x08026A3C, 4, 'hook'), (0x08028018, 4, 'hook'), (0x08028030, 4, 'hook'),
     (0x080281D0, 4, 'hook'),
     (0x0800F294, 4, 'b.w own_menu at the entry of fn_0800f294'),
+    # VENDOR_FIXES_DESIGN.md F8 / F9: the battery icon tail call, the logo entry
+    (0x0800C862, 4, 'b.w own_batt_icon for the tail b.w fn_0800c724 of fn_0800c848'),
+    (0x0800CE54, 4, 'b.w own_logo at the entry of fn_0800ce54'),
     # LANGUAGE_DESIGN.md: the factory suffix, the menu toggle, the font counts
     (0x08009B08, 12, 'factory suffix "(FACT)"'), (0x0800D844, 12, 'factory suffix "(FACT)"'),
     (0x0800F78E, 4, 'nop.w for str.w r0, [r4, #0xbe0]'), (0x0800F796, 4, 'nop.w for str.w r5, [r4, #0xbe0]'),

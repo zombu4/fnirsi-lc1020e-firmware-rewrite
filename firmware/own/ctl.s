@@ -16,7 +16,7 @@
 @   driven low at the start; kept high after a soft restart).
 @
 @ One pass of ctl_loop (design section 3; every step bounded, none waits):
-@   save_resume (save.s), the pending action (restart / power-off after an answer), the
+@   on the first pass only usb_start, then ev_prime (sets CF_PRIMED); every pass save_resume (save.s), the pending action (restart / power-off after an answer), the
 @   USB-powered power-off check, (1) one step of the running job, the automatic power-off step
 @   (pwr_step, own/power.s: Off Time, low-voltage countdown), (2) a pending key injection is
 @   posted, (3) the guard flag is set when the event in the slot is the injected one, 0x08009400
@@ -99,13 +99,21 @@ since:
 @   nothing does (a released latch switches the meter off, NOTES 2026-11-20). So when the
 @   hand-over word 0x2001FFF8 (written by the slot, version 2, read here before own_start
 @   clears it) has the tag 0x534C and bit 9 (HO_SOFT: the slot found UPDT / RSTR), r2 = 1:
-@   fn_08008350 writes the pin mask to PBSC and PA8 stays high. Otherwise the call is the
-@   original one. Tail call; uses r2, r3, r12 before it.
+@   fn_08008350 writes the pin mask to PBSC and PA8 stays high. The same when the system clock
+@   is not the PLL (RCC_CFG SCLKSTS: the crystal did not start, VENDOR_FIXES_DESIGN.md F4): the
+@   start-up then runs on the 8 MHz HSI up to xtal_fault, and the key need not be held through
+@   it. Otherwise the call is the original one. Tail call; uses r2, r3, r12 before it.
 @ ----------------------------------------------------------------------------
 	.global	own_pa8_level
 	.thumb_func
 	.type	own_pa8_level, %function
 own_pa8_level:
+	ldr	r3, =RCC_CFG		@ crystal failure (system clock not the PLL, xtal.s): PA8
+	ldr	r3, [r3]		@ high at once, the meter stays on through the slow start-up
+	and	r3, r3, #RCC_SCLKSTS	@ up to xtal_fault without the key held
+	cmp	r3, #RCC_SCLK_PLL
+	it	ne
+	movne	r2, #1
 	ldr	r3, =HANDOVER_WORD
 	ldr	r3, [r3]
 	movw	r12, #HANDOVER_TAG >> 16
@@ -125,7 +133,11 @@ own_pa8_level:
 @   watchdog runs, started by the slot for a trial or left running by soft_restart: then the
 @   IWDG is fed here, before the application's own start 0x08010178; bit 9 = soft restart,
 @   read by own_pa8_level); the result word 0x2001FFFC read and cleared (tag 0x5552, result byte and its
-@   complement); the request word 0x2001FFF4 cleared; usb_start. (The per-language text
+@   complement); the request word 0x2001FFF4 cleared. USB is started by ctl_loop's first
+@   pass, not here: the vendor start-up after this call took 2 s on a meter, and a port
+@   present before requests are served leaves a host's first request unanswered. Last: when
+@   the system clock is not the PLL (the crystal did not start), xtal_fault (xtal.s, F4), which
+@   does not return. (The per-language text
 @   tables need no step here: their row 0 equals row 1 in the initial RAM image of our
 @   build, src/rodata_04.s ram_image.)
 @ ----------------------------------------------------------------------------
@@ -183,7 +195,11 @@ own_start:
 	str	r1, [r0]
 	mvn	r0, #0
 	str	r0, [r4, #CT_W_NEXT]	@ no SETTINGS_WRITE_BLOCK transfer
-	bl	usb_start
+	ldr	r0, =RCC_CFG
+	ldr	r0, [r0]
+	and	r0, r0, #RCC_SCLKSTS
+	cmp	r0, #RCC_SCLK_PLL
+	bne.w	xtal_fault		@ the crystal did not start: the fault screen (xtal.s), no return
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
@@ -220,7 +236,10 @@ ctl_loop:
 	ldr	r0, [r4, #CT_FLAGS]
 	tst	r0, #CF_PRIMED
 	bne	.Lcl_run
-	bl	ev_prime		@ first pass: previous values = current values
+	bl	usb_start		@ first pass: the host sees the device only from here, when
+					@ requests are served (the start-up before took 2 s on a meter
+					@ with the port present and silent, NOTES "USB start")
+	bl	ev_prime		@ first pass: previous values = current values; sets CF_PRIMED
 .Lcl_run:
 	bl	save_resume		@ rewrite of an interrupted copy A (save.s)
 	bl	act_step
@@ -1850,12 +1869,18 @@ ram_word:
 @   SETTING_CHANGED for 0x200011A4, 0x200011A8, byte 0x200011E4, 0x200011E8 and for every
 @   changed word of the 0xC14-byte block (one compare of the block per pass; words of the
 @   calibration tables 0x04..0xB43 as one event with their number).
+@   The block compare takes 4 words at a time (two ldm, one compare chain): a group with no
+@   change is passed over at once; otherwise the next word goes through the per-word compare,
+@   which sends its event, and the groups go on from the word after it. So every changed word
+@   still gets its event, in the order of the offsets, and the calibration count is the same;
+@   the 773-word block costs about 4 instructions per word instead of 8 when nothing changed
+@   (19.4 % of all instructions in the profile of a screen change, NOTES).
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	ev_detect, %function
 ev_detect:
-	push	{r4, r5, r6, r7, r8, lr}
-	sub	sp, #16
+	push	{r4, r5, r6, r7, r8, r9, r10, r11, lr}
+	sub	sp, #20			@ 16 bytes of event data, 8-byte stack alignment kept
 	ldr	r4, =OWN_CTL
 	bl	ev_drain
 @ screen
@@ -1979,6 +2004,25 @@ ev_detect:
 	movs	r7, #0			@ r7 = offset
 	movs	r8, #0			@ r8 = changed words of the calibration tables
 .Ld_blk:
+	movw	r0, #BLK_SIZE
+	cmp	r7, r0
+	bhs	.Ld_blk_done		@ the whole block compared
+	subs	r0, r0, #16
+	cmp	r7, r0
+	bhi	.Ld_blk_word		@ fewer than 4 words left: one by one
+	add	r0, r5, r7
+	ldm	r0, {r0, r1, r2, r3}	@ 4 words now
+	add	lr, r6, r7
+	ldm	lr, {r9, r10, r11, r12}	@ the same 4 of the previous pass
+	cmp	r0, r9
+	ittt	eq
+	cmpeq	r1, r10
+	cmpeq	r2, r11
+	cmpeq	r3, r12
+	bne	.Ld_blk_word		@ a change among them: the next word one by one
+	adds	r7, r7, #16
+	b	.Ld_blk
+.Ld_blk_word:
 	ldr	r0, [r5, r7]
 	ldr	r1, [r6, r7]
 	cmp	r0, r1
@@ -2000,9 +2044,8 @@ ev_detect:
 	bl	ev_send
 .Ld_blk_next:
 	adds	r7, r7, #4
-	movw	r0, #BLK_SIZE
-	cmp	r7, r0
-	blo	.Ld_blk
+	b	.Ld_blk
+.Ld_blk_done:
 	cmp	r8, #0
 	beq	.Ld_out
 	str	r8, [sp, #4]
@@ -2013,8 +2056,8 @@ ev_detect:
 	movs	r2, #6
 	bl	ev_send
 .Ld_out:
-	add	sp, #16
-	pop	{r4, r5, r6, r7, r8, pc}
+	add	sp, #20
+	pop	{r4, r5, r6, r7, r8, r9, r10, r11, pc}
 
 	.ltorg
 
