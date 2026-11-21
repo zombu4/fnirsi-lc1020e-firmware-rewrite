@@ -682,17 +682,29 @@ fn_0800ca2c:
 .L0800cdfc:
 	.word	d_08040f10
 .L0800ce00:
+.ifdef OWN
+	.word	d_08040f10		@ our build: the English icon for language 0 too
+.else
 	.word	d_0803c690
+.endif
 .L0800ce04:
 	.word	d_08041184
 .L0800ce08:
+.ifdef OWN
+	.word	d_08041184		@ our build: the English icon for language 0 too
+.else
 	.word	d_0803c91c
+.endif
 .L0800ce0c:
 	.word	d_08040c9c
 .L0800ce10:
 	.word	d_0803e250
 .L0800ce14:
+.ifdef OWN
+	.word	d_08040c9c		@ our build: the English icon for language 0 too
+.else
 	.word	d_0803cba8
+.endif
 .L0800ce18:
 	.word	d_0803cdc4
 .L0800ce1c:

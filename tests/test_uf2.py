@@ -495,6 +495,61 @@ def u15_power_cut_then_start():
     return True
 
 
+class TimedRig(Rig):
+    """Rig with the timing model (meter_model set_timing, LSI 60 kHz: the shortest watchdog period
+    2501 * 16 / 60000 = 0.667 s) and a trial start: records INSTALL A, TRIAL A, so slot_trial_wdg
+    (slot_10.s; main's first call, called here directly after the stop at `main`) starts the IWDG
+    and every slot_feed of the update path reloads it."""
+
+    def __init__(self, lsi=60000, starter=False):
+        self.m = Meter(slots=('F', 'A', 'B'), records=[(REC0, cell(1, 1, 1)), (REC0 + 16, cell(1, 2, 2))],
+                       starter=starter)
+        m = self.m
+        m.put(APP, b'\x00' * (APP_END - APP))
+        self.initial = bytes(m.flash)
+        m.set_timing(lsi_hz=lsi)
+        m.make()
+        self.sym = m.sym[SLOT]
+        m.watch(self.sym['main'], 'main', stop=True)
+        vec = SLOTS[SLOT] + 0x200
+        sp, pc = struct.unpack_from('<II', m.flash, vec - 0x08000000)
+        end = m.go(pc, sp=sp)
+        check(end == 'at main', 'slot A start-up ended %r' % end)
+        del m.st['log'][:]
+        check(m.call(self.sym['slot_trial_wdg']) is not None, 'slot_trial_wdg: %r' % m.st['end'])
+        check(m.tm['iw']['running'], 'slot_trial_wdg did not start the IWDG')
+        r = m.call(self.sym['uf2_init'])
+        check(r is not None, 'uf2_init did not return: %r' % m.st['end'])
+        self.sectors = 0
+
+
+@case
+def u16_update_path_feeds_the_watchdog():
+    """A whole update (every sector of the V1.1 .uf2 in order, the CRC and vector page of uf2_finish,
+    then slot_finish up to the starter's reset entry, which its soft restart slot_soft_restart
+    branches to through word 0x00000004 of the boot space) under a running IWDG: no IWDG reset and
+    the longest stretch between two counter loads below 0.67 s (USB_CONTROL_DESIGN.md section 6 (e)).
+    The state the soft restart leaves is checked by test_chain.py (soft_restart_state). The time
+    between two uf2_sector calls is 0 here (direct calls); on the meter the update-mode loop between
+    them feeds as well (system_05.s main, slot_feed in every pass)."""
+    rig = TimedRig(starter=True)
+    m = rig.m
+    m.watch(m.starter_sym['reset'], 'starter reset', stop=True)
+    rig.send(BLOCKS)
+    complete_ok(rig, IMAGE, 'timed update')
+    check(m.call(rig.sym['slot_finish']) is None and m.st['end'] == 'at starter reset',
+          'slot_finish end %r' % m.st['end'])
+    kinds = [e['kind'] for e in m.iwdg_log]
+    check('reset' not in kinds, 'IWDG reset during the update')
+    st = m.iwdg_stretch()
+    longest = st['longest']
+    check(longest is not None and longest['seconds'] < 0.67, 'longest stretch %r' % longest)
+    NOTES.append('u16: %d feeds; longest stretch %.1f ms (%d instructions) between 0x%08X and 0x%08X'
+                 % (kinds.count('feed'), longest['seconds'] * 1e3, longest['insns'],
+                    longest['begin']['pc'] or 0, longest['end']['pc'] or 0))
+    return True
+
+
 def main():
     bad = 0
     for fn in CASES:

@@ -927,7 +927,12 @@ fn_0800a7ec:
 	vcmpe.f32	s0, s1
 	add.w	r6, r0, #0x3400		@ r6 = 0x2000457c
 	vmrs	APSR_nzcv, fpscr
-	bcs.n	.L0800a8e8
+.ifdef OWN
+	bhi.n	.L0800a8e8		@ own build: fail only when deviation > tolerance, as the
+					@ display decides OK (ble at 0x0800f960); unordered -> fail
+.else
+	bcs.n	.L0800a8e8		@ deviation >= tolerance: fail (the display shows OK at =)
+.endif
 	ldr.w	r0, [r6, #0xb74]	@ word 0x200050f0
 	.inst.n	0x1c40			@ adds r0, r0, #1
 	str.w	r0, [r6, #0xb74]

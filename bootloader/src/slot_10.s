@@ -8,12 +8,22 @@
 @   rodata.s      region table entry 0 -> copy_init (the initial RAM image is typed data)
 @   vectors.s     HardFault, MemManage, BusFault, UsageFault, PendSV, every unused vector
 @                 -> slot_fault
-@   board_02.s    fn_08002598: VTOR = this image's own vector table, interrupts enabled
+@   board_02.s    fn_08002598: SYSCLK switched to HSI and SCLKSTS waited for first (a soft
+@                 restart enters with the PLL running); VTOR = this image's own vector
+@                 table, interrupts enabled
 @   update_06.s   fn_08000e24 / fn_08000eb4 (page erase / word program) -> flash_gate first;
 @                 fn_0800159c: drive size DRIVE_SECTORS; fn_080015b8 -> slot_read_sector;
 @                 fn_080015c2 -> uf2_sector
-@   system_05.s   main: application start -> slot_app_start; before the USB start -> uf2_init;
-@                 after the USB start -> slot_confirm
+@   system_05.s   main: first -> slot_trial_wdg; key read -> slot_key_check; application start
+@                 -> slot_app_start; before the USB start -> uf2_init; after the USB start ->
+@                 slot_confirm; every pass of the update-mode loop -> slot_feed; state 2 ->
+@                 slot_finish
+@ Feature version 2 (USB_CONTROL_DESIGN.md section 6, items a..e, and 6b): the request word
+@ (slot_key_check: UPDT update mode, UPDT / RSTR the application's IWDG runs), the hand-over
+@ word (slot_app_start), the result word and the soft restart after an update (slot_finish,
+@ slot_soft_restart), the watchdog of a trial start (slot_trial_wdg) and its feeds (slot_feed:
+@ slot_confirm, slot_app_start, the update-mode loop, slot_finish, slot_soft_restart,
+@ uf2_erase_page, uf2_program, uf2_finish).
 
 	.syntax unified
 	.arch armv7e-m
@@ -97,7 +107,8 @@ flash_gate:
 @ crc32_update - run bytes through the CRC-32 (zlib polynomial, reflected).
 @   r0 = CRC register (0xFFFFFFFF at the start), r1 = address, r2 = byte
 @   count (0 allowed). Returns r0 = the new register; the CRC-32 is its
-@   complement. Uses r1..r3.
+@   complement. Uses r1..r3; r1 is left at address + count (uf2_finish
+@   goes on from there).
 @ crc32 - r0 = address, r1 = byte count -> r0 = CRC-32 of those bytes.
 @ ----------------------------------------------------------------------------
 	.thumb_func
@@ -401,13 +412,16 @@ rec_flash_word:
 @   Scans the records; only when the newest record is TRIAL for SLOT_INDEX
 @   it appends OK for SLOT_INDEX with that record's version. Any other state
 @   writes nothing. Called just before the application start and right after
-@   the USB start in update mode.
+@   the USB start in update mode. The watchdog of a trial start is fed first,
+@   so the record append (at most one page erase and three cell writes) has a
+@   whole period; the trial window of slot_trial_wdg ends here.
 @ ----------------------------------------------------------------------------
 	.global slot_confirm
 	.thumb_func
 	.type slot_confirm, %function
 slot_confirm:
 	push	{r4, lr}
+	bl	slot_feed
 	bl	rec_scan
 	cmp	r0, #SLOT_INDEX
 	bne	24f
@@ -425,9 +439,14 @@ slot_confirm:
 @ slot_app_start - start the application when its vector table checks.
 @   Initial SP (word 0x08006000) above 0x20000000 and at most 0x20024000;
 @   reset vector (word 0x08006004) odd and inside 0x08006000..0x08061FFF.
-@   Then the OK record (slot_confirm), the flash locked (fn_08000ea4) and the
-@   hand-over: VTOR = 0x08006000, MSP and PC from its table. When a check fails
-@   it returns and main goes to update mode.
+@   Then the OK record (slot_confirm), a watchdog feed (a trial start hands a
+@   whole period to the application's start-up), the hand-over word
+@   HANDOVER_WORD = HANDOVER_TAG | WDG_ON << 8 | SLOT_INDEX (bit 8: the
+@   watchdog runs, trial start or soft restart; bit 9: soft restart, so the
+@   application keeps PA8 high; the application reads and clears it), the
+@   flash locked (fn_08000ea4) and the hand-over: VTOR = 0x08006000,
+@   MSP and PC from its table. When a check fails it returns and main goes to
+@   update mode.
 @   The vector page is the last page an update writes, so an update cut short
 @   leaves 0x08006000 erased and the first check fails.
 @ ----------------------------------------------------------------------------
@@ -454,6 +473,14 @@ slot_app_start:
 	cmp	r0, r1
 	bhs	25f
 	bl	slot_confirm
+	bl	slot_feed
+	ldr	r0, =HANDOVER_WORD
+	ldr	r2, =WDG_ON
+	ldr	r2, [r2]		@ 0, 1 (trial) or 3 (soft restart)
+	ldr	r1, =HANDOVER_TAG | SLOT_INDEX
+	orr	r1, r1, r2, lsl #8	@ bit 8: watchdog running (the application may feed it),
+					@ bit 9: soft restart
+	str	r1, [r0]
 	bl	fn_08000ea4		@ lock the flash
 	ldr	r1, =0xE000ED08		@ VTOR = the application's table
 	str	r4, [r1]
@@ -464,6 +491,233 @@ slot_app_start:
 	msr	msp, r0			@ words from the new stack, so the application began
 	bx	r1			@ with SP 8 bytes above its table value)
 25:	pop	{r4, pc}
+
+	.ltorg
+
+@ ============================================================================
+@ Feature version 2: the no-init words and the watchdog (USB_CONTROL_DESIGN.md
+@ section 6). The words lie at 0x2001FFF4..0x2001FFFF (slot.inc), outside the
+@ RAM every start code clears; the slot clears REQ_WORD only.
+@ ============================================================================
+
+@ ----------------------------------------------------------------------------
+@ slot_trial_wdg - start the independent watchdog when this start is a trial.
+@   First call of main. WDG_ON = 0; then the records are read as slot_confirm
+@   reads them (rec_scan): only when the newest record is TRIAL for SLOT_INDEX
+@   (the starter appended it for this start, starter/starter.s: INSTALL ->
+@   TRIAL -> start) the watchdog is started with the application's own
+@   sequence (V1.1 0x08010178..0x08010198): KEY 0x5555, PREDIV 2, RELV 0x9C4,
+@   KEY 0xAAAA, KEY 0xCCCC, and WDG_ON = 1. Starting it forces the LSI on
+@   (user manual 6.2.10, "the LSI oscillator will be forced ON").
+@   No wait for STS PVU / CRVU (16.4.2 step 2): STS resets to 0 (table 16-2),
+@   a system reset sets every register except RCC_CTRLSTS and the backup
+@   domain to its reset value (6.1.2), and nothing writes PREDIV / RELV
+@   between the reset and this point (starter: no IWDG access). After a soft
+@   restart (BOOT_INSTALL: the starter trials this slot with the
+@   application's IWDG running) the last PREDIV / RELV writes are the
+@   application's start-up ones, long done, and these write the same values.
+@   A trial slot that hangs before slot_confirm is reset by the watchdog and
+@   the starter, finding TRIAL newest, starts the newest other OK slot or F.
+@   Once started the watchdog runs until the next reset; slot_feed keeps it
+@   fed in the update path, the application's own start-up rewrites the same
+@   values and feeds it. Uses r0..r3, r12.
+@ ----------------------------------------------------------------------------
+	.global slot_trial_wdg
+	.thumb_func
+	.type slot_trial_wdg, %function
+slot_trial_wdg:
+	push	{r4, lr}
+	ldr	r4, =WDG_ON
+	movs	r0, #0
+	str	r0, [r4]
+	bl	rec_scan		@ r0 = slot of the newest record, or -1
+	cmp	r0, #SLOT_INDEX
+	bne	64f
+	ldr	r1, =TAB + SLOT_INDEX * 16
+	ldr	r1, [r1, #4]		@ its state
+	cmp	r1, #ST_TRIAL
+	bne	64f
+	ldr	r0, =IWDG_KEY
+	movw	r1, #IWDG_UNLOCK
+	str	r1, [r0, #0]		@ PREDIV / RELV writable
+	movs	r1, #IWDG_PREDIV
+	str	r1, [r0, #4]		@ LSI / 16
+	movw	r1, #IWDG_RELV
+	str	r1, [r0, #8]		@ reload 2500
+	movw	r1, #IWDG_RELOAD
+	str	r1, [r0, #0]		@ counter = reload
+	movw	r1, #IWDG_START
+	str	r1, [r0, #0]		@ watchdog running
+	movs	r1, #1
+	str	r1, [r4]		@ WDG_ON = 1
+64:	pop	{r4, pc}
+
+@ ----------------------------------------------------------------------------
+@ slot_feed - reload the watchdog (KEY 0xAAAA) when it runs (WDG_ON not 0:
+@   trial start or soft restart); otherwise nothing is written to it. Keeps every
+@   register and the flags (push / pop, ldr, cbz and str do not set flags), so
+@   a call can go anywhere, in thread or interrupt code.
+@ ----------------------------------------------------------------------------
+	.global slot_feed
+	.thumb_func
+	.type slot_feed, %function
+slot_feed:
+	push	{r0, r1}
+	ldr	r0, =WDG_ON
+	ldr	r0, [r0]
+	cbz	r0, 65f
+	ldr	r0, =IWDG_KEY
+	movw	r1, #IWDG_RELOAD
+	str	r1, [r0, #0]
+65:	pop	{r0, r1}
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ slot_key_check - the start check of main with the request word added.
+@   r0 = GPIOC base, r1 = 0x80 (pin 7, the up key), as main passes them to
+@   fn_080007a4. Reads REQ_WORD and clears it at every start. REQ_MAGIC
+@   ("UPDT") and REQ_RESTART ("RSTR") come from the application's soft restart
+@   (USB_CONTROL_DESIGN.md 6b), which leaves its IWDG running (it cannot be
+@   stopped, manual 16): both set WDG_ON = 3 (bit 0: slot_feed then feeds it
+@   in every wait, as on a trial start; bit 1: soft restart, hand-over bit 9;
+@   slot_trial_wdg cleared it before) and feed it once here. REQ_MAGIC
+@   returns r0 = 0 (as the key held: main goes to update
+@   mode); every other value tail-calls fn_080007a4 with r0 / r1 unchanged
+@   (its result: 0 key held, nonzero key up). Uses r2, r3, r12 before the
+@   tail call.
+@ ----------------------------------------------------------------------------
+	.global slot_key_check
+	.thumb_func
+	.type slot_key_check, %function
+slot_key_check:
+	ldr	r2, =REQ_WORD
+	ldr	r12, [r2]		@ r12 = request word
+	movs	r3, #0
+	str	r3, [r2]		@ cleared at every start
+	ldr	r3, =REQ_MAGIC
+	cmp	r12, r3
+	beq	69f
+	ldr	r3, =REQ_RESTART
+	cmp	r12, r3
+	bne	70f
+69:	ldr	r2, =WDG_ON
+	movs	r3, #3
+	str	r3, [r2]		@ WDG_ON = 3: the application's watchdog runs, soft restart
+	ldr	r2, =IWDG_KEY
+	movw	r3, #IWDG_RELOAD
+	str	r3, [r2, #0]		@ fed
+	ldr	r3, =REQ_MAGIC
+	cmp	r12, r3
+	beq	66f
+70:	b.w	fn_080007a4		@ key PC7 (tail call)
+66:	movs	r0, #0			@ update request: as the key held
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ slot_finish - an update was written and checked (state 2, 0x20000274 = 2):
+@   RESULT_WORD = RESULT_TAG << 16 | RES_OK << 8 | (~RES_OK & 0xFF), then the
+@   wait as ten fn_0800320e(99) calls (1000 fn_08003224(1000) waits; the stock
+@   fn_0800320e(1000) makes 1001) with a watchdog feed before each, then the
+@   soft restart (slot_soft_restart; a system reset would switch the meter
+@   off, NOTES 2026-11-20). When WDG_ON is not 0 (the IWDG runs) REQ_WORD =
+@   REQ_RESTART first, so the next start feeds it; with WDG_ON = 0 (update
+@   mode entered by the key at power-on, no IWDG) no word is written, so the
+@   next start writes nothing to the stopped IWDG (the manual is
+@   contradictory on whether 0xAAAA starts it). Never returns.
+@ ----------------------------------------------------------------------------
+	.global slot_finish
+	.thumb_func
+	.type slot_finish, %function
+slot_finish:
+	ldr	r0, =RESULT_WORD
+	ldr	r1, =(RESULT_TAG << 16) | (RES_OK << 8) | (~RES_OK & 0xFF)
+	str	r1, [r0]
+	movs	r4, #10
+67:	bl	slot_feed
+	movs	r0, #99
+	bl	fn_0800320e		@ 99 + 1 passes of fn_08003224(1000)
+	subs	r4, r4, #1
+	bne	67b
+	ldr	r0, =WDG_ON
+	ldr	r0, [r0]
+	cbz	r0, 71f
+	ldr	r0, =REQ_WORD
+	ldr	r1, =REQ_RESTART
+	str	r1, [r0]		@ the next start feeds the running watchdog
+71:	b.w	slot_soft_restart
+
+@ ----------------------------------------------------------------------------
+@ slot_soft_restart - restart through the starter without a system reset
+@   (USB_CONTROL_DESIGN.md 6b; the same steps as soft_restart of the
+@   application, firmware/own/ctl.s, without the DMA: the slot enables no DMA
+@   channel). Thread mode, called from main. Never returns. In this order:
+@   - PRIMASK set;
+@   - only while the USB clock is on (RCC_APB1PCLKEN USBEN, set by fn_080021dc
+@     in update mode): D+ pull-up off (bit 28 of 0x40001820, read-modify-write),
+@     USB_CTRL = FRST | PD (the host sees the drive leave), USBEN cleared;
+@   - NVIC ICER0..2 and ICPR0..2 all ones (IRQ 20 / 42 of fn_08002c48
+@     disabled, nothing pending); SysTick CTRL = 0 (main starts it in update
+@     mode); the SysTick and PendSV pending bits cleared (ICSR);
+@   - flash locked (fn_08000ea4);
+@   - the system clock stays the PLL (the starter's record scan and image CRC
+@     run at 144 MHz, inside the IWDG period); the next slot start switches to
+@     HSI first (board_02.s fn_08002598, slot build);
+@   - BASEPRI = 0, CONTROL = 0 (MSP), as after a reset;
+@   - slot_feed (feeds only when WDG_ON is not 0);
+@   - VTOR = 0, MSP = word 0x00000000, branch to word 0x00000004: the boot
+@     space, where the meter maps main flash (the starter runs from there at
+@     power-on), read as a reset reads it; PRIMASK stays set. (No value in
+@     0x08000000..0x08005FFF is built: tests/check_never_brick.py W4.)
+@   GPIOA is not written: PA8 stays driven high.
+@ ----------------------------------------------------------------------------
+	.global slot_soft_restart
+	.thumb_func
+	.type slot_soft_restart, %function
+slot_soft_restart:
+	cpsid	i
+	ldr	r2, =SR_APB1PCLKEN
+	ldr	r3, [r2]
+	tst	r3, #SR_USBEN
+	beq	72f
+	ldr	r0, =SR_PULLUP
+	ldr	r1, [r0]
+	bic	r1, r1, #SR_PULLUP_BIT
+	str	r1, [r0]		@ D+ pull-up off
+	ldr	r0, =SR_USB_CTRL
+	movs	r1, #SR_USB_OFF
+	str	r1, [r0]		@ USB core in reset and powered down
+	bic	r3, r3, #SR_USBEN
+	str	r3, [r2]		@ USB clock off
+72:	mvn	r1, #0
+	ldr	r0, =SR_ICER0
+	str	r1, [r0, #0]
+	str	r1, [r0, #4]
+	str	r1, [r0, #8]
+	ldr	r0, =SR_ICPR0
+	str	r1, [r0, #0]
+	str	r1, [r0, #4]
+	str	r1, [r0, #8]
+	ldr	r0, =SR_SYST_CSR
+	movs	r1, #0
+	str	r1, [r0]		@ SysTick stopped
+	ldr	r0, =SR_ICSR
+	mov	r1, #SR_PEND_CLR
+	str	r1, [r0]
+	bl	fn_08000ea4		@ flash locked
+	movs	r0, #0
+	msr	basepri, r0
+	msr	control, r0
+	isb
+	bl	slot_feed
+	ldr	r0, =SR_VTOR
+	movs	r1, #SR_BOOT_SPACE
+	str	r1, [r0]		@ VTOR = 0, its value after a reset
+	dsb
+	isb
+	ldr	r0, [r1, #0]		@ the starter's stack pointer
+	ldr	r2, [r1, #4]		@ its reset entry
+	msr	msp, r0
+	bx	r2
 
 	.ltorg
 
@@ -711,7 +965,8 @@ uf2_fail:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ uf2_erase_page - r0 = page base in the application area. Unlocks the
+@ uf2_erase_page - r0 = page base in the application area. Feeds the
+@   watchdog (slot_feed: one page erase takes up to 100 ms), unlocks the
 @   flash (fn_08000efc), erases the page (fn_08000e24, gated), locks it
 @   (fn_08000ea4) and reads the page back. Returns r0 = 0 when all 512
 @   words are 0xFFFFFFFF, else ERR_ERASE.
@@ -720,6 +975,7 @@ uf2_fail:
 	.type uf2_erase_page, %function
 uf2_erase_page:
 	push	{r4, lr}
+	bl	slot_feed
 	mov	r4, r0
 	bl	fn_08000efc		@ unlock
 	mov	r0, r4
@@ -744,11 +1000,14 @@ uf2_erase_page:
 @   fn_08000eb4 (gated; 6 = done; words 0xFFFFFFFF are left erased) and reads
 @   every word back. Returns r0 = 0,
 @   ERR_ERASE or ERR_PROGRAM. The flash is locked again in every case.
+@   The watchdog is fed first (slot_feed), once per block of 64 words, and
+@   again by uf2_erase_page before a page erase.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type uf2_program, %function
 uf2_program:
 	push	{r4, r5, r6, r7, r8, lr}
+	bl	slot_feed
 	mov	r4, r0			@ r4 = target
 	mov	r5, r1			@ r5 = payload
 	ldr	r1, =APP_BASE
@@ -798,7 +1057,8 @@ uf2_program:
 @ ----------------------------------------------------------------------------
 @ uf2_finish - every block has been taken.
 @   CRC-32 over the image length L: the first min(L, 0x800) bytes from VBUF,
-@   the rest from flash at 0x08006800. A CRC other than the key's -> failed
+@   the rest from flash at 0x08006800 in parts of 2 KiB with a watchdog feed
+@   before each (slot_feed). A CRC other than the key's -> failed
 @   (ERR_CRC), 0x08006000 stays erased. Otherwise programs the vector page
 @   from VBUF in two passes (words still 0xFFFFFFFF are left erased): words
 @   2..511 from the last one down, read back; then the reset vector and the
@@ -822,10 +1082,18 @@ uf2_finish:
 	it	hi
 	movhi	r2, #FLASH_PAGE
 	bl	crc32_update		@ the vector page part, from RAM
-	subs	r2, r5, #FLASH_PAGE
+	subs	r5, r5, #FLASH_PAGE	@ r5 = bytes left, from flash
 	bls	43f
 	ldr	r1, =APP_VEC_END
-	bl	crc32_update		@ the rest, from flash
+68:	bl	slot_feed		@ one feed per 2 KiB of the CRC
+	mov	r2, r5
+	cmp	r2, #FLASH_PAGE
+	it	hi
+	movhi	r2, #FLASH_PAGE
+	subs	r5, r5, r2
+	bl	crc32_update		@ the rest, from flash; r1 moves on by r2
+	cmp	r5, #0
+	bne	68b
 43:	mvns	r0, r0
 	ldr	r1, [r4, #U_CRC]
 	cmp	r0, r1
@@ -833,7 +1101,8 @@ uf2_finish:
 	movs	r0, #ERR_CRC
 	bl	uf2_fail
 	pop	{r4, r5, r6, pc}
-44:	bl	fn_08000efc		@ unlock
+44:	bl	slot_feed		@ the vector page writes get a whole period
+	bl	fn_08000efc		@ unlock
 	movw	r5, #FLASH_PAGE - 4	@ pass 1: words 2..511, last word first
 45:	bl	vpage_word
 	cmp	r0, #6

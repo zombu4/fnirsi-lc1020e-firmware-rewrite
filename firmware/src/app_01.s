@@ -133,7 +133,11 @@ fn_08009400:
 	cbnz r0, .L08009494
 	movs r0, #1
 	strh.w r0, [r4, #0xc14]         @ 0x20001190 = 1
+.ifdef OWN
+	bl own_save                     @ 0x08009474: our save (own/save.s)
+.else
 	bl fn_08014b94
+.endif
 	movs r0, #0xc8
 	bl fn_08008120
 	bl fn_0800b274
@@ -796,15 +800,27 @@ fn_08009614:
 .L08009950:
 	.word d_08040f10
 .L08009954:
+.ifdef OWN
+	.word d_08040f10                @ our build: the English icon for language 0 too
+.else
 	.word d_0803c690
+.endif
 .L08009958:
 	.word d_08041184
 .L0800995c:
+.ifdef OWN
+	.word d_08041184                @ our build: the English icon for language 0 too
+.else
 	.word d_0803c91c
+.endif
 .L08009960:
 	.word d_08040c9c
 .L08009964:
+.ifdef OWN
+	.word d_08040c9c                @ our build: the English icon for language 0 too
+.else
 	.word d_0803cba8
+.endif
 .L08009968:
 	.word d_0803d224
 .L0800996c:
@@ -971,7 +987,11 @@ fn_08009974:
 	beq.n .L08009a82
 	movs r0, #0
 .L08009a68:
+.ifdef OWN
+	bl own_restore_guard            @ 0x08009A68: not while injected (own/ctl.s)
+.else
 	bl fn_0800b4c8
+.endif
 	ldr.w r0, [r4, #0xbdc]          @ word 0x20001158
 	bl fn_08009e60
 	ldr r0, [r5, #8]                @ word 0x20000014
@@ -1045,8 +1065,13 @@ fn_08009974:
 	.asciz "%s%s"
 	.byte 0x00, 0x00, 0x00          @ padding
 .L08009b08:
+.ifdef OWN
+	.asciz "(FACT)"                     @ our build: factory-mode suffix in English (font
+	.byte 0x00, 0x00, 0x00, 0x00, 0x00  @ 0x0802f0d8 holds ( ) A C F T), same 12 bytes
+.else
 	.asciz "(\345\216\202\345\256\266)"
 	.byte 0x00, 0x00, 0x00          @ padding
+.endif
 
 @ ----------------------------------------------------------------------------
 @ fn_0800af58 - drives three output bits from a pattern number.

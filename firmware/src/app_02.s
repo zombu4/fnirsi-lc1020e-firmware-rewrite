@@ -449,7 +449,11 @@ fn_0800b4c8:
 	mov.w	r0, r7
 .L0800b5bc:
 	bl	copy_bytes_080070dc
+.ifdef OWN
+	bl	own_save		@ 0x0800B5C0: our save (own/save.s)
+.else
 	bl	fn_08014b94
+.endif
 	addw	sp, sp, #0x5a4
 	vpop	{d8}
 	pop	{r4, r5, r6, r7, pc}
@@ -682,7 +686,11 @@ fn_0800bcd8:
 	adds	r0, r4, #4
 	bl	copy_bytes_080070dc
 .L0800bd1a:
+.ifdef OWN
+	bl	own_save		@ 0x0800BD1A: our save (own/save.s)
+.else
 	bl	fn_08014b94
+.endif
 	movs	r1, #0
 .L0800bd20:
 	movs	r2, #2

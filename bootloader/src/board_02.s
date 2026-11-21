@@ -338,6 +338,16 @@ fn_080021dc:
 @ 0x200), then interrupts are unmasked (cpsie i): the starter enters the slot
 @ with PRIMASK set, and neither this code nor the application (no cps
 @ instruction in V1.1) unmasks them otherwise.
+@ Slot build, also: right after HSIEN, RCC_CFG SCLKSW = 00 (HSI) alone and a
+@ wait until SCLKSTS (bits 3:2) reads 00, before the stock code masks RCC_CFG
+@ and clears PLLEN / HSEEN. A soft restart (firmware/own/ctl.s soft_restart,
+@ slot_soft_restart) enters with the PLL as the system clock; the manual says
+@ PLLEN cannot be cleared while the PLL is the system clock (6.3.2) and gives
+@ no switch time (6.2.7), and the stock code writes SCLKSW = 00 together with
+@ the prescalers and clears PLLEN two instructions later without a wait, then
+@ fn_080020c4 sets LATENCY 0 (allowed up to 32 MHz, 3.2.5.2.1). With the wait
+@ the stock code runs on the HSI as after a reset (there SCLKSTS is 00
+@ already and the wait ends at its first read).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_08002598,"ax",%progbits
 	.p2align 2
@@ -354,6 +364,15 @@ fn_08002598:
 	ldr	r1, [r0, #0]
 	orr	r1, r1, #1
 	str	r1, [r0, #0]
+.ifdef SLOT
+	ldr	r1, [r0, #4]		@ slot build: SYSCLK to HSI first ...
+	bic	r1, r1, #3
+	str	r1, [r0, #4]
+.Lslot_hsi:
+	ldr	r1, [r0, #4]
+	tst	r1, #0xc
+	bne.n	.Lslot_hsi		@ ... and wait until SCLKSTS = 00 (HSI)
+.endif
 	ldr	r1, [r0, #4]
 	ldr	r2, .L08002618		@ 0xF8FFC000
 	ands	r1, r2

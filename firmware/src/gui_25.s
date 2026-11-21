@@ -89,7 +89,11 @@ fn_080269f0:
 .L08026a38:
 	.word	0x20008000
 .L08026a3c:
+.ifdef OWN
+	.word	own_flush		@ flush pointer: own/screen.s (then fn_08014f9c)
+.else
 	.word	fn_08014f9c		@ function pointer 0x08014f9d
+.endif
 
 @ ----------------------------------------------------------------------------
 @ fn_08026a40 - hit search over an object tree.

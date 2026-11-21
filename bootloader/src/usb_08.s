@@ -832,6 +832,10 @@ fn_0800197c:
 @ Stores 1 to USB_CTRL (0x40005C40), then 0 to USB_CTRL, 0 to USB_STS
 @ (0x40005C44), 0x1C00 to the halfword at 0x20000078 and 0x1C00 to USB_CTRL.
 @ Returns 0.
+@ Slot build only: between USB_CTRL = 1 (PD cleared, FRST kept) and USB_CTRL = 0
+@ (FRST cleared) a loop of 200 passes of subs / bne, at least 2 cycles each, so
+@ at least 400 cycles (2.7 us at 144 MHz): the transceiver start-up time
+@ tSTARTUP is 1 us (datasheet table 4-41). The stock build has no wait.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_08001a50,"ax",%progbits
 	.p2align 2
@@ -842,6 +846,12 @@ fn_08001a50:
 	ldr	r0, .L08001a6c		@ r0 = 0x40005C40 (USB_CTRL)
 	movs	r1, #1
 	str	r1, [r0]		@ USB_CTRL = 1
+.ifdef SLOT
+	movs	r1, #200		@ wait passes (tSTARTUP)
+.L08001a50_wait:
+	subs	r1, r1, #1
+	bne.n	.L08001a50_wait
+.endif
 	movs	r1, #0
 	ldr	r2, .L08001a70		@ r2 = 0x20000078
 	str	r1, [r0]		@ USB_CTRL = 0
@@ -852,6 +862,9 @@ fn_08001a50:
 	str	r1, [r0]		@ USB_CTRL = 0x1c00
 	movs	r0, #0
 	bx	lr
+.ifdef SLOT
+	.p2align 2			@ the literal words stay word aligned
+.endif
 .L08001a6c:
 	.word	0x40005c40
 .L08001a70:

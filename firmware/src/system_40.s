@@ -227,7 +227,7 @@ fn_0800ba4c:
 .L0800bb0c:
 	.word	0xf7c0ffff
 .L0800bb10:
-	.word	d_08040000
+	.word	0x08040000		@ RCC_CFG bits ORed in at 0x0800BAC8 (not an address)
 .L0800bb14:
 	.word	0x007a1200
 .L0800bb18:
@@ -433,14 +433,22 @@ fn_08027ff4:
 	ldr	r0, .L08028200		@ r0 = 0x40010800 (GPIOA)
 	bl	fn_08008350
 	adr	r0, .L08028204		@ "\n\nstart\n"
+.ifdef OWN
+	bl	own_start		@ 0x08028018: this print, then our start (own/ctl.s)
+.else
 	bl	fn_0801031c
+.endif
 	movw	r1, #0xc14
 	adr	r0, .L08028210		@ "Sys.Config:%d\n"
 	bl	fn_0801031c
 	movw	r1, #0x4ba4
 	ldr	r0, .L08028220		@ r0 = 0x2000057c
 	bl	zero_bytes
+.ifdef OWN
+	bl	own_load		@ 0x08028030: load from copy A or B (own/save.s)
+.else
 	bl	copy_flash_block_to_ram
+.endif
 	ldr	r4, .L08028220		@ r4 = 0x2000057c
 	ldr	r0, .L08028224		@ r0 = 0x12345678
 	ldr	r1, [r4, #0]
@@ -596,7 +604,11 @@ fn_08027ff4:
 .L080281c8:
 	bl	fn_08010174		@ main loop starts here
 	bl	fn_08027830
+.ifdef OWN
+	bl	ctl_loop		@ 0x080281D0: control step around fn_08009400 (own/ctl.s)
+.else
 	bl	fn_08009400
+.endif
 	bl	fn_0800a068
 	ldr.w	r0, [r4, #0xb94]	@ word 0x20005110
 	cbz	r0, .L080281e6

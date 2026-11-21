@@ -47,7 +47,11 @@ vectors:
 	.word branch_to_self_0800628a @ 33 external interrupt 17 (DMA1)
 	.word branch_to_self_0800628a @ 34 external interrupt 18 (ADC1_2)
 	.word branch_to_self_0800628a @ 35 external interrupt 19 (USB_HP_CAN1_TX)
+.ifdef OWN
+	.word usb_irq20_handler       @ 36 external interrupt 20 (USB_LP): own/usb.s
+.else
 	.word fn_0800fe80             @ 36 external interrupt 20 (USB_LP_CAN1_RX0)
+.endif
 	.word branch_to_self_0800628a @ 37 external interrupt 21 (CAN1_RX1)
 	.word branch_to_self_0800628a @ 38 external interrupt 22 (CAN_SCE)
 	.word branch_to_self_0800628a @ 39 external interrupt 23 (EXTI9_5)
@@ -69,7 +73,11 @@ vectors:
 	.word branch_to_self_0800628a @ 55 external interrupt 39 (USART3)
 	.word branch_to_self_0800628a @ 56 external interrupt 40 (EXTI15_10)
 	.word branch_to_self_0800628a @ 57 external interrupt 41 (RTCAlarm)
+.ifdef OWN
+	.word usb_irq42_handler       @ 58 external interrupt 42 (USBWKUP): own/usb.s
+.else
 	.word fn_0800fb40             @ 58 external interrupt 42 (USBWKUP)
+.endif
 	.word branch_to_self_0800628a @ 59 external interrupt 43 (TIM8_BRK)
 	.word branch_to_self_0800628a @ 60 external interrupt 44 (TIM8_UP)
 	.word branch_to_self_0800628a @ 61 external interrupt 45 (TIM8_TRG_COM)

@@ -22,6 +22,32 @@ Per image:
   D2  the routines that load or build a flash-controller address (0x40022000..0x400223FF) are
       exactly the listed ones (ALLOWED below), with the offsets they store to
 Exit status 0 only when every image passes and every control is reported as expected.
+
+Application mode (our build, `make own` in firmware/; SETTINGS_SAVE_DESIGN.md "Tests",
+USB_CONTROL_DESIGN.md 7):
+    python3 -I tests/check_never_brick.py --app [APP_OWN.bin app_own.elf]
+        (default firmware/build/own/APP_OWN.bin and app_own.elf, image at 0x08006000), then the
+        application-mode controls
+    python3 -I tests/check_never_brick.py --app-controls
+        the controls only (a small assembled image with a planted save.s; no own build needed)
+  The functions of save.s are found by symbol from the ELF: every label of firmware/own/save.s,
+  local ones under the ELF's FILE symbol save.s / save.o, global ones by their .global name; each
+  function's range runs from its symbol to the next symbol (objdump's grouping). A label of save.s
+  missing from the ELF is a finding (A0).
+  A1  no 4-aligned word and no constructed value in 0x1FFFF000..0x1FFFFFFF except the chip UID
+      words 0x1FFFF7F0 / 0x1FFFF7F4 / 0x1FFFF7F8 (the serial number); no store there
+  A2  no word / constructed value 0x40022008, 0x4002201C, 0x40022020 and no store to them (W2, D1)
+  A3  the routines that load or build a flash-controller address are functions of save.s only
+      (ALLOWED_OWN_EXTRA below names further ones by the owner's decision; it is empty)
+  A4  every flash address (0x08000000..0x08080000) constructed in a save.s function, and every word
+      of a save.s data label (up to the next symbol), lies in the gate: copy B 0x08066000..
+      0x08067000, the record pages 0x08068000..0x08069000, slots A / B 0x0806F000..0x0807B000,
+      copy A 0x0807F000..0x08080000 (the end values are the exclusive bounds of save.s gate_ok),
+      or is the address of a save.s symbol; so no page 0, application area or slot F target (only
+      0x08069000 itself, REC_END, is accepted: it is the record pages' end bound)
+  A5  no store to a constant flash address outside save.s; inside save.s only to the gate
+  W3 / W4 do not apply (the settings pages are this mode's own targets; the application holds
+  addresses of its own area).
 """
 import os
 import re
@@ -86,12 +112,18 @@ def imm(text):
     return None if m is None else int(m.group(1), 0) & 0xFFFFFFFF
 
 
-def disasm_scan(elf, data, base, slot):
-    """Returns (bad list, {function: set of flash-controller offsets stored, or 'held'})."""
+def disasm_scan(elf, data, base, slot, keyed=False, collect=None, cls=None):
+    """Returns (bad list, {function: set of flash-controller offsets stored, or 'held'}).
+    keyed: functions are (name, address) instead of name; collect: a list that gets
+    ('value', function, address, value, where, how) for every followed value and
+    ('store', function, address, store address, where, mnemonic) for every store with a known base;
+    cls: the classification of values (default classify)."""
     out = subprocess.run([OBJDUMP, '-d', '--no-show-raw-insn', elf], capture_output=True, text=True,
                          check=True).stdout
     bad, users = [], {}
     func, regs = None, {}
+    fkey, faddr = None, None
+    cls = classify if cls is None else cls
 
     def lit(addr):
         o = addr - base
@@ -102,15 +134,19 @@ def disasm_scan(elf, data, base, slot):
     def note(v, where, how):
         if v is None:
             return
-        for c in classify(v, slot):
+        for c in cls(v, slot):
             bad.append('D1 %s: 0x%08X %s in %s at %s' % (c, v, how, func, where))
         if FC_LO <= v < FC_HI:
-            users.setdefault(func, set()).add('held 0x%08X' % v)
+            users.setdefault(fkey, set()).add('held 0x%08X' % v)
+        if collect is not None:
+            collect.append(('value', func, faddr, v, where, how))
 
     for line in out.splitlines():
         h = re.match(r'^([0-9a-f]{8}) <([^>]+)>:$', line)
         if h:
             func, regs = h.group(2), {}
+            faddr = int(h.group(1), 16)
+            fkey = (func, faddr) if keyed else func
             continue
         m = re.match(r'^\s+([0-9a-f]+):\s+(\S+)\s*(.*)$', line)
         if not m or func is None:
@@ -174,7 +210,9 @@ def disasm_scan(elf, data, base, slot):
                 if ea in BAD_FC:
                     bad.append('D1 store to 0x%08X in %s at %s' % (ea, func, where))
                 if FC_LO <= ea < FC_HI:
-                    users.setdefault(func, set()).add('store +0x%X' % (ea - FC_LO))
+                    users.setdefault(fkey, set()).add('store +0x%X' % (ea - FC_LO))
+                if collect is not None:
+                    collect.append(('store', func, faddr, ea, where, mn))
                 if a and ops_main.rstrip().endswith('!'):
                     regs[rn] = ea
             continue
@@ -208,7 +246,220 @@ def check_image(name, binp, elf, base, is_starter):
     return bad, users
 
 
+# ---- application mode (our build) ----
+SAVE_SRC = os.path.join(REPO, 'firmware', 'own', 'save.s')
+OWN_BIN = os.path.join(REPO, 'firmware', 'build', 'own', 'APP_OWN.bin')
+OWN_ELF = os.path.join(REPO, 'firmware', 'build', 'own', 'app_own.elf')
+APP_BASE = 0x08006000
+UID_WORDS = (0x1FFFF7F0, 0x1FFFF7F4, 0x1FFFF7F8)        # chip UID, 96 bits (own.inc CHIP_UID)
+# Functions outside save.s allowed to hold a flash-controller address: {name: set of the
+# 'store +0x..' / 'held 0x..' entries allowed}. Empty: only the owner can decide an entry.
+ALLOWED_OWN_EXTRA = {
+    # Owner's goal "nothing can brick the meter" (2026-11-20 decision): the vendor flash routines
+    # stay in the image but are switched off in the own build (firmware/src/periph_34.s .ifdef OWN:
+    # fn_08008d30 page erase and fn_08008dc0 word program return at once, fn_08008e04 unlock
+    # returns at once, so FLASH_CTRL stays locked for every vendor routine); their remaining
+    # helpers only clear status flags, read the status and set LOCK.
+    'fn_08008d20': {'held 0x40022000', 'store +0xC'},       # FLASH_STS flag clear
+    'fn_08008d30': {'held 0x40022000', 'store +0x10', 'store +0x14'},   # switched off
+    'fn_08008d74': {'held 0x40022000'},                     # FLASH_STS read
+    'fn_08008db0': {'held 0x40022000', 'store +0x10'},      # FLASH_CTRL LOCK
+    'fn_08008dc0': {'held 0x40022000', 'store +0x10'},      # switched off
+    # clock set-up: FLASH_AC (+0x0, wait states / prefetch) only
+    'fn_0800ba4c': {'held 0x40022000', 'store +0x0'},
+    'fn_0800c274': {'held 0x40022000', 'store +0x0'},
+}
+# Aligned words that look like system-memory addresses but are not accesses: the vendor data
+# blocks of firmware/vendor_blobs.tsv (pixel / font data of V1.1, included by .incbin, never used
+# as addresses by the code: the vendor image's own code holds no such literal) and the MEM_READ
+# range table mem_ranges of own/cmd.s (range limits compared with the requested address).
+A1_DATA_SYMBOLS = {'mem_ranges': 32}
+# the gate of save.s gate_ok, each [lo, hi] with hi the exclusive end value of the range
+APP_GATE = ((0x08066000, 0x08067000), (0x08068000, 0x08069000), (0x0806F000, 0x0807B000),
+            (0x0807F000, 0x08080000))
+
+
+def app_classify(v, slot=None):
+    out = []
+    if 0x1FFFF000 <= v <= 0x1FFFFFFF and v not in UID_WORDS:
+        out.append('A1 system memory / option bytes')
+    if v in BAD_FC:
+        out.append('A2 flash option / protection register')
+    return out
+
+
+def in_flash(v):
+    return 0x08000000 <= v <= 0x08080000
+
+
+def in_gate(v):
+    return any(lo <= v <= hi for lo, hi in APP_GATE)
+
+
+def elf_symbols(elf):
+    """readelf -s: list of (address, type, bind, name, file) for every named symbol in a section;
+    file is the basename of the FILE symbol that precedes a local symbol (None for globals)."""
+    out = subprocess.run(['arm-none-eabi-readelf', '-sW', elf], capture_output=True, text=True,
+                         check=True).stdout
+    syms, cur = [], None
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) < 8 or not p[0].endswith(':') or not p[0][:-1].isdigit():
+            continue
+        val, typ, bind, ndx, name = int(p[1], 16), p[3], p[4], p[6], p[7]
+        if typ == 'FILE':
+            cur = os.path.basename(name)
+            continue
+        if typ == 'SECTION' or name.startswith('$') or ndx in ('UND', 'ABS'):
+            continue
+        if typ == 'FUNC':
+            val &= ~1
+        syms.append((val, typ, bind, name, cur if bind == 'LOCAL' else None))
+    return syms
+
+
+def save_symbols(elf, src):
+    """The labels of save.s in the ELF: ({name: (address, type)}, labels missing from the ELF)."""
+    text = open(src).read()
+    labels = set(re.findall(r'^([A-Za-z_][A-Za-z0-9_]*):', text, re.M))
+    globs = set(re.findall(r'^\s*\.global\s+([A-Za-z_][A-Za-z0-9_]*)', text, re.M))
+    found = {}
+    for val, typ, bind, name, f in elf_symbols(elf):
+        if name not in labels:
+            continue
+        if bind == 'LOCAL' and f in ('save.s', 'save.o'):
+            found[name] = (val, typ)
+        elif bind == 'GLOBAL' and name in globs:
+            found[name] = (val, typ)
+    return found, sorted(labels - set(found))
+
+
+def check_app(binp, elf, src=SAVE_SRC, base=APP_BASE):
+    """Application-mode scan; returns (findings, flash-controller users)."""
+    data = open(binp, 'rb').read()
+    bad = []
+    a1_skip = []
+    tsv = os.path.join(REPO, 'firmware', 'vendor_blobs.tsv')
+    for line in open(tsv):
+        f = line.split()
+        if len(f) == 3 and not line.startswith('#') and f[0] != 'address':
+            a1_skip.append((int(f[0], 16), int(f[0], 16) + int(f[1])))
+    for a, t, b, n, fl in elf_symbols(elf):
+        if n in A1_DATA_SYMBOLS:
+            a1_skip.append((a, a + A1_DATA_SYMBOLS[n]))
+    for off in range(0, len(data) - 3, 4):
+        v = struct.unpack_from('<I', data, off)[0]
+        a = base + off
+        for c in app_classify(v):
+            if c.startswith('A1') and any(lo <= a and a + 4 <= hi for lo, hi in a1_skip):
+                continue
+            bad.append('%s: word 0x%08X at 0x%08X' % (c, v, a))
+    found, missing = save_symbols(elf, src)
+    if missing:
+        bad.append('A0 labels of %s missing from the ELF: %s' % (os.path.basename(src), missing))
+    save_addr = {a for a, t in found.values()}
+    collect = []
+    d_bad, users = disasm_scan(elf, data, base, True, keyed=True, collect=collect, cls=app_classify)
+    bad += d_bad
+    for (name, fa), how in sorted(users.items(), key=lambda x: x[0][1]):
+        if fa in save_addr:
+            continue
+        if name in ALLOWED_OWN_EXTRA and how <= ALLOWED_OWN_EXTRA[name]:
+            continue
+        bad.append('A3 flash-controller address outside save.s: %s at 0x%08X (%s)'
+                   % (name, fa, ', '.join(sorted(how))))
+    for kind, name, fa, v, where, how in collect:
+        mine = fa in save_addr
+        if kind == 'store':
+            if 0x1FFFF000 <= v <= 0x1FFFFFFF:
+                bad.append('A1 store to 0x%08X in %s at %s' % (v, name, where))
+            if in_flash(v) and (not mine or not in_gate(v)):
+                bad.append('A5 store to flash 0x%08X in %s at %s' % (v, name, where))
+        elif mine and in_flash(v) and not in_gate(v) and v not in save_addr:
+            bad.append('A4 flash address 0x%08X (%s) in save.s %s at %s outside the gate' % (v, how, name, where))
+    bounds = sorted({s[0] for s in elf_symbols(elf)} | {base + len(data)})
+    for name, (a, typ) in sorted(found.items()):
+        if typ == 'FUNC':
+            continue
+        end = next((b for b in bounds if b > a), base + len(data))
+        for w in range(a, min(end, base + len(data)) - 3, 4):
+            v = struct.unpack_from('<I', data, w - base)[0]
+            if in_flash(v) and not in_gate(v) and v not in save_addr:
+                bad.append('A4 word 0x%08X in save.s data %s at 0x%08X outside the gate' % (v, name, w))
+    return bad, users
+
+
+def app_controls():
+    """A planted image: other.s (first, at 0x08006000) and a control save.s; the findings must be
+    exactly the planted ones. Returns the number of failures."""
+    import tempfile
+    d = tempfile.mkdtemp(prefix='nb_app_')
+    other = os.path.join(d, 'other.s')
+    save = os.path.join(d, 'save.s')
+    head = '.syntax unified\n.thumb\n.text\n'
+    open(other, 'w').write(head +
+        '.global rogue\n.thumb_func\n.type rogue, %function\nrogue:\n'
+        ' ldr r0, =0x40022000\n str r1, [r0, #4]\n ldr r2, =0x08070000\n str r1, [r2]\n bx lr\n.ltorg\n')
+    open(save, 'w').write(head +
+        '.global flash_word\n.thumb_func\n.type flash_word, %function\nflash_word:\n'
+        ' ldr r0, =0x40022000\n str r1, [r0, #0x10]\n ldr r2, =0x0807F000\n ldr r2, =0x08069000\n'
+        ' ldr r2, =0x08067000\n ldr r0, =0x1FFFF7F0\n ldr r1, =gate_ranges\n bx lr\n.ltorg\n'
+        '.thumb_func\n.type bad_targets, %function\nbad_targets:\n'
+        ' ldr r3, =0x08069800\n ldr r3, =0x08010000\n bx lr\n.ltorg\n'
+        '.p2align 2\ngate_ranges:\n .word 0x08066000, 0x08067000, 0x1FFFF800\n')
+    objs = []
+    for s in (other, save):
+        subprocess.run(['arm-none-eabi-as', '-mcpu=cortex-m4', '-mthumb', '-o', s[:-2] + '.o', s], check=True)
+        objs.append(s[:-2] + '.o')
+    elf, binp = os.path.join(d, 'ctl.elf'), os.path.join(d, 'ctl.bin')
+    subprocess.run(['arm-none-eabi-ld', '-Ttext=0x%08X' % APP_BASE, '-e', 'rogue', '-o', elf] + objs, check=True)
+    subprocess.run(['arm-none-eabi-objcopy', '-O', 'binary', elf, binp], check=True)
+    bad, users = check_app(binp, elf, src=save)
+    expect = ['A3 flash-controller address outside save.s: rogue',
+              'A5 store to flash 0x08070000 in rogue',
+              'A4 flash address 0x08069800',
+              'A4 flash address 0x08010000',
+              'A1 system memory / option bytes: word 0x1FFFF800']
+    fails = 0
+    for e in expect:
+        ok = sum(1 for b in bad if b.startswith(e)) == 1
+        print('control app %-60s %s' % (e, 'found' if ok else 'NOT FOUND'))
+        fails += not ok
+    extra = [b for b in bad if not any(b.startswith(e) for e in expect)]
+    if extra:
+        print('    CONTROL FAIL: unexpected findings %r' % extra)
+        fails += 1
+    held = sorted('%s %s' % (k[0], sorted(v)) for k, v in users.items())
+    print('control app flash-controller users: %s' % held)
+    return fails
+
+
+def main_app(argv):
+    fails = 0
+    if argv[0] == '--app':
+        binp, elf = (argv[1], argv[2]) if len(argv) >= 3 else (OWN_BIN, OWN_ELF)
+        for p in (binp, elf):
+            if not os.path.exists(p):
+                print('own build missing: %s' % p)
+                sys.exit(1)
+        bad, users = check_app(binp, elf)
+        print('%-8s %s' % ('APP_OWN', 'OK' if not bad else 'FAIL'))
+        for (name, fa) in sorted(users, key=lambda k: k[1]):
+            print('    flash controller: %-24s 0x%08X %s' % (name, fa, ', '.join(sorted(users[(name, fa)]))))
+        for b in bad:
+            print('    ' + b)
+        fails += bool(bad)
+    fails += app_controls()
+    print('never-brick application mode: %s' % ('PASS' if not fails else 'FAIL (%d)' % fails))
+    sys.exit(1 if fails else 0)
+
+
 def main():
+    if len(sys.argv) > 1:
+        if sys.argv[1] not in ('--app', '--app-controls'):
+            print(__doc__)
+            sys.exit(2)
+        main_app(sys.argv[1:])
     fails = 0
     imgs = [('STARTER', os.path.join(REPO, 'starter/build/STARTER.bin'), os.path.join(REPO, 'starter/build/starter.elf'),
              0x08000000, True)]

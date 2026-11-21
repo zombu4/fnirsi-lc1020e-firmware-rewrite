@@ -935,11 +935,22 @@ zero_fill:
 @   7. Calls fn_08003ba8, fn_08002c48, fn_080021dc and fn_08002c10, then
 @      loops calling fn_08001150 until the byte at 0x20000274 (0x20000250 +
 @      0x24) equals 2, calls fn_0800320e(1000) and system_reset.
-@ Slot build: step 2 calls slot_app_start instead of the SP test (its checks,
-@ the OK record, flash lock, start_application); step 7 calls uf2_init in
-@ place of fn_08003ba8 and slot_confirm after fn_08002c10 (OK record after the
-@ USB start); the alignment nop before the loop and the two literals of the
-@ SP test are left out.
+@ Slot build: main first calls slot_trial_wdg (WDG_ON = 0, then the watchdog
+@ of a trial start); step 2 reads the key through slot_key_check (the request
+@ word UPDT acts as the key held; UPDT and RSTR set WDG_ON = 3 after
+@ slot_trial_wdg, so the application's running IWDG is fed from there on) and
+@ calls slot_app_start instead of the SP test (its
+@ checks, the OK record, the hand-over word, flash lock, start); step 7 calls
+@ uf2_init in place of fn_08003ba8 and slot_confirm after fn_08002c10 (OK
+@ record after the USB start), the loop calls slot_feed in every pass, and
+@ state 2 goes to slot_finish (result word, 1000 ms with feeds, soft restart) in
+@ place of the wait and system_reset; the wait for the power key (PC6) to be
+@ released feeds too (a key held by the user is not a hang). Left out: the
+@ alignment nop before the loop, the two literals of the SP test and the 1000
+@ in r5. Code bytes of the slot main against the stock main: +4
+@ slot_trial_wdg, -14 SP test, +4 PC6 feed, +4 slot_confirm, -4 the 1000 in
+@ r5, -2 nop, +4 slot_feed, -8 tail = -12, a multiple of 4, so the literals and
+@ the adr targets after the code stay word aligned.
 @ ----------------------------------------------------------------------------
 	.section .text.main,"ax",%progbits
 	.p2align 2
@@ -947,13 +958,21 @@ zero_fill:
 	.thumb_func
 	.type main, %function
 main:
+.ifdef SLOT
+	bl	slot_trial_wdg		@ slot build: watchdog when this start is a trial
+.endif
 	bl	fn_080009c0
 	bl	fn_08000d58
 	bl	fn_08000cfc
 	ldr	r6, .L08003f0c
 	movs	r1, #0x80
 	mov	r0, r6
+.ifdef SLOT
+	bl	slot_key_check		@ slot build: 0 when the update request word is set,
+					@ else fn_080007a4(GPIOC, 0x80)
+.else
 	bl	fn_080007a4
+.endif
 	cbz	r0, .L08003e4e
 .ifdef SLOT
 	bl	slot_app_start		@ slot build: checks, OK record, flash lock, start
@@ -1002,6 +1021,9 @@ main:
 	ldr	r0, .L08003f30
 	bl	fn_0800080c
 .L08003ea4:
+.ifdef SLOT
+	bl	slot_feed		@ slot build: feed while the power key (PC6) is held
+.endif
 	movs	r1, #0x40
 	mov	r0, r6
 	bl	fn_080007a4
@@ -1033,7 +1055,6 @@ main:
 	bl	fn_08002c10
 	bl	slot_confirm		@ slot build: OK record after the USB start
 	ldr	r4, .L08003f3c
-	mov.w	r5, #0x3e8
 .else
 	bl	fn_08003ba8
 	bl	fn_08002c48
@@ -1044,14 +1065,21 @@ main:
 	nop
 .endif
 .L08003ef4:
+.ifdef SLOT
+	bl	slot_feed		@ slot build: watchdog feed (trial start only)
+.endif
 	bl	fn_08001150
 	ldrb.w	r0, [r4, #0x24]
 	cmp	r0, #2
 	bne.n	.L08003ef4
+.ifdef SLOT
+	bl	slot_finish		@ slot build: result word, 1000 ms with feeds, soft restart
+.else
 	mov	r0, r5
 	bl	fn_0800320e
 	bl	system_reset
 	b.n	.L08003ef4
+.endif
 .L08003f0c:
 	.word 0x40011000	@ GPIOC base
 .ifndef SLOT

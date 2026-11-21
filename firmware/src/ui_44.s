@@ -53,7 +53,11 @@
 	.thumb_func
 	.type fn_0800f294, %function
 fn_0800f294:
+.ifdef OWN
+	b.w	own_menu		@ our build: the menu without "Language" (own/lang.s)
+.else
 	push.w	{r4, r5, r6, r7, r8, r9, r10, r11, lr}
+.endif
 	ldr	r5, .L0800f5c4
 	sub	sp, #0xcc
 	ldr.w	r2, [r5, #0xc30]
@@ -643,10 +647,18 @@ fn_0800f5e8:
 .L0800f788:
 	ldr.w	r0, [r4, #0xbe0]
 	.inst.n	0x1c40		@ adds r0, r0, #1
+.ifdef OWN
+	nop.w			@ our build: the language word is not toggled (own_menu)
+.else
 	str.w	r0, [r4, #0xbe0]
+.endif
 	cmp	r0, #1
 	ble.n	.L0800f82a
+.ifdef OWN
+	nop.w			@ our build: no store of 0 to the language word
+.else
 	str.w	r5, [r4, #0xbe0]
+.endif
 	b.n	.L0800f82a
 .L0800f79c:
 	ldr	r1, .L0800f83c

@@ -546,6 +546,9 @@ fn_080081fa:
 @ Ends with a tail jump to fn_0800911c(0x300200, 1).
 @ Registers: r5 = GPIOA, r9 = GPIOB, r8 = GPIOC, r4 = 0x100, r6 = 0x2000,
 @ r7 = 0x1000.
+@ Own build: the first call (PA8, the power latch, driven low until main
+@ 0x08027FF4 sets it high after 0x08011C68(1000)) goes through own_pa8_level
+@ (own/ctl.s), which keeps PA8 high after a soft restart.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_08008200,"ax",%progbits
 	.p2align 2
@@ -559,7 +562,11 @@ fn_08008200:
 	movs	r2, #0
 	mov	r1, r4
 	mov	r0, r5
+.ifdef OWN
+	bl	own_pa8_level		@ 0x08008210: (GPIOA, 0x100, 0), or 1 after a soft restart
+.else
 	bl	fn_08008350		@ (GPIOA, 0x100, 0)
+.endif
 	movs	r2, #0x10
 	mov	r1, r4
 	mov	r0, r5
@@ -892,17 +899,29 @@ fn_080085d0:
 	ldr	r4, .L08008634		@ 0x40020008
 	movs	r1, #0x80
 	mov	r0, r4
+.ifdef OWN
+	bl	own_dma_rearm		@ own build: channel disabled before its count (own/fix.s)
+.else
 	bl	fn_080087ce
+.endif
 	ldr	r5, .L08008634		@ 0x40020008
 	movs	r1, #0x80
 	adds	r5, #0x8c		@ 0x40020094
 	mov	r0, r5
+.ifdef OWN
+	bl	own_dma_rearm
+.else
 	bl	fn_080087ce
+.endif
 	ldr	r6, .L0800862c		@ 0x40020404
 	movs	r1, #0x80
 	adds	r6, #0x54		@ 0x40020458
 	mov	r0, r6
+.ifdef OWN
+	bl	own_dma_rearm
+.else
 	bl	fn_080087ce
+.endif
 	movs	r1, #1
 	mov	r0, r4
 	bl	fn_08008770
@@ -1401,8 +1420,13 @@ fn_08008d20:
 	.thumb_func
 	.type fn_08008d30, %function
 fn_08008d30:
+.ifdef OWN
+	movs	r0, #8			@ own build: the vendor page erase is switched off (returns at
+	bx	lr			@ once; all flash writes go through own/save.s)
+.else
 	push	{r4, r5, r6, lr}
 	mov	r5, r0
+.endif
 	movs	r0, #0x7c
 	bl	fn_08008d20
 	mov.w	r6, #0xb0000
@@ -1512,8 +1536,13 @@ fn_08008db0:
 	.thumb_func
 	.type fn_08008dc0, %function
 fn_08008dc0:
+.ifdef OWN
+	movs	r0, #8			@ own build: the vendor word program is switched off (returns
+	bx	lr			@ 8, as for a refused address; flash writes go through save.s)
+.else
 	push	{r4, r5, r6, r7, lr}
 	mov	r5, r0
+.endif
 	mov	r6, r1
 	lsls	r0, r0, #0x1e		@ low two address bits
 	beq.n	.L08008dce
@@ -1554,7 +1583,12 @@ fn_08008dc0:
 	.thumb_func
 	.type fn_08008e04, %function
 fn_08008e04:
+.ifdef OWN
+	bx	lr			@ own build: the vendor flash unlock is switched off (the
+					@ controller stays locked for every vendor routine)
+.else
 	ldr	r0, .L08008e14		@ 0x40022000 (flash registers)
+.endif
 	ldr	r1, .L08008e10		@ 0x45670123
 	str	r1, [r0, #4]
 	ldr	r1, .L08008e18		@ 0xcdef89ab

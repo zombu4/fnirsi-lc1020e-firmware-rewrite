@@ -1228,8 +1228,16 @@ fn_08023678:
 	.thumb_func
 	.type fn_08023690, %function
 fn_08023690:
+.ifdef OWN
+	b.w	own_obj_del		@ own build: clear a stale "screen to load" first (own/fix.s);
+	.global	own_obj_del_back	@ the two instructions below are done there
+	.thumb_func
+	.type	own_obj_del_back, %function
+own_obj_del_back:
+.else
 	push	{r4, r5, r6, lr}
 	mov	r5, r0
+.endif
 	bl	fn_08025400
 	mov	r0, r5
 	bl	fn_08023fa4

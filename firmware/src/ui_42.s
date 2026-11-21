@@ -384,8 +384,13 @@ fn_0800d6e4:
 	.asciz	"%s%s"
 	.byte	0x00, 0x00, 0x00	@ padding
 .L0800d844:
+.ifdef OWN
+	.asciz	"(FACT)"		@ our build: factory-mode suffix in English (font
+	.byte	0x00, 0x00, 0x00, 0x00, 0x00	@ 0x0802f0d8 holds ( ) A C F T), same 12 bytes
+.else
 	.asciz	"(\345\216\202\345\256\266)"
 	.byte	0x00, 0x00, 0x00	@ padding
+.endif
 
 @ ----------------------------------------------------------------------------
 @ fn_0800d850 - sets the colours of two pairs of objects: no parameters; the
@@ -496,7 +501,11 @@ fn_0800d8f0:
 .L0800d91c:
 	movs	r0, #1
 	str.w	r0, [r1, #0xbc4]	@ word 0x20001140 = 1
+.ifdef OWN
+	bl	own_save		@ 0x0800D922: our save (own/save.s)
+.else
 	bl	fn_08014b94
+.endif
 	ldr	r0, .L0800d93c		@ 0x20000288
 	ldr	r0, [r0]
 	bl	fn_08023690

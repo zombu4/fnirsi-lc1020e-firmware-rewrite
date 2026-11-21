@@ -1,5 +1,7 @@
 @ rodata_03.s - read-only data 0x0804bbf8..0x0805113b: image records, class records, FFT and sine tables, double-precision math tables, strings
 @ Part of the FNIRSI LC1020E firmware rewrite: port of the application V1.1 (Thumb-2 assembly).
+@ Every pointer word is a label. The addresses in labels and comments are those of V1.1; in our
+@ build (make own) the part sits lower (link_own.ld).
 	.syntax unified
 	.arch armv7e-m
 	.fpu fpv4-sp-d16
@@ -12,7 +14,9 @@
 @ descriptor: header word (bits 0-4, bits 10-20, bits 21-31 hold three fields),
 @ a size field and a data pointer to the pixel data stored just before the
 @ record. The code passes a record address in r1 to the function at 0x08021c14,
-@ which stores it at [object+0x24] when 0x08021d60 returns 0.
+@ which stores it at [object+0x24] when 0x08021d60 returns 0. The descriptor
+@ words are typed (the data pointer as the label of the data); each vendor
+@ block follows from offset 12 (or 9 after a typed 3-byte start).
 @ ----------------------------------------------------------------------------
 
 @ 300 bytes: descriptor 0x0804bbf8 (header 0x0484E009, size 5680, data pointer
@@ -20,13 +24,23 @@
 @ function at 0x0800f294.
 	.global d_0804bbf8
 d_0804bbf8:
-	.incbin "assets/vendor/0804bbf8.bin"
+	.word 0x0484e009		@ cf 9, 312 x 36
+	.word 5680			@ size
+	.word d_0804a5c8		@ data
+	.global d_0804bc04
+d_0804bc04:
+	.incbin "assets/vendor/0804bbf8.bin", 12
 
 @ 92 bytes: descriptor 0x0804bd24 (header 0x01C07C09, size 288, data pointer
 @ 0x0804bc04) followed by 80 bytes of data of the record at 0x0804bda4.
 	.global d_0804bd24
 d_0804bd24:
-	.incbin "assets/vendor/0804bd24.bin"
+	.word 0x01c07c09		@ cf 9, 31 x 14
+	.word 288			@ size
+	.word d_0804bc04		@ data
+	.global d_0804bd30
+d_0804bd30:
+	.incbin "assets/vendor/0804bd24.bin", 12
 
 @ Five words 0x20000000 (no reference proves an address; written as numbers)
 	.word 0x20000000
@@ -44,54 +58,91 @@ d_0804bd24:
 @ 0x0804bd30) followed by the 3344 data bytes of the record at 0x0804cac0.
 	.global d_0804bda4
 d_0804bda4:
-	.incbin "assets/vendor/0804bda4.bin"
+	.word 0x01a01c09		@ cf 9, 7 x 13
+	.word 116			@ size
+	.word d_0804bd30		@ data
+	.global d_0804bdb0
+d_0804bdb0:
+	.incbin "assets/vendor/0804bda4.bin", 12
 
 @ 180 bytes: descriptor 0x0804cac0 (header 0x0281D00A, size 3344, data pointer
 @ 0x0804bdb0) followed by the 168 data bytes of the record at 0x0804cb74.
 @ Loaded in the function at 0x0800e6c8.
 	.global d_0804cac0
 d_0804cac0:
-	.incbin "assets/vendor/0804cac0.bin"
+	.word 0x0281d00a		@ cf 10, 116 x 20
+	.word 3344			@ size
+	.word d_0804bdb0		@ data
+	.global d_0804cacc
+d_0804cacc:
+	.incbin "assets/vendor/0804cac0.bin", 12
 
 @ 204 bytes: descriptor 0x0804cb74 (header 0x01A04009, size 168, data pointer
 @ 0x0804cacc) followed by the 192 data bytes of the record at 0x0804cc40.
 	.global d_0804cb74
 d_0804cb74:
-	.incbin "assets/vendor/0804cb74.bin"
+	.word 0x01a04009		@ cf 9, 16 x 13
+	.word 168			@ size
+	.word d_0804cacc		@ data
+	.global d_0804cb80
+d_0804cb80:
+	.incbin "assets/vendor/0804cb74.bin", 12
 
-@ First 3 bytes of the descriptor at 0x0804cc40 (header 0x02004009, size 192,
-@ data pointer 0x0804cb80); the descriptor continues in the next piece
+@ Descriptor at 0x0804cc40 (header 0x02004009, size 192, data pointer
+@ 0x0804cb80), typed; the block 0804cc43.bin holds its last 9 bytes and then
+@ the 3396 data bytes of the record at 0x0804d990
 	.global d_0804cc40
 d_0804cc40:
-	.byte 0x09, 0x40, 0x00
-
-@ 3405 bytes: last 9 bytes of the descriptor at 0x0804cc40 followed by the
-@ 3396 data bytes of the record at 0x0804d990
-	.incbin "assets/vendor/0804cc43.bin"
+	.word 0x02004009		@ cf 9, 16 x 16
+	.word 192			@ size
+	.word d_0804cb80		@ data
+	.global d_0804cc4c
+d_0804cc4c:
+	.incbin "assets/vendor/0804cc43.bin", 9
 
 @ 204 bytes: descriptor 0x0804d990 (header 0x08818809, size 3396, data pointer
 @ 0x0804cc4c) followed by the 190 data bytes of the record at 0x0804da5c.
 	.global d_0804d990
 d_0804d990:
-	.incbin "assets/vendor/0804d990.bin"
+	.word 0x08818809		@ cf 9, 98 x 68
+	.word 3396			@ size
+	.word d_0804cc4c		@ data
+	.global d_0804d99c
+d_0804d99c:
+	.incbin "assets/vendor/0804d990.bin", 12
 
 @ 7668 bytes: descriptor 0x0804da5c (header 0x02403409, size 190, data pointer
 @ 0x0804d99c) followed by the 7656 data bytes of the record at 0x0804f850.
 	.global d_0804da5c
 d_0804da5c:
-	.incbin "assets/vendor/0804da5c.bin"
+	.word 0x02403409		@ cf 9, 13 x 18
+	.word 190			@ size
+	.word d_0804d99c		@ data
+	.global d_0804da68
+d_0804da68:
+	.incbin "assets/vendor/0804da5c.bin", 12
 
 @ 584 bytes: descriptor 0x0804f850 (header 0x0D024809, size 7656, data pointer
 @ 0x0804da68) followed by the 570 data bytes of the record at 0x0804fa98.
 	.global d_0804f850
 d_0804f850:
-	.incbin "assets/vendor/0804f850.bin"
+	.word 0x0d024809		@ cf 9, 146 x 104
+	.word 7656			@ size
+	.word d_0804da68		@ data
+	.global d_0804f85c
+d_0804f85c:
+	.incbin "assets/vendor/0804f850.bin", 12
 
 @ 80 bytes: descriptor 0x0804fa98 (header 0x02E0B009, size 570, data pointer
 @ 0x0804f85c) followed by 68 bytes of data of the record at 0x0804fce0.
 	.global d_0804fa98
 d_0804fa98:
-	.incbin "assets/vendor/0804fa98.bin"
+	.word 0x02e0b009		@ cf 9, 44 x 23
+	.word 570			@ size
+	.word d_0804f85c		@ data
+	.global d_0804faa4
+d_0804faa4:
+	.incbin "assets/vendor/0804fa98.bin", 12
 
 @ 16 bytes of image data: "Fgwwwwwwwwwwvd " and a NUL
 	.ascii "Fgwwwwwwwwwwvd "
@@ -111,9 +162,9 @@ d_0804fa98:
 @ 0x0804faa4). Loaded in the function at 0x0800e6c8.
 	.global d_0804fce0
 d_0804fce0:
-	.word 0x02e0b009
-	.word 0x0000023a
-	.word 0x0804faa4
+	.word 0x02e0b009		@ cf 9, 44 x 23
+	.word 0x0000023a		@ size 570
+	.word d_0804faa4		@ data
 
 @ ----------------------------------------------------------------------------
 @ FFT descriptor (0x0804fcec): halfword +0 length n = 128, word +4 twiddle table
@@ -125,8 +176,8 @@ d_0804fce0:
 d_0804fcec:
 	.short 0x0080
 	.short 0x0000
-	.word 0x0804fd74
-	.word 0x08050174
+	.word d_0804fd74		@ +4 twiddle table
+	.word d_08050174		@ +8 bit-reverse table
 	.word 0x000000d0
 
 @ ----------------------------------------------------------------------------
@@ -158,7 +209,7 @@ d_0804fd18:
 @ Class record at 0x0804fd20 (parent 0x0804fcfc), object size 0x3C bytes
 	.global d_0804fd20
 d_0804fd20:
-	.word 0x0804fcfc
+	.word d_0804fcfc		@ +0 parent: the base class record
 	.word fn_080211cc
 	.word fn_080219b6
 	.word 0x00000000
@@ -169,7 +220,7 @@ d_0804fd20:
 @ Class record at 0x0804fd3c (parent 0x0804fcfc), object size 0x4C bytes
 	.global d_0804fd3c
 d_0804fd3c:
-	.word 0x0804fcfc
+	.word d_0804fcfc		@ +0 parent: the base class record
 	.word fn_08021ef8
 	.word fn_08021f74
 	.word 0x00000000
@@ -183,14 +234,20 @@ d_0804fd3c:
 @ 0x08050174 up to 0x08050314
 	.global d_0804fd58
 d_0804fd58:
-	.word 0x0804fcfc
+	.word d_0804fcfc		@ +0 parent: the base class record
 	.word fn_08022950
 	.word 0x00000000
 	.word 0x00000000
 	.word fn_0802297c
 @ the first 8 bytes of the blob finish the record (0x27D127D1, 0x000002C0),
 @ the rest is the FFT tables (1440 bytes from 0x0804fd74)
-	.incbin "assets/vendor/0804fd6c.bin"
+	.incbin "assets/vendor/0804fd6c.bin", 0, 8
+	.global d_0804fd74
+d_0804fd74:				@ 256 floats (FFT descriptor +4)
+	.incbin "assets/vendor/0804fd6c.bin", 8, 0x400
+	.global d_08050174
+d_08050174:				@ 208 halfwords (FFT descriptor +8)
+	.incbin "assets/vendor/0804fd6c.bin", 0x408
 
 @ ----------------------------------------------------------------------------
 @ Sine table of sine_radians: 513 floats T[k] = sin(2*pi*k/512), k = 0..512.
@@ -272,7 +329,7 @@ d_08050f0c:
 @ Class record at 0x08050f14 (parent 0x0804fcfc), object size 0x8C bytes
 	.global d_08050f14
 d_08050f14:
-	.word 0x0804fcfc
+	.word d_0804fcfc		@ +0 parent: the base class record
 	.word fn_0801d1b8
 	.word fn_0801d210
 	.word 0x00000000
@@ -283,7 +340,7 @@ d_08050f14:
 @ Class record at 0x08050f30 (parent 0x0804fcfc), object size 0x3C bytes
 	.global d_08050f30
 d_08050f30:
-	.word 0x0804fcfc
+	.word d_0804fcfc		@ +0 parent: the base class record
 	.word fn_08022f28
 	.word fn_08022f44
 	.word 0x00000000
@@ -294,7 +351,7 @@ d_08050f30:
 @ Class record at 0x08050f4c (parent 0x0804fcfc), object size 0x40 bytes
 	.global d_08050f4c
 d_08050f4c:
-	.word 0x0804fcfc
+	.word d_0804fcfc		@ +0 parent: the base class record
 	.word fn_0801c83c
 	.word 0x00000000
 	.word 0x00000000
@@ -306,7 +363,7 @@ d_08050f4c:
 @ 4 zero bytes of padding to the 8-aligned double table at 0x08050f88
 	.global d_08050f68
 d_08050f68:
-	.word 0x0804fcfc
+	.word d_0804fcfc		@ +0 parent: the base class record
 	.word fn_0802744c
 	.word fn_08027488
 	.word 0x00000000
@@ -427,61 +484,95 @@ d_080510c0:
 	.word 0x3c439041
 	.word 0xfe5163ab
 
+@ Strings from here on are read through the pointer tables of the initial RAM image; the
+@ English ones carry a label with their V1.1 address, which the typed image of our build
+@ (rodata_04.s ram_image) names. The Chinese ones are reached only through row 0 of the
+@ packed V1.1 image.
 @ String "Version:V1.1" and NUL
+	.global d_080510d0
+d_080510d0:
 	.asciz "Version:V1.1"
 
 @ 3 zero bytes padding to the next 4-byte boundary
 	.byte 0x00, 0x00, 0x00
 
 @ String: UTF-8 bytes of the Chinese word for "version" (E7 89 88 E6 9C AC),
-@ then ":V1.1" and NUL
+@ then ":V1.1" and NUL (0x080510e0, row 0 of the RAM table 0x20000194). Our build: freed
+@ (12 bytes, 12 mod 4 = 0 bytes left).
+.ifndef OWN
 	.byte 0xe7, 0x89, 0x88, 0xe6, 0x9c, 0xac
 	.asciz ":V1.1"
+.endif
 
 @ String "LED" and NUL
+	.global d_080510ec
+d_080510ec:
 	.asciz "LED"
 
 @ String "Model:LC1020E" and NUL
+	.global d_080510f0
+d_080510f0:
 	.asciz "Model:LC1020E"
 
 @ 2 zero bytes padding
 	.byte 0x00, 0x00
 
 @ String: UTF-8 bytes of the Chinese word for "model" (E5 9E 8B E5 8F B7),
-@ then ":LC1020E" and NUL
+@ then ":LC1020E" and NUL (0x08051100, row 0 of the RAM table 0x20000194), 1 zero byte
+@ padding. Our build: freed (16 bytes, 0 bytes left).
+.ifndef OWN
 	.byte 0xe5, 0x9e, 0x8b, 0xe5, 0x8f, 0xb7
 	.asciz ":LC1020E"
-
-@ 1 zero byte padding
 	.byte 0x00
+.endif
 
 @ String "OFF" and NUL
+	.global d_08051110
+d_08051110:
 	.asciz "OFF"
 
 @ Unit strings "mF", "nF", "pF", "uF" (each 2 characters plus 2 zero bytes)
 @ and "SETTING" with NUL; read through RAM pointers
+	.global d_08051114
+d_08051114:
 	.asciz "mF"
 	.byte 0x00
+	.global d_08051118
+d_08051118:
 	.asciz "nF"
 	.byte 0x00
+	.global d_0805111c
+d_0805111c:
 	.asciz "pF"
 	.byte 0x00
+	.global d_08051120
+d_08051120:
 	.asciz "uF"
 	.byte 0x00
+	.global d_08051124
+d_08051124:
 	.asciz "SETTING"
 
 @ String "NG" and NUL, 1 zero byte padding
+	.global d_0805112c
+d_0805112c:
 	.asciz "NG"
 	.byte 0x00
 
 @ String "mH" and NUL, 1 zero byte padding
+	.global d_08051130
+d_08051130:
 	.asciz "mH"
 	.byte 0x00
 
 @ String "nH" and NUL, 1 zero byte padding
+	.global d_08051134
+d_08051134:
 	.asciz "nH"
 	.byte 0x00
 
 @ String "uH" and NUL, 1 zero byte padding
+	.global d_08051138
+d_08051138:
 	.asciz "uH"
 	.byte 0x00

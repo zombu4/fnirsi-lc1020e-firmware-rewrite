@@ -1365,8 +1365,16 @@ fn_08026342:
 	.thumb_func
 	.type fn_0802636a, %function
 fn_0802636a:
+.ifdef OWN
+	b.w	own_event_obj		@ own build: no event for object 0 (own/fix.s); the two
+	.global	own_event_obj_back	@ instructions below are done there
+	.thumb_func
+	.type	own_event_obj_back, %function
+own_event_obj_back:
+.else
 	push	{r4, r5, r6, lr}
 	mov	r5, r2
+.endif
 	mov	r4, r0
 	bl	fn_08026700
 	mov	r1, r5
