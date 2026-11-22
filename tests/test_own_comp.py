@@ -307,7 +307,9 @@ def m46_bias_transient():
     midpoints at two consecutive window closes differ by
     at most 4 counts on both channels, then publishing resumes. A midpoint that never becomes steady (a
     sawtooth of 40 counts per s, period 1.37 s, 0..54.8 counts): the first publish comes at the 30-s bound
-    (within one window). Before the change publishes come at the window rate.
+    (within one window); the case checks first that its midpoints at every pair of consecutive closes up to
+    that publish differ by more than 4 counts on at least one channel (never steady by the firmware's own
+    rule). Before the change publishes come at the window rate.
     The second source was an exponential with tau = 1000 s, which moves 150 / 1000 = 0.15 counts per s,
     well below 4 counts between two closes: steady at once (2026-11-22: first publish 1.044 s after the
     change); the sawtooth moves 20 counts per 0.5 s and jumps back at its period."""
@@ -348,6 +350,16 @@ def m46_bias_transient():
                       '%s: a steady close at %.3f was not published' % (what, cl[j][0]))
             check(t_first - t_b > 2.0, '%s: published %.3f s after the change' % (what, t_first - t_b))
         else:
+            # the input's property, by the firmware's criterion (meas_bias_wait: steady when both midpoints
+            # at a close differ from those at the close before by at most BIAS_LIM = 4 counts): every
+            # close up to the first publish is inside the wait (MF_BIASP != 0 at its entry), and every
+            # consecutive pair of them differs by more than 4 counts on at least one channel
+            check(i >= 1 and all(c[3] != 0 for c in cl[:i + 1]),
+                  '%s: closes outside the wait before the first publish %r' % (what, cl[:i + 1]))
+            for j in range(1, i + 1):
+                check(abs(cl[j][1] - cl[j - 1][1]) > 4 or abs(cl[j][2] - cl[j - 1][2]) > 4,
+                      '%s: the source was steady between the closes at %.3f and %.3f s: %r'
+                      % (what, cl[j - 1][0], cl[j][0], cl[j - 1:j + 1]))
             check(30.0 <= t_first - t_b <= 32.0, '%s: the first publish %.3f s after the change' % (what, t_first - t_b))
         NOTES.append('m46 %s: first publish %.2f s after the change, %d closes waited' % (what, t_first - t_b, i))
         rig.watch.check(what='m46 %s' % what)

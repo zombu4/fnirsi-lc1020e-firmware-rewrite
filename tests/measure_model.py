@@ -116,7 +116,12 @@ Model (each rule with its source):
   CPU reads it between two such points is at most one slice (slice_insns instructions) late.
 
 Signal source (pluggable, MeasurePath(source)): source.samples(path, adc, channel, times) returns
-one code (0..4095) per time, or one int for all of them. DutSource is the device under test
+one code (0..4095) per time, or one int for all of them. While a DMA transfer fills a buffer, path.idx
+holds the item number of each time in the buffer of the channel (0 = the first item after the enable,
+the held conversion included); for any other call (a DAT register read) it is None. DutSource ignores
+it; a source may use it to give every acquisition the same samples whatever its start time (the
+emulated time is the instruction count, so two builds start their acquisitions at other times: tests/
+test_own_ocal.py IndexSource). DutSource is the device under test
 model; MeasurePath.generator(times) gives the generator voltage as the analytic signal g(t)
 (volts, v(t) = Re g(t)): the fundamental of the DAC output as DMA2 ch3 plays it (bin 1 of the
 table taken when the channel is enabled, the zero-order hold's sinc(pi / n) and half-step delay,
@@ -223,6 +228,7 @@ class MeasurePath:
             (RCC_APB2PRST, RCC_APB2PRST + 8), (RCC_AHBPRST, RCC_AHBPRST + 4)]
         self.log = []
         self.m = None
+        self.idx = None              # item numbers of the samples a source call fills (Signal source)
 
     # ------------------------------------------------------------------ chip reset
     def reset(self, m):
@@ -733,7 +739,11 @@ class MeasurePath:
                 i = int(src[3]) - 1
                 sdt = self._adc_grid(i)
                 sdt = sdt[2] if sdt else 0.0
-                vals = self._adc_samples(i, [t0 + (k_lo + j) * period - sdt for j in js])
+                self.idx = [ch.done + j for j in js]
+                try:
+                    vals = self._adc_samples(i, [t0 + (k_lo + j) * period - sdt for j in js])
+                finally:
+                    self.idx = None
                 self.adc[i]['dat'] = vals[-1]
             else:
                 self.m.violation('DMA%d ch%d peripheral to memory from %s not modelled' % (c + 1, x, src))
@@ -787,7 +797,11 @@ class MeasurePath:
         if src is None or ch.txnum == 0:
             return
         now = self.m.now()
-        held = self._adc_dat(int(src[3]) - 1, now) if src.startswith('adc') else None
+        self.idx = [ch.done]                # the held conversion becomes item ch.done (0 after the enable)
+        try:
+            held = self._adc_dat(int(src[3]) - 1, now) if src.startswith('adc') else None
+        finally:
+            self.idx = None
         self._serve(c, ch.x, now, 0.0, 0, 0, held=held)
 
     def _drop_request(self, src):

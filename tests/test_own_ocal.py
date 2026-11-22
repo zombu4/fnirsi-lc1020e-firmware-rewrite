@@ -36,7 +36,8 @@ Watches:
   The model has no read watch (unicorn read hooks are not used, meter_model.py header), so o22
   checks the section pointers and the walk's bound instead of the reads themselves.
 
-RUN LIMIT: the cases are 29 runs of this file at most (one per prefix); o21 makes 674 commits in
+RUN LIMIT: the cases are 36 runs of this file at most (one per prefix; o01 is eight cases o01a..o01h,
+one per stage-1 input); o21 makes 674 commits in
 one DRig (each a small record), o03 / o05 about 150 cut runs.
 """
 
@@ -60,7 +61,7 @@ from test_own_control import Ctl, OwnMeter, check, UID, LSI, PERIOD_MIN, stretch
 from meter_model import (SET_A, SET_B, REC0, REC_END, ERASE_CUTS, WORD_CUTS, REPO, APP, OWN_ELF, nm,  # noqa: E402
                          own_image)
 from measure_model import DutSource, RANGE_OHM, GAIN  # noqa: E402
-from test_own_measure import func_ranges  # noqa: E402
+from test_own_measure import func_ranges, settings  # noqa: E402
 
 CASES = []
 NOTES = []
@@ -409,72 +410,268 @@ def lower_cell(rig):
 
 # ---------------------------------------------------------------- o01
 
-@case
-def o01_erased_area_gives_the_stage_1_records():
-    """Design 2.6 / o01 (F16): with the area erased, OCAL_INFO reports no record (flags 0, slot 0xFF,
-    sequence 0) and the MEASURE records at 1, 2, 3, 4 s equal those of the build without ocal.s
-    (OCAL_REF) in bytes 0..3 and 8..63, the float fields within 1e-6 relative (the time field 4..7 is
-    the tick of the answer, set by the host's request time, so it is not compared), with byte
-    OCAL_BYTE = 0 in ours. Hold on: the
-    OCAL_RAW window number keeps rising (a record per window close, design 2.2) while |Z| / theta
-    and the MEASURE value fields stay as they were."""
+class IndexSource(DutSource):
+    """DutSource whose ADC1 / ADC2 samples depend on the item number in the acquisition (path.idx,
+    measure_model.py "Signal source"), not on the emulated time: item j of every acquisition is
+    mid + k G[c5] Re(g_j) / mid + k G[c6] R[c8] Re(g_j / Z(f)) with g_j = c e^(2 pi i b j / 128), c
+    the generator's complex amplitude (the DAC table's bin 1, path.gen) and b = f 128 P (P the TIM1
+    period of the conversions: the signal periods in 128 samples, 1 / 4 / 16 with the own TIM1 set-up,
+    S1.1). The emulated time is the instruction count (meter_model.py header), so a build with a
+    longer code path starts its acquisitions at other times; keyed to j, both builds get the same
+    codes for the same acquisition. Noise (noise_lsb > 0): uniform +- noise_lsb from the CRC-32 of
+    (window number MO_SEQ, accepted count MO_N, j, channel) read from O_MEAS when the item is made
+    (the main loop changes neither while an acquisition is collected: meas_acq feeds the window only
+    after the transfers are complete, own_measure step 1), so window n of either build sees the same
+    noise and two windows differ (equal windows are one result, ctl.s .Ld_meas). err: the front-end
+    errors A5 (V, per c5) and B86 (I, per (c8, c6)) of ErrSource. For a DAT read (path.idx None) and
+    ADC3 / ADC4 the DutSource values."""
+
+    def __init__(self, kind='R', value=1000.0, err=False, **kw):
+        super().__init__(kind, value, **kw)
+        self.err = err
+
+    def item_values(self, path, adc, idx, codes=None):
+        """Float values (before noise and rounding) of items idx of ADC adc (1 or 2), or None when the
+        generator or the conversion grid is off; codes (c5, c6, c8) default to the front end's."""
+        f = path.frequency()
+        g = path._adc_grid(adc - 1)
+        if not path.gen or g is None or f <= 0:
+            return None
+        c5, c6, c8 = codes if codes is not None else path.front_end()
+        b = f * 128 * g[1]
+        gen = [path.gen['c'] * cmath.exp(2j * math.pi * b * j / 128) for j in idx]
+        if adc == 1:
+            a = A5[c5] if self.err else 1.0
+            return [self.mid + self.k * GAIN[c5] * (a * x).real for x in gen]
+        bb = B86[(c8, c6)] if self.err else 1.0
+        zz = self.z(f) * bb
+        return [self.mid + self.k * GAIN[c6] * RANGE_OHM[c8] * (x / zz).real for x in gen]
+
+    def item_noise(self, path, adc, idx):
+        if not self.noise:
+            return [0.0] * len(idx)
+        st = bytes(path.m.uc.mem_read(OWN_MEAS, 0x40))
+        seq, n = u32(st, MO['SEQ']), u32(st, MO['N'])
+        return [(zlib.crc32(struct.pack('<IIHB', seq, n, j, adc)) / 2.0 ** 31 - 1.0) * self.noise for j in idx]
+
+    def samples(self, path, adc, channel, times):
+        if adc not in (1, 2) or path.idx is None:
+            return super().samples(path, adc, channel, times)
+        vals = self.item_values(path, adc, path.idx)
+        if vals is None:
+            return int(self.mid)
+        return [min(4095, max(0, int(round(v + e)))) for v, e in zip(vals, self.item_noise(path, adc, path.idx))]
+
+    def buffers(self, path, codes):
+        """The 128 codes of ADC1 and ADC2 of a noise-free acquisition at codes (c5, c6, c8)."""
+        out = []
+        for adc in (1, 2):
+            vals = self.item_values(path, adc, range(128), codes)
+            check(vals is not None, 'IndexSource.buffers: generator or conversions off')
+            out.append([min(4095, max(0, int(round(v)))) for v in vals])
+        return out
+
+
+BUF_V, BUF_I = 0x20005A38, 0x20005B38
+RES_WORDS = (0x20005098, 0x40)                  # Xs .. D (meas.s VR_XS .. VR_D)
+
+
+def window_inputs(rig):
+    """Hook at meas_win (every acquisition the window rule sees, o12): {MO_SEQ: [(codes, CRC-32 of both
+    buffers, MO_N, tick) of each acquisition in order]}, the input of each window."""
+    dig = {}
+
+    def hit(uc, a, size, user):
+        st = bytes(uc.mem_read(OWN_MEAS, 0x40))
+        crc = zlib.crc32(bytes(uc.mem_read(BUF_V, 256)) + bytes(uc.mem_read(BUF_I, 256)))
+        dig.setdefault(u32(st, MO['SEQ']), []).append((bytes(uc.mem_read(V_C5, 4)).hex(), crc, u32(st, MO['N']),
+                                                        u32(uc.mem_read(V_TICK, 4))))
+    a = rig.s['meas_win'] & ~1
+    rig.m.uc.hook_add(UC_HOOK_CODE, hit, begin=a, end=a)
+    return dig
+
+
+def ref_patch(path):
+    """Ctl patch: the image and symbols of the build without ocal.s from path (OCAL_REF), or ours (None);
+    the area pages writable in both."""
+    def p(m):
+        m.app_pages = m.app_pages | OCAL_PAGES
+        if path is not None:
+            img, sym = own_image(os.path.join(path, 'APP_OWN.bin'), os.path.join(path, 'app_own.elf'))
+            m.put(APP, b'\xff' * (OCAL_BASE - APP))
+            m.put(APP, img)
+            m.app_sym.clear()
+            m.app_sym.update(sym)
+    return p
+
+
+def stream_records(rig, seconds):
+    """MEASURE_STREAM mode 0 (a frame at every new result) for seconds: the records in frame order."""
+    check(rig.ask('MEASURE_STREAM', b'\x00\x00')[0] == S_OK, 'MEASURE_STREAM')
+    fr = [f['payload'] for f in rig.drain(seconds) if f['type'] == T.FR_STREAM and f['cmd'] == T.C['MEASURE']]
+    rig.ask('MEASURE_STREAM', b'\xff\xff')
+    return fr
+
+
+def inject_sums(rig):
+    """Hook at meas_publish entry: MO_SUM replaced by a function of the window number n and the codes
+    only: sum V' = 100 (1 + 1e-5 n) X_V, sum I' = 100 X_I (X the float64 bin of the noise-free buffers
+    of the source at the codes, float32 stored), the same in every build; returns the list of hits."""
+    hits = []
+    path = rig.meas
+    src = path.source
+
+    def hit(uc, a, size, user):
+        n = u32(uc.mem_read(OWN_MEAS + MO['SEQ'], 4))
+        c = bytes(uc.mem_read(V_C5, 4))
+        bv, bi = src.buffers(path, (c[0], c[1], c[3]))
+        b = int(round(path.frequency() * 128 * path._adc_grid(0)[1]))
+        xv, xi = dft_bin(bv, b) * 100 * (1 + 1e-5 * n), dft_bin(bi, b) * 100
+        uc.mem_write(OWN_MEAS + MO['SUM'], struct.pack('<4f', xv.real, xv.imag, xi.real, xi.imag))
+        hits.append(n)
+    a = rig.s['meas_publish'] & ~1
+    rig.m.uc.hook_add(UC_HOOK_CODE, hit, begin=a, end=a)
+    return hits
+
+
+def o01_compare(name, make_src, freq, seconds, hold=False, inject=False):
+    """Design 2.6 / 7.1 o01 (F16) for one MFD 5.1 stage-1 input: with the area erased, OCAL_INFO reports
+    no record (flags 0, slot 0xFF, sequence 0); ours and the build without ocal.s (OCAL_REF) run the
+    same settings block (frequency freq) on an IndexSource, so acquisition k of window n has the same
+    samples in both. The MEASURE records of the stream (mode 0, one per new result) are taken by
+    result number: strictly increasing numbers in both; each record is traced to its window (the
+    publish at meas_tail with the record's |Z| / theta bits) and both builds must name the same
+    window; where that window had the same inputs in both builds (codes, the CRC of both buffers and
+    MO_N of every acquisition at meas_win), both records must be equal in bytes 0..64 (the record
+    without the OCAL byte: result number, time, the value blocks, |Z|, theta, the settings, the
+    markers; design o01 "bytes 0..63 equal", byte 64 the marker byte of capability bit 24 that the
+    build without ocal.s has too), at least four such results; every record MEASURE_SIZE bytes, the
+    frequency freq, byte OCAL_BYTE = 0 in ours. A window with other inputs differs in its number of
+    acquisitions: emulated time is the instruction count, the window closes at the first
+    acquisition T_win after its start tick (meas_add), and our longer path (ocal_clip, ocal_locked,
+    meas_ocal_acq per acquisition) can put an acquisition on the other side of a 10-ms tick; such
+    windows are listed in the note with both counts. inject (10 kHz and 100 kHz, where the
+    acquisition rate is set by the main loop, not by the DAC period, so every window holds fewer
+    acquisitions in ours): the window sums are written at every meas_publish entry as a function of
+    the window number and the codes (inject_sums), so every window has the same sums in both and
+    every common result is compared. hold: then HOLD on: the OCAL_RAW window number keeps rising (a
+    record per window close, design 2.2) while the result words 0x20005098..0x200050D7 and the
+    MEASURE value fields stay."""
     ref = os.environ.get('OCAL_REF')
     check(ref and os.path.exists(os.path.join(ref, 'APP_OWN.bin')),
           'OCAL_REF (the build directory of the tree without ocal.s) not given or without APP_OWN.bin')
-    rigs = []
+    blk = settings(freq=freq)
+    got, inputs, rigs, pubs, hits = [], [], [], [], []
     for path in (None, ref):
-        def p(m, path=path):
-            m.app_pages = m.app_pages | OCAL_PAGES
-            if path is not None:                     # the image of the build without ocal.s, its symbols
-                img, sym = own_image(os.path.join(path, 'APP_OWN.bin'), os.path.join(path, 'app_own.elf'))
-                m.put(APP, b'\xff' * (OCAL_BASE - APP))
-                m.put(APP, img)
-                m.app_sym.clear()
-                m.app_sym.update(sym)
-        rigs.append(Ctl(source=DutSource('R', 1000.0), patch=p).up())
-    ours, theirs = rigs
-    inf = ours.ask_ok('OCAL_INFO', size=64)
-    check(u32(inf, 0) == 0 and inf[4] == 0xFF and u32(inf, 8) == 0, 'OCAL_INFO of an erased area: %s' % inf.hex())
-    # The records are taken at the same emulated times (1..4 s after the start), not by result number,
-    # and compared field by field: emulated time is the instruction count (meter_model.py), so the
-    # ocal calls of ours move the acquisition starts against the signal phase and the float32 window
-    # sums differ in the last bits (2026-11-22, a noisy source made the noise samples fall into other
-    # windows: |Z| 1000.012 / 999.990). The noiseless coherent source gives every window the same
-    # samples; the floats (main and secondary value, |Z|, theta) agree within 1e-6 relative, every
-    # other byte of 0..3 and 8..63 is equal.
-    floats = (9, 25, 41, 45, 49 + 4, 57)            # f32 fields of 8..63 (PROTOCOL.md 6.2); 49 is u32
-    recs = []
-    for rig in rigs:
-        got = []
-        for _ in range(4):
-            rig.run(1.0)
-            got.append(rig.ask_ok('MEASURE'))
-        recs.append(got)
-    for a, b in zip(*recs):
-        same = a[0:4] == b[0:4]
-        for o in range(8, 64):
-            if any(f <= o < f + 4 for f in floats):
-                continue
-            same = same and a[o] == b[o]
-        for f in floats:
-            x, y = struct.unpack_from('<f', a, f)[0], struct.unpack_from('<f', b, f)[0]
-            same = same and (x == y or abs(x - y) <= 1e-6 * max(abs(x), abs(y)))
-        check(same, 'MEASURE differs from the build without ocal.s:\n%s\n%s' % (a[:64].hex(), b[:64].hex()))
-        check(len(a) == MEASURE_SIZE and a[OCAL_BYTE] == 0, 'OCAL byte %r' % a[OCAL_BYTE:])
-    st, _ = ours.ask('HOLD', b'\x01')
-    check(st == S_OK, 'HOLD on: status %d' % st)
-    ours.run(0.5)
-    z0, th0 = ours.rd(V_Z), ours.rd(V_THETA)
-    w0 = u32(ours.ask_ok('OCAL_RAW', size=64), 0)
-    m0 = ours.ask_ok('MEASURE')
-    ours.run(3.0)
-    w1 = u32(ours.ask_ok('OCAL_RAW', size=64), 0)
-    m1 = ours.ask_ok('MEASURE')
-    check(w1 >= w0 + 2, 'hold: OCAL_RAW windows %d -> %d' % (w0, w1))
-    check(ours.rd(V_Z) == z0 and ours.rd(V_THETA) == th0 and m0[8:64] == m1[8:64],
-          'hold: published values changed')
-    NOTES.append('o01: 4 results equal, hold windows %d -> %d' % (w0, w1))
+        rig = Ctl(a=T.copy_image(blk, 2), b=T.copy_image(blk, 1), source=make_src(), patch=ref_patch(path))
+        dig = window_inputs(rig)
+        pubs.append(publishes(rig))
+        if inject:
+            hits.append(inject_sums(rig))
+        rig.up()
+        if path is None:
+            inf = rig.ask_ok('OCAL_INFO', size=64)
+            check(u32(inf, 0) == 0 and inf[4] == 0xFF and u32(inf, 8) == 0, 'OCAL_INFO of an erased area: %s'
+                  % inf.hex())
+        got.append(stream_records(rig, seconds))
+        inputs.append(dig)
+        rigs.append(rig)
+    win_of = []
+    for pl in pubs:
+        d = {}
+        for p in pl:
+            check(p['zth'] not in d, '%s: two windows published the same |Z| / theta bits' % name)
+            d[p['zth']] = p['seq'] - 1          # meas_publish counts MO_SEQ up before meas_tail
+        win_of.append(d)
+    nums = []
+    for recs in got:
+        n = [u32(r, 0) for r in recs]
+        check(all(b > a for a, b in zip(n, n[1:])), '%s: result numbers not increasing %r' % (name, n))
+        nums.append(dict(zip(n, recs)))
+    common = sorted(set(nums[0]) & set(nums[1]))
+    compared, other = [], []
+    for k in common:
+        a, b = nums[0][k], nums[1][k]
+        check(len(a) == MEASURE_SIZE and a[OCAL_BYTE] == 0, '%s: OCAL byte %r' % (name, a[OCAL_BYTE:]))
+        check(u32(a, 49) == freq and u32(b, 49) == freq, '%s: frequency %d / %d' % (name, u32(a, 49), u32(b, 49)))
+        wa, wb = win_of[0].get((u32(a, 41), u32(a, 45))), win_of[1].get((u32(b, 41), u32(b, 45)))
+        check(wa is not None and wa == wb, '%s: result %d from window %r / %r' % (name, k, wa, wb))
+        ia, ib = inputs[0].get(wa, []), inputs[1].get(wa, [])
+        if not inject and [x[:3] for x in ia] != [x[:3] for x in ib]:
+            other.append('result %d window %d: %d / %d acquisitions, last at tick %d / %d'
+                         % (k, wa, len(ia), len(ib), ia[-1][3] if ia else -1, ib[-1][3] if ib else -1))
+            continue
+        check(a[:65] == b[:65], '%s: result %d (window %d) differs from the build without ocal.s:\n%s\n%s'
+              % (name, k, wa, a[:65].hex(), b[:65].hex()))
+        compared.append(k)
+    check(len(compared) >= 4, '%s: %d results compared (%r), other inputs: %r' % (name, len(compared), compared, other))
+    if inject:
+        check(len(hits[0]) >= len(pubs[0]) and len(hits[1]) >= len(pubs[1]), '%s: sums not written' % name)
+    if hold:
+        ours = rigs[0]
+        st, _ = ours.ask('HOLD', b'\x01')
+        check(st == S_OK, 'HOLD on: status %d' % st)
+        ours.run(0.5)
+        r0 = ours.rd(*RES_WORDS)
+        w0 = u32(ours.ask_ok('OCAL_RAW', size=64), 0)
+        m0 = ours.ask_ok('MEASURE')
+        ours.run(3.0)
+        w1 = u32(ours.ask_ok('OCAL_RAW', size=64), 0)
+        m1 = ours.ask_ok('MEASURE')
+        check(w1 >= w0 + 2, 'hold: OCAL_RAW windows %d -> %d' % (w0, w1))
+        check(ours.rd(*RES_WORDS) == r0 and m0[8:64] == m1[8:64], 'hold: published values changed')
+        NOTES.append('o01 hold: OCAL_RAW windows %d -> %d' % (w0, w1))
+    NOTES.append('o01 %s: results %s equal%s%s' % (name, compared, ' (window sums injected)' if inject else '',
+                                                  '; other inputs (not compared): %s' % other if other else ''))
     return True
+
+
+# The inputs of the MFD 5.1 stage-1 cases that publish (m01 frequencies, m02 coherence, m04 complex
+# estimate, m10 unfolded theta), one case each so that they spread across processes. Noise 2 lsb in
+# all of them: with equal windows the result number would not advance (ctl.s .Ld_meas).
+
+@case
+def o01a_r1k_1khz_and_hold():
+    return o01_compare('R 1 kohm 1 kHz', lambda: IndexSource('R', 1000.0, noise_lsb=2.0), 1000, 5.0, hold=True)
+
+
+@case
+def o01b_c10n_100khz():
+    return o01_compare('C 10 nF 100 kHz (m02)', lambda: IndexSource('C', 10e-9, noise_lsb=2.0), 100000, 5.0,
+                       inject=True)
+
+
+@case
+def o01c_l10m_10khz():
+    return o01_compare('L 10 mH 10 kHz (m02)', lambda: IndexSource('L', 10e-3, noise_lsb=2.0), 10000, 5.0,
+                       inject=True)
+
+
+@case
+def o01d_r0p1_1khz():
+    return o01_compare('0.1 ohm 1 kHz (m04)', lambda: IndexSource('R', 0.1, counts_per_volt=1.5, noise_lsb=2.0),
+                       1000, 5.0)
+
+
+@case
+def o01e_open_1khz():
+    return o01_compare('open 1 kHz (m04)', lambda: IndexSource('R', 1e12, noise_lsb=2.0), 1000, 6.0)
+
+
+@case
+def o01f_neg_r_1khz():
+    return o01_compare('-1 + j 100 ohm 1 kHz (m10)',
+                       lambda: IndexSource(z=lambda f: complex(-1.0, 100.0), noise_lsb=2.0), 1000, 5.0)
+
+
+@case
+def o01g_r1k_100hz():
+    return o01_compare('R 1 kohm 100 Hz (m01)', lambda: IndexSource('R', 1000.0, noise_lsb=2.0), 100, 7.0)
+
+
+@case
+def o01h_r1k_120hz():
+    return o01_compare('R 1 kohm 120 Hz (m01)', lambda: IndexSource('R', 1000.0, noise_lsb=2.0), 120, 7.0)
 
 
 # ---------------------------------------------------------------- o02
@@ -867,85 +1064,138 @@ def z_terminal(r=1000.0, zs=0.03 + 2j * math.pi * 1000 * 20e-9, yo=2j * math.pi 
 
 
 def publishes(rig):
-    """Hook at meas_tail: the window sums, K and the codes of every publish with |Z| / theta."""
+    """Hook at meas_tail: the window sums, K, the codes, the window number and the result words of every
+    publish with |Z| / theta."""
     out = []
     m = rig.m
 
     def hit(uc, a, size, user):
         b = bytes(uc.mem_read(OWN_MEAS, 0x100))
         out.append(dict(sum=struct.unpack_from('<4f', b, MO['SUM']), k=struct.unpack_from('<f', b, MO['K'])[0],
+                        kbits=u32(b, MO['K']), seq=u32(b, MO['SEQ']),
                         codes=bytes(uc.mem_read(V_C5, 4)), z=u2f(u32(uc.mem_read(V_Z, 4))),
-                        th=u2f(u32(uc.mem_read(V_THETA, 4)))))
+                        th=u2f(u32(uc.mem_read(V_THETA, 4))), zth=(u32(uc.mem_read(V_Z, 4)), u32(uc.mem_read(V_THETA, 4))),
+                        words=bytes(uc.mem_read(*RES_WORDS)) + bytes(uc.mem_read(V_BLOCK + 0xC70, 4))))
     a = rig.s['meas_tail'] & ~1
     m.uc.hook_add(UC_HOOK_CODE, hit, begin=a, end=a)
     return out
 
 
+def used_acquisitions(rig):
+    """Hook at meas_win: (window number MO_SEQ, codes, ADC1 buffer, ADC2 buffer) of every acquisition the
+    window rule sees."""
+    out = []
+
+    def hit(uc, a, size, user):
+        out.append((u32(uc.mem_read(OWN_MEAS + MO['SEQ'], 4)), bytes(uc.mem_read(V_C5, 4)),
+                    list(struct.unpack('<128H', uc.mem_read(BUF_V, 256))),
+                    list(struct.unpack('<128H', uc.mem_read(BUF_I, 256)))))
+    a = rig.s['meas_win'] & ~1
+    rig.m.uc.hook_add(UC_HOOK_CODE, hit, begin=a, end=a)
+    return out
+
+
+def dft_bin(x, b):
+    """Bin b of 128 samples in float64: sum x[n] e^(-2 pi i b n / 128) (the mean drops out for b > 0)."""
+    return sum(v * cmath.exp(-2j * math.pi * b * n / 128) for n, v in enumerate(x))
+
+
+def fixed_sums(rig, sums):
+    """Hook at meas_publish entry: O_MEAS MO_SUM (sum V'r, V'i, I'r, I'i) replaced by sums (4 floats)
+    before meas_publish reads it; returns the list of hits."""
+    hits = []
+    raw = struct.pack('<4f', *sums)
+
+    def hit(uc, a, size, user):
+        uc.mem_write(OWN_MEAS + MO['SUM'], raw)
+        hits.append(1)
+    a = rig.s['meas_publish'] & ~1
+    rig.m.uc.hook_add(UC_HOOK_CODE, hit, begin=a, end=a)
+    return hits
+
+
 @case
 def o10_gain_correction_on_the_meter():
-    """Design 2.1 / o10: ErrSource (injected zeta / nu errors, terminal residuals Zs = 30 mohm +
-    j w 20 nH, Yo = j w 2 pF at 1 kHz) and a GAIN for 1 kHz (fi 2) with zeta = 1 / b, nu = 1 / a for
-    every cell and all bits. Each publish: |Z|, theta equal |Zx|, arg Zx of the float64
-    recomputation Zx = K zeta nu sum V' / sum I' of its window (the published value is |Zdut| of
-    S4.1 with the default short 0 / open 1e12, i.e. Zx) within 1e-5 relative / 0.001 deg (float32
-    arithmetic); against the terminal impedance within the ADC quantisation bound 0.3 / min(A_V,
-    A_I) relative and the same in radians (the worst case of the deterministic rounding error of
-    coherent 128-sample sines over the start phase, 0.235 / A, see the comment at qb; the earlier
-    0.1 / A treated the rounding as random, which it is not: every window has the same codes), and
-    MEASURE byte bit 0 set; meas_interp not called. Then two rigs with GAIN records of equal length:
-    (A) fi 2 calibrated except the phase bit of the reached cell, (B) fi 3 only: their published words
-    agree within 1e-6 (both take the stage-1 instructions; the instruction-count clock of the model
-    shifts the acquisitions by the extra path length, so not bit for bit) and A's MEASURE byte has bit 1, B's none;
+    """Design 2.1 / o10: front-end errors A5 (per c5) / B86 (per (c8, c6)), terminal residuals Zs = 30
+    mohm + j w 20 nH, Yo = j w 2 pF at 1 kHz (IndexSource err, no noise: every acquisition at the same
+    codes has the same codes on both ADCs, checked at meas_win against the rebuilt buffers) and a GAIN
+    for 1 kHz (fi 2) with zeta = 1 / b, nu = 1 / a for every cell and all bits. Each publish: |Z|,
+    theta of the terminal impedance as the quantised samples carry it, Zt = K zeta nu X_V / X_I (X
+    the float64 bin of the rebuilt 128-sample buffers, K = R[c8] G[c6] / G[c5], zeta / nu the float32
+    values of the record), within 1e-5 relative / 0.001 deg (the published value is |Zdut| of S4.1
+    with the default short 0 / open 1e12, i.e. Zt); also against the float64 quotient of the firmware's
+    own window sums within the same bound; MEASURE byte bit 0 set; meas_interp not called. Then two
+    rigs with GAIN records of equal length: (A) fi 2 calibrated except the phase bit of the reached
+    cell, (B) fi 3 only; both get the same window sums (the first publish's sums of the first rig
+    written into MO_SUM at every meas_publish entry), so the stage-1 instructions (design 2.1:
+    "bit-identical to stage 1") must give bit-identical result words 0x20005098..0x200050D7 and
+    0x200011EC, the same codes and K, at four publishes; A's MEASURE byte has bit 1, B's none;
     meas_interp called at every publish. Screen 3 with type 0 (the raw value of the store): |Z| =
     |K zeta nu sum V' / sum I'|."""
     zt = z_terminal()
-    rig = Ctl(source=ErrSource(zt), patch=ocal_patch(record(meta() + full_gain(2), 1))).up()
+    src = IndexSource('R', 1.0, z=zt, err=True)
+    rig = Ctl(source=src, patch=ocal_patch(record(meta() + full_gain(2), 1))).up()
     pubs = publishes(rig)
+    acqs = used_acquisitions(rig)
     interp = []
     ia = rig.s['meas_interp'] & ~1
     rig.m.uc.hook_add(UC_HOOK_CODE, lambda uc, a, s, u: interp.append(1), begin=ia, end=ia)
     rig.run(4.0)
     check(len(pubs) >= 3, '%d publishes' % len(pubs))
-    raw = rig.ask_ok('OCAL_RAW', size=64)
-    av, ai = struct.unpack_from('<ff', raw, 32)
-    # quantisation bound: the samples are coherent (128 per period at 1 kHz, the same codes in every
-    # period), so the rounding error does not average out between windows; a float64 sweep of the
-    # start phase (2000 steps) of two rounded 128-sample sines of 1050.87 / 1047.66 counts gives a
-    # phase error of the DFT quotient up to 2.24e-4 rad (median 4.6e-5), i.e. 0.235 / A: 0.3 / A
-    qb = 0.3 / min(av, ai)
+    f = rig.meas.frequency()
+    bb = f * 128 * rig.meas._adc_grid(0)[1]
+    b = int(round(bb))
+    check(abs(bb - b) < 1e-9 and b == 1, 'not coherent at 1 kHz: f %r, %r periods in 128 samples' % (f, bb))
     zd = zt(1000)
+    worst = 0.0
     for p in pubs[1:]:
         c5, c6, c8 = p['codes'][0], p['codes'][1], p['codes'][3]
+        bv, bi = src.buffers(rig.meas, (c5, c6, c8))
+        # the acquisitions of this window: those with its window number after the last one at other
+        # codes (a code change resets the window, MFD S1.4)
+        win = [a for a in acqs if a[0] == p['seq'] - 1]
+        while win and any(a[1] != p['codes'] for a in win):
+            win = win[[a[1] for a in win].index(next(a[1] for a in win if a[1] != p['codes'])) + 1:]
+        check(len(win) >= 3 and all(a[2] == bv and a[3] == bi for a in win),
+              'window %d: %d acquisitions at codes %s, not all with the rebuilt buffers'
+              % (p['seq'], len(win), p['codes'].hex()))
+        zeta = complex(f32((1 / B86[(c8, c6)]).real), f32((1 / B86[(c8, c6)]).imag))
+        nu = complex(f32((1 / A5[c5]).real), f32((1 / A5[c5]).imag))
+        k = RANGE_OHM[c8] * GAIN[c6] / GAIN[c5]
+        ze = k * zeta * nu * dft_bin(bv, b) / dft_bin(bi, b)
+        check(abs(p['z'] / abs(ze) - 1) <= 1e-5 and abs(p['th'] - math.degrees(cmath.phase(ze))) <= 1e-3,
+              'publish %r vs Zt %r (rebuilt samples)' % ((p['z'], p['th']), ze))
         sv = complex(p['sum'][0], p['sum'][1])
         si = complex(p['sum'][2], p['sum'][3])
-        zx = p['k'] * (1 / B86[(c8, c6)]) * (1 / A5[c5]) * sv / si
+        zx = p['k'] * zeta * nu * sv / si
         check(abs(p['z'] / abs(zx) - 1) <= 1e-5 and abs(p['th'] - math.degrees(cmath.phase(zx))) <= 1e-3,
-              'publish %r vs Zx %r' % ((p['z'], p['th']), zx))
-        check(abs(p['z'] / abs(zd) - 1) <= qb and abs(math.radians(p['th']) - cmath.phase(zd)) <= qb,
-              'publish %r vs Zterm %r (bound %g)' % ((p['z'], p['th']), zd, qb))
+              'publish %r vs Zx %r (window sums)' % ((p['z'], p['th']), zx))
+        worst = max(worst, abs(abs(ze) / abs(zd) - 1), abs(cmath.phase(ze) - cmath.phase(zd)))
     check(not interp, 'meas_interp called %d times with the gain applied' % len(interp))
     d = rig.ask_ok('MEASURE')
     check(d[OCAL_BYTE] & 1, 'MEASURE OCAL byte 0x%02X' % d[OCAL_BYTE])
+    NOTES.append('o10: %d publishes at codes %s, Zt from the rebuilt samples against the terminal impedance '
+                 '%.3g (the quantisation of the samples, not a bound of the case)' % (len(pubs) - 1,
+                                                                                      pubs[-1]['codes'].hex(), worst))
     codes = pubs[-1]['codes']
     cell = (codes[3], codes[1])
+    sums = pubs[1]['sum']
     words = []
     for rec_body, bit1 in ((meta() + full_gain(2, drop_phase=cell), 2), (meta() + full_gain(3), 0)):
-        r2 = Ctl(source=ErrSource(zt), patch=ocal_patch(record(rec_body, 1))).up()
+        r2 = Ctl(source=IndexSource('R', 1.0, z=zt, err=True), patch=ocal_patch(record(rec_body, 1))).up()
         p2 = publishes(r2)
+        hits = fixed_sums(r2, sums)
         n2 = []
         r2.m.uc.hook_add(UC_HOOK_CODE, lambda uc, a, s, u: n2.append(1), begin=ia, end=ia)
         r2.run(4.0)
-        words.append([(x['z'], x['th'], x['codes']) for x in p2[:4]])
+        check(len(p2) >= 5 and len(hits) >= len(p2), '%d publishes, %d sums written' % (len(p2), len(hits)))
+        words.append([(x['codes'], x['kbits'], x['words']) for x in p2[1:5]])
         m2 = r2.ask_ok('MEASURE')
         check(m2[OCAL_BYTE] & 3 == bit1, 'OCAL byte 0x%02X, expected bits 0..1 = %d' % (m2[OCAL_BYTE], bit1))
         check(len(n2) >= len(p2) >= 3, 'meas_interp %d calls for %d publishes' % (len(n2), len(p2)))
-    # Not bit-identical across the two rigs: emulated time is the instruction count (meter_model.py),
-    # so A's longer ocal_gain path moves the acquisition starts against the signal phase and the
-    # float32 window sums differ in the last bit (2026-11-22: 4th window n = 197 in both, sum Ii
-    # 278062.4375 / 278062.40625). Same codes, |Z| and theta within 1e-6 relative (a few ulp).
-    check(len(words[0]) == len(words[1]) and all(
-        a[2] == b[2] and abs(a[0] / b[0] - 1) <= 1e-6 and abs(a[1] - b[1]) <= 1e-6 * max(1.0, abs(b[1]))
-        for a, b in zip(*words)), 'stage-1 values differ: %r / %r' % tuple(words))
+    for i, (a, b_) in enumerate(zip(*words)):
+        check(a == b_, 'stage-1 publish %d not bit-identical with the same sums: codes %s / %s, K %08X / %08X,'
+              '\nwords %s\n      %s' % (i + 1, a[0].hex(), b_[0].hex(), a[1], b_[1], a[2].hex(), b_[2].hex()))
     rig.wr(V_CAL_TYPE, 0)
     rig.wr(V_SCREEN, 3)
     del pubs[:]
@@ -1026,29 +1276,35 @@ def o11_lock_forces_codes_and_every_release():
 
 @case
 def o28_lock_with_lcr_set_and_hold():
-    """Design 2.2 (F14, o28): locked, LCR_SET frequency (id 2, index 3 = 10 kHz) answers status 0, the
-    lock word stays and meas_change runs (kind 0: the restart of ds_freq wins the tie with kind 1,
-    both 26 ms by default); LCR_SET range (id 5) answers status 3 and
-    0x2000114C stays; HOLD on: OCAL_LOCK still allowed (status 0) and OCAL_RAW's window number rises
-    while |Z| stays."""
-    rig = Ctl(source=DutSource('R', 1000.0), patch=ocal_patch()).up()
+    """Design 2.2 (F14, o28): a record with SETTLE[1][fi 3] = 200 (kind 1 frequency, 10 kHz; the rest the
+    defaults, kind 0 restart 26). Locked, LCR_SET frequency (id 2, index 3 = 10 kHz) answers status 0,
+    the lock word stays, the frequency word is 10000 and meas_change runs exactly once after it, as
+    (200, 1): ds_freq's restart (kind 0, 26 ms) and the frequency change (kind 1, 200 ms) are seen in
+    one meas_watch pass and the maximum rule of design 2.3 takes the frequency's settle with its kind
+    (with the defaults both are 26 and the case could not tell the two apart). LCR_SET range (id 5)
+    answers status 3 and 0x2000114C stays; HOLD on: OCAL_LOCK still allowed (status 0) and OCAL_RAW's
+    window number rises while |Z| stays."""
+    rig = Ctl(source=DutSource('R', 1000.0), patch=ocal_patch(record(meta() + settle({(1, 3): 200}), 1))).up()
+    check(ctl_ocs(rig, 'TMAX') == 200, 'T_max %d' % ctl_ocs(rig, 'TMAX'))
     rig.run(1.0)
     # the cell next to the autoranged one (lower_cell), not a fixed (1, 1, 1): with 1 kohm at 10 kHz
     # that cell saturates both ADCs (2026-11-22: max 4095 / min 0 at every acquisition), so no
     # window closes and OCAL_RAW's number cannot rise under hold
     cell = lower_cell(rig)
     check(rig.ask('OCAL_LOCK', cell)[0] == S_OK, 'lock')
+    rig.run(0.5)                    # the lock's own code change (kind 6) is made before the hook
+    c = rig.rd(V_C5, 5)
+    check(bytes((c[0], c[1], c[3])) == cell, 'codes %r, lock %r' % (c, cell))
     kinds = []
     a = rig.s['meas_change'] & ~1
-    rig.m.uc.hook_add(UC_HOOK_CODE, lambda uc, ad, s, u: kinds.append(uc.reg_read(UC_ARM_REG_R1)), begin=a, end=a)
+    rig.m.uc.hook_add(UC_HOOK_CODE, lambda uc, ad, s, u: kinds.append((uc.reg_read(UC_ARM_REG_R0),
+                      uc.reg_read(UC_ARM_REG_R1))), begin=a, end=a)
     lock = ctl_ocs(rig, 'LOCK')
     st, _ = rig.ask('LCR_SET', b'\x02\x03')
     rig.run(0.5)
-    # ds_freq (dset.s) stores the frequency and calls fn_08009f10, which clears the restart marker
-    # 0x200011FC: meas_watch finds kind 0 (restart) and kind 1 (frequency), both SETTLE 26 by default,
-    # and the first found wins the tie (meas_wkind): the settle runs as kind 0 with T 26
-    check(st == S_OK and ctl_ocs(rig, 'LOCK') == lock and rig.rd(V_FREQ) == 10000 and 0 in kinds,
-          'LCR_SET frequency: %d, frequency %d, kinds %r' % (st, rig.rd(V_FREQ), kinds))
+    check(st == S_OK and ctl_ocs(rig, 'LOCK') == lock and rig.rd(V_FREQ) == 10000 and kinds == [(200, 1)],
+          'LCR_SET frequency: status %d, lock %r -> %r, frequency %d, meas_change %r'
+          % (st, lock, ctl_ocs(rig, 'LOCK'), rig.rd(V_FREQ), kinds))
     rng = rig.rd(V_RANGE)
     st, _ = rig.ask('LCR_SET', b'\x05\x02')
     check(st == S_NOTNOW and rig.rd(V_RANGE) == rng, 'LCR_SET range while locked: %d' % st)
@@ -1110,7 +1366,8 @@ def o25_settle_at_the_kind_6_sites_and_the_maximum_rule():
     SETTLE[1][2] = 200: meas_change(200, 1). On the meter: a resistor change 1 kohm -> 100 kohm makes
     the own ranging change codes: every meas_change of kind 6 has T 120; a short (1 mohm, ADC2
     saturated at every code) then 100 ohm (in band at the overload's codes): after the overload set the overload end is a kind-6 change
-    with T 120 and the codes as before it (no code change)."""
+    with T 120 and the codes as before it (no code change); 1 s later the codes are still those of the
+    overload and |Z| is no longer the overload set 1e10 (a reading was published)."""
     t6 = {(6, fi): 120 for fi in range(6)}
     t61 = dict(t6)
     t61[(1, 2)] = 200
@@ -1153,6 +1410,10 @@ def o25_settle_at_the_kind_6_sites_and_the_maximum_rule():
     # the overload end is reached (checked 2026-11-22: one call (120, 6) with codes 00000000)
     val['r'] = 100.0
     rig.run(1.0)
+    after = rig.rd(V_C5, 5)
+    check(after[:4] == before[:4] and rig.rd(V_Z) != 0x501502F9,
+          'after the short at 100 ohm: codes %s (before %s), |Z| %r' % (after[:4].hex(), before[:4].hex(),
+                                                                        u2f(rig.rd(V_Z))))
     k6 = [c for c in calls if c[1] == 6]
     check(k6 and all(c[0] == 120 for c in k6), 'after the short: %r' % calls[:4])
     # the overload end (meas_acq .Lac_unsat) changes no code: its call sees the codes of the overload;
