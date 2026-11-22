@@ -3,12 +3,13 @@
 
 Usage (from the repository root, after `make -C starter`, `make -C bootloader slot` and
 `make -C firmware own`):
-    <python with unicorn 2.1.4> tests/test_own_control.py [case-name-prefix ...] [--state NAME] [--key BIT] [--hold 0|1100] [--fresh]
---state / --key / --hold narrow k30 (the guard sweep: every key x short / hold x every state, the costly case);
-k30 builds and navigates one rig per state, snapshots the whole machine (class Snapshot) and restores it
-before every key run; --fresh builds a new rig from power-on for every run instead (the slow reference).
-k30 prints one 'k30rec' line per run (state, bit, hold, answer status, refused, check values) in both modes.
-to one state and / or one key bit.
+    <python with unicorn 2.1.4> tests/test_own_control.py [case-name-prefix ...] [--key BIT] [--hold 0|1100] [--fresh]
+k30 (the guard sweep: every key x short / hold x every state, the costly part) is one case per state,
+k30a..k30l (prefix k30 selects all, k30c one state); --key / --hold narrow it to one key bit and / or
+one hold time. Each case builds and navigates one rig for its state, snapshots the whole machine
+(class Snapshot) and restores it before every key run; --fresh builds a new rig from power-on for every
+run instead (the slow reference). k30 prints one 'k30rec' line per run (state, bit, hold, answer status,
+refused, check values) in both modes.
 
 Specification: USB_CONTROL_DESIGN.md revision 4 (section 9 decisions override the older text; section 7
 lists these tests), SETTINGS_SAVE_DESIGN.md revision 4, and the interface comments of firmware/own/
@@ -1683,9 +1684,10 @@ def cal_staged(rig, blk):
     return bytes(b)
 
 
-@case
-def k30_guard_every_key_every_state():
-    """Every key bit x (short, hold 1100 ms) x every state of STATES, each from a fresh start: the
+def _k30_guard(state):
+    """Every key bit x (short, hold 1100 ms) in one state of STATES (the cases k30a..k30l, one per
+    state, so a full pass spreads them over the cores; owner 2026-11-22, after the single case took
+    more than 7200 s in a full pass), each from a fresh start: the
     state reached by physical keys (KeyPad), the KEY command, then at least 50 main-loop passes (and,
     once the calibration sweep fn_0800bd5c runs, at least 50 of its calls; it finishes at step 45),
     then a physical power-off (power key 1300 ms). Flash model: the named-save gate, so the run stops
@@ -1693,7 +1695,8 @@ def k30_guard_every_key_every_state():
     and in 'calibration running' the calibration finish). RAM block: no word outside ALLOWED changes
     between the KEY and the power-off; the copies after the power-off hold the block of that
     moment."""
-    states = [s for s in STATES if OPTS['state'] in (None, s[0])]
+    states = [s for s in STATES if s[0] == state]
+    check(len(states) == 1, 'k30: no state %r in STATES' % state)
     bits = [b for b in range(14) if OPTS['key'] in (None, b)]
     holds = [h for h in (0, 1100) if OPTS['hold'] in (None, h)]
     count, refused = 0, 0
@@ -1778,8 +1781,81 @@ def k30_guard_every_key_every_state():
                           zlib.crc32(m.get(SET_B, BLK))), flush=True)
         print('k30time %s|%s|%.1f s' % (name, 'fresh' if OPTS['fresh'] else 'snapshot', time.time() - t_state),
               flush=True)
-    NOTES.append('k30: %d runs, %d keys refused with status 6' % (count, refused))
+    NOTES.append('k30 %s: %d runs, %d keys refused with status 6' % (state, count, refused))
     return True
+
+
+# k30, one case per state of STATES (in its order): prefix k30 selects all twelve
+@case
+def k30a_guard_measure():
+    """_k30_guard in the measure screen."""
+    return _k30_guard('measure')
+
+
+@case
+def k30b_guard_compare():
+    """_k30_guard in the compare screen."""
+    return _k30_guard('compare')
+
+
+@case
+def k30c_guard_settings_item_0():
+    """_k30_guard in the settings screen, item 0."""
+    return _k30_guard('settings item 0')
+
+
+@case
+def k30d_guard_settings_item_2():
+    """_k30_guard in the settings screen, item 2."""
+    return _k30_guard('settings item 2')
+
+
+@case
+def k30e_guard_settings_item_3():
+    """_k30_guard in the settings screen, item 3."""
+    return _k30_guard('settings item 3')
+
+
+@case
+def k30f_guard_settings_item_4():
+    """_k30_guard in the settings screen, item 4."""
+    return _k30_guard('settings item 4')
+
+
+@case
+def k30g_guard_settings_item_5():
+    """_k30_guard in the settings screen, item 5."""
+    return _k30_guard('settings item 5')
+
+
+@case
+def k30h_guard_settings_item_6():
+    """_k30_guard in the settings screen, item 6."""
+    return _k30_guard('settings item 6')
+
+
+@case
+def k30i_guard_settings_item_0_dialog():
+    """_k30_guard in the settings screen, item 0 with its dialog open."""
+    return _k30_guard('settings item 0 dialog')
+
+
+@case
+def k30j_guard_settings_item_5_dialog():
+    """_k30_guard in the settings screen, item 5 with its dialog open."""
+    return _k30_guard('settings item 5 dialog')
+
+
+@case
+def k30k_guard_settings_item_6_dialog():
+    """_k30_guard in the settings screen, item 6 with its dialog open."""
+    return _k30_guard('settings item 6 dialog')
+
+
+@case
+def k30l_guard_calibration_running():
+    """_k30_guard while the calibration sweep runs."""
+    return _k30_guard('calibration running')
 
 
 @case
@@ -2052,9 +2128,7 @@ def main():
     sel = []
     while args:
         a = args.pop(0)
-        if a == '--state':
-            OPTS['state'] = args.pop(0)
-        elif a == '--key':
+        if a == '--key':
             OPTS['key'] = int(args.pop(0))
         elif a == '--hold':
             OPTS['hold'] = int(args.pop(0))
