@@ -31,22 +31,28 @@
 @   number 0, 2..6, never 1, lang.s own_menu), language u8 (0x2000115C, 1 in our build,
 @   save.s set_english), dropped frames u16, save status u8 (low byte of own_save_status), time u32
 @   (tick 0x20000480).
-@ MEASURE (64 bytes): result number u32, time u32; main row u8 (1 R, 2 C, 3 L, 4 Z) and its
+@ MEASURE (65 bytes): result number u32, time u32; main row u8 (1 R, 2 C, 3 L, 4 Z) and its
 @   value block; secondary u8 (0 R, 1 X, 2 D, 3 Q, 4 theta) and its value block; series /
 @   parallel u8 (0x200011EC: 0 series, 1 parallel); |Z| f32 (0x200050C4); theta f32
-@   (0x200050CC); frequency u32, level f32, bias f32, range u8, speed u8, circuit mode u8.
+@   (0x200050CC); frequency u32, level f32, bias f32, range u8, speed u8, circuit mode u8;
+@   markers u8 (bit 0 main, bit 1 secondary: the value lies outside the manual's accuracy
+@   table, fmt.s MF_MARK; MEASUREMENT_FIX_DESIGN.md S2.1).
 @   Value block (15 bytes): value f32 as the display formats it (R ohm, C nF, L uH, Z / X
 @   ohm, D / Q none, theta degree), unit code u8 of the display text (0 none, 1 ohm, 2 kohm,
 @   3 Mohm, 4 pF, 5 nF, 6 uF, 7 mF, 8 uH, 9 mH, 10 H, 11 degree), decimals u8 (digits after
 @   the point of the text), validity u8 (0 valid, 1 "0L" from the formatter, 2 no reading:
 @   tick counter 0x2000120C above 200, 3 held), display text 8 bytes (the formatter's text,
-@   zero padded). The texts come from the display's own formatters 0x0800E028 (ohm),
-@   0x0800DB24 (C), 0x0800DE2C (L), 0x0800DD44 (D / Q), 0x0800DFC4 (theta) with the inputs
-@   0x0800D3D8 / 0x0800D294 give them.
-@ COMPARE (29 bytes): quantity u8 (0x20001178), nominal f32 (0x20001184), tolerance f32
-@   (0x20001188), deviation f32 (0x200050D8), OK u8 (deviation <= tolerance, as 0x0800F854
-@   decides it), pass u32 (0x200050F0), fail u32 (0x200050F4), compare value f32
-@   (0x200050DC), warn type u8, warn sound u8, warn LED u8.
+@   zero padded). The texts come from the display's formatters, our wrappers of fmt.s
+@   (own_fmt_r ohm, own_fmt_c C, own_fmt_l L, own_fmt_dq D / Q, own_fmt_th theta: OL, sign and
+@   digits as the display shows them) with the inputs 0x0800D3D8 / 0x0800D294 give them; the
+@   secondary R is the signed 0x200050B8 (S2.2).
+@ COMPARE (50 bytes): quantity u8 (0x20001178), nominal f32 (0x20001184), tolerance f32
+@   (0x20001188), deviation f32 (0x200050D8), OK u8 (1 when the judgement is IN, cmp.s),
+@   pass u32 (0x200050F0), fail u32 (0x200050F4), compare value f32 (0x200050DC), warn type
+@   u8, warn sound u8, warn LED u8; then (S2.8 / S2.9, cmp.s) mode u8 in force (MF_EMODE: 0
+@   vendor %, 1 %, 2 pF), set mode u8 (MF_TMODE 0..3), letter u8, lower f32, upper f32 (the
+@   limits in force, MF_ELO / MF_EHI), result u8 (CR_*), signed deviation f32 (MF_DEV),
+@   secondary kind u8, secondary value f32.
 @
 @ Never-brick: no access to the flash controller here. Settings are written only by the
 @ save.s functions; the BOOT_* writer writes the free slot and the record pages only through
@@ -72,8 +78,8 @@
 						@ 0x0800D294 formats X: the sign is kept)
 	.equ	VB_SIZE,	15		@ value block of MEASURE
 	.equ	STATE_SIZE,	32
-	.equ	MEASURE_SIZE,	64
-	.equ	COMPARE_SIZE,	29
+	.equ	MEASURE_SIZE,	65		@ 64 + the marker byte (S2.1)
+	.equ	COMPARE_SIZE,	50		@ 29 + the S2.8 / S2.9 tail
 	.equ	INFO_SIZE,	46
 	.equ	LCR_LISTS,	8
 	.equ	SET_IDS,	6		@ set_tab entries
@@ -215,8 +221,8 @@ mem_copy:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ sv_map - r0 = own_save_status -> r0 = answer status: SV_OK 0, SV_HELD / SV_REFUSED 3,
-@   SV_BADBLOCK 7, every other failure 5. Uses r0.
+@ sv_map - r0 = own_save_status -> r0 = answer status: SV_OK and SV_SAME (nothing needed
+@   writing, S2.10) 0, SV_HELD / SV_REFUSED 3, SV_BADBLOCK 7, every other failure 5. Uses r0.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	sv_map, %function
@@ -224,6 +230,8 @@ sv_map:
 	uxtb	r0, r0
 	cmp	r0, #SV_OK
 	beq	.Lsm_out
+	cmp	r0, #SV_SAME
+	beq	.Lsm_same
 	cmp	r0, #SV_HELD
 	beq	.Lsm_notnow
 	cmp	r0, #SV_REFUSED
@@ -237,6 +245,9 @@ sv_map:
 	bx	lr
 .Lsm_xfer:
 	movs	r0, #S_XFER_CRC
+	bx	lr
+.Lsm_same:
+	movs	r0, #S_OK
 .Lsm_out:
 	bx	lr
 
@@ -650,6 +661,22 @@ h_compare:
 	bl	rec_compare
 	mov	r1, r0
 	movs	r0, #S_OK
+	b	h_ret
+
+@ TOLERANCE_SET - mode u8, lower i32, upper i32, letter u8, secondary kind u8, secondary value
+@ f32 (15 bytes; cmp.s own_tol_set checks and stores them, RAM only, S2.9). Answer COMPARE with
+@ every status (the record as it is after the request: unchanged unless the status is 0).
+	.thumb_func
+	.type	h_tol_set, %function
+h_tol_set:
+	push	{r4, r5, r6, r7, r8, lr}
+	mov	r4, r2			@ r4 = answer data
+	bl	own_tol_set		@ r0 = status
+	mov	r5, r0
+	mov	r0, r4
+	bl	rec_compare
+	mov	r1, r0
+	mov	r0, r5
 	b	h_ret
 
 @ HOLD - on u8 (0 / 1), set directly as the meter's key 0x400 handler sets it (dset.s ds_hold);
@@ -1738,8 +1765,9 @@ rec_state:
 @ ----------------------------------------------------------------------------
 @ rec_measure - r0 = destination -> r0 = MEASURE_SIZE (layout in the file header).
 @   Main row by byte 0x200011E4 (0x0800D3D8): 1 R 0x200050B8 / 4 Z 0x200050C4 (ohm), 2 C
-@   0x200050BC, 3 L 0x200050C0. Secondary by 0x200011E8 (0x0800D294): 0 |R| (ohm), 1 X
-@   0x200050C8 (ohm, sign kept), 2 D 0x200050D4, 3 Q 0x200050D0, 4 theta 0x200050CC.
+@   0x200050BC, 3 L 0x200050C0. Secondary by 0x200011E8 (0x0800D294): 0 R (ohm, signed as the
+@   display shows it, S2.2), 1 X 0x200050C8 (ohm, sign kept), 2 D 0x200050D4, 3 Q 0x200050D0,
+@   4 theta 0x200050CC. Byte 64: the two markers fmt_value returns (bit 0 main, 1 secondary).
 @ ----------------------------------------------------------------------------
 	.global	rec_measure
 	.thumb_func
@@ -1784,6 +1812,7 @@ rec_measure:
 .Lrm_main:
 	add	r0, r4, #9
 	bl	fmt_value
+	mov	r5, r0			@ r5 = marker of the main value
 	ldr	r0, =V_SECONDARY
 	ldr	r6, [r0]
 	strb	r6, [r4, #24]
@@ -1804,8 +1833,7 @@ rec_measure:
 	b	.Lrm_sec_ld
 .Lrm_sr:
 	ldr	r2, =V_R
-	ldr	r2, [r2]
-	bic	r2, r2, #0x80000000	@ abs, as 0x0800D294 passes it
+	ldr	r2, [r2]		@ signed: the display's own_fmt_rs takes this word (S2.2)
 	movs	r1, #FK_OHM
 	b	.Lrm_sec
 .Lrm_sx:
@@ -1824,6 +1852,8 @@ rec_measure:
 .Lrm_sec:
 	add	r0, r4, #25
 	bl	fmt_value
+	orr	r5, r5, r0, lsl #1	@ marker of the secondary value: bit 1
+	strb	r5, [r4, #64]
 	ldr	r0, =V_SERPAR
 	ldr	r0, [r0]
 	strb	r0, [r4, #40]
@@ -1861,6 +1891,8 @@ rec_measure:
 @   validity and the 8-byte text from the display's formatter (fmt_fn) called with s0 = the
 @   value, r0 = text buffer, r1 = unit buffer, r2 = index word (CT_FMT_*). FK_OHM_X stores 2
 @   to 0x20001198 around the call and 0 after it, as 0x0800D294 does for X.
+@   Returns r0 = the formatter's marker (fmt.s MF_MARK: 1 outside the accuracy table; 0 for
+@   FK_NONE), and leaves MF_MARK at 0 (a display row without a formatter call then reads 0).
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	fmt_value, %function
@@ -1869,6 +1901,9 @@ fmt_value:
 	mov	r4, r0
 	mov	r5, r1
 	mov	r6, r2
+	ldr	r0, =OWN_FUNC
+	movs	r1, #0
+	str	r1, [r0, #MF_MARK]	@ FK_NONE: no marker
 	str	r6, [r4, #0]
 	ldr	r7, =OWN_CTL + CT_FMT_TXT
 	movs	r0, #0
@@ -1956,6 +1991,10 @@ fmt_value:
 	mov	r1, r7
 	movs	r2, #8
 	bl	mem_copy
+	ldr	r1, =OWN_FUNC
+	ldr	r0, [r1, #MF_MARK]	@ the marker of this value
+	movs	r2, #0
+	str	r2, [r1, #MF_MARK]
 	pop	{r4, r5, r6, r7, r8, pc}
 
 @ ----------------------------------------------------------------------------
@@ -1967,6 +2006,7 @@ fmt_value:
 rec_compare:
 	push	{r4, lr}
 	mov	r4, r0
+	bl	cmp_effective		@ the limits in force now (cmp.s), also off screen 2
 	ldr	r0, =V_CMP_TYPE
 	ldr	r0, [r0]
 	strb	r0, [r4, #0]
@@ -1979,13 +2019,12 @@ rec_compare:
 	ldr	r0, =V_DEVIATION
 	ldr	r0, [r0]
 	str	r0, [r4, #9]
-	vmov	s0, r0
-	vmov	s1, r1
-	movs	r0, #0
-	vcmp.f32 s0, s1
-	vmrs	APSR_nzcv, fpscr
-	it	ls
-	movls	r0, #1			@ deviation <= tolerance: OK
+	ldr	r1, =OWN_FUNC
+	ldr	r0, [r1, #MF_RES]
+	cmp	r0, #CR_IN
+	ite	eq
+	moveq	r0, #1			@ the judgement is IN (cmp.s)
+	movne	r0, #0
 	strb	r0, [r4, #13]
 	ldr	r0, =V_PASS_COUNT
 	ldr	r0, [r0]
@@ -2005,6 +2044,25 @@ rec_compare:
 	ldr	r0, =V_WARN_LED
 	ldr	r0, [r0]
 	strb	r0, [r4, #28]
+	ldr	r1, =OWN_FUNC		@ the tail (S2.8 / S2.9, cmp.s)
+	ldr	r0, [r1, #MF_EMODE]
+	strb	r0, [r4, #29]
+	ldr	r0, [r1, #MF_TMODE]
+	strb	r0, [r4, #30]
+	ldr	r0, [r1, #MF_TLET]
+	strb	r0, [r4, #31]
+	ldr	r0, [r1, #MF_ELO]
+	str	r0, [r4, #32]
+	ldr	r0, [r1, #MF_EHI]
+	str	r0, [r4, #36]
+	ldr	r0, [r1, #MF_RES]
+	strb	r0, [r4, #40]
+	ldr	r0, [r1, #MF_DEV]
+	str	r0, [r4, #41]
+	ldr	r0, [r1, #MF_SKIND]
+	strb	r0, [r4, #45]
+	ldr	r0, [r1, #MF_SVAL]
+	str	r0, [r4, #46]
 	movs	r0, #COMPARE_SIZE
 	pop	{r4, pc}
 
@@ -2534,6 +2592,8 @@ cmd_table:
 	.word	h_hold
 	.short	C_CALIBRATE, 0
 	.word	h_calibrate
+	.short	C_TOL_SET, 0
+	.word	h_tol_set
 	.short	C_SET_TABLES, 0
 	.word	h_set_tables
 	.short	C_SET_SET, 0
@@ -2587,10 +2647,11 @@ mem_ranges:
 	.word	0x1FFFF000, 0x1FFFF812
 	.word	0x20000000, 0x20020000
 
-@ display formatters by FK_* kind (FK_NONE has none)
+@ display formatters by FK_* kind (FK_NONE has none): the wrappers of fmt.s, which the display
+@ rows call too (S2.1 / S2.2 / S2.4: the host text equals the display text)
 fmt_fn:
-	.word	fn_0800e028, fn_0800db24, fn_0800de2c, fn_0800dd44, fn_0800dfc4, 0
-	.word	fn_0800e028
+	.word	own_fmt_r, own_fmt_c, own_fmt_l, own_fmt_dq, own_fmt_th, 0
+	.word	own_fmt_r
 @ unit codes by kind: {first index, last index, added to the index, 0}: ohm 5..7 -> 1..3,
 @ C 1..4 -> 4..7, L 3..5 -> 8..10, D / Q none, theta 1 -> 11 (the indices the formatters
 @ store, 0x0800E028 / 0x0800DB24 / 0x0800DE2C / 0x0800DFC4)
@@ -2614,7 +2675,8 @@ lcr_lists:
 	.word	txt_func, T_FUNC + 24, 0, txt_empty
 	.byte	5, 0, 0, 0		@ 1 secondary
 	.word	txt_secondary, txt_sec_list, 0, txt_empty
-	.byte	5, 1, 1, 0		@ 2 frequency: label 0x20000234 (row 1 of 0x20000224)
+	.byte	6, 1, 1, 0		@ 2 frequency: label 0x20000234 (row 1 of 0x20000224); index 5
+					@ = 60 Hz (S2.12, appended: the hosts' 0..4 unchanged)
 	.word	T_CURSOR + 16, txt_freq_list, tab_freq, txt_hz
 	.byte	3, 2, 1, 0		@ 3 level
 	.word	T_CURSOR + 20, txt_level_list, tab_level, txt_v
@@ -2671,6 +2733,7 @@ txt_freq_list:
 	.asciz	"1kHz"
 	.asciz	"10kHz"
 	.asciz	"100kHz"
+	.asciz	"60Hz"
 txt_level_list:
 	.asciz	"0.1V"
 	.asciz	"0.3V"

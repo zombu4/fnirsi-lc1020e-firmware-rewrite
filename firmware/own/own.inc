@@ -332,6 +332,8 @@
         .equ    SV_VERIFY,      6               @ the copy read back differs
         .equ    SV_BADBLOCK,    7               @ staged block: markers or transfer CRC wrong
         .equ    SV_BADCOPY,     8               @ the source copy of a recovery is not valid
+        .equ    SV_SAME,        9               @ own_save: both copies valid and equal to the
+                                                @ block: nothing written (S2.10)
         .equ    STEP_MARK,      0x41            @ steps of SETTINGS_SAVE_DESIGN "Save" 4 (a)..(d)
         .equ    STEP_ERASE,     0x42
         .equ    STEP_PROGRAM,   0x43
@@ -396,6 +398,7 @@
         .equ    C_COMPARE_SET,  0x25
         .equ    C_HOLD,         0x26
         .equ    C_CALIBRATE,    0x27
+        .equ    C_TOL_SET,      0x28            @ tolerance modes (S2.9, RAM only)
         .equ    C_SET_TABLES,   0x50            @ 4.5 settings, screen, diagnostics
         .equ    C_SET_SET,      0x51
         .equ    C_SET_SAVE,     0x52
@@ -446,6 +449,11 @@
         .equ    CAP_RECOVERY,   1 << 18
         .equ    CAP_FACTORY,    1 << 19
         .equ    CAP_LANGUAGE,   1 << 20         @ not set (SETUP_LANGUAGE has no handler)
+        .equ    CAP_F60,        1 << 22         @ frequency index 5 = 60 Hz (S2.12)
+        .equ    CAP_TOL,        1 << 23         @ TOLERANCE_SET, the COMPARE tail, the judgement
+                                                @ of S2.8 / S2.9
+        .equ    CAP_DISP2,      1 << 24         @ MEASURE byte 64 (S2.1 markers), signed values,
+                                                @ save result SV_SAME (S2.1, S2.2, S2.10)
 
 @ ============================================================================
 @ Our RAM: 0x20018000..0x2001DFFF (24 KiB above the vendor stack top 0x200163A8, below the
@@ -469,10 +477,15 @@
         .equ    USB_SIZE,       0x80
         .equ    O_SCREEN,       0x30E0          @ screen.s state, 0x40 bytes
         .equ    SCREEN_SIZE,    0x40
-        .equ    O_CTL,          0x3120          @ ctl.s state, 0x2DC0 bytes (frame and answer
+        .equ    O_CTL,          0x3120          @ ctl.s state, 0x2CC0 bytes (frame and answer
                                                 @ buffers, event queue, the previous copy of the
                                                 @ settings block for SETTING_CHANGED)
-        .equ    CTL_SIZE,       0x2DC0
+        .equ    CTL_SIZE,       0x2CC0
+        .equ    O_FUNC,         0x5DE0          @ the instrument functions (fmt.s, cmp.s and the
+                                                @ stage-2 words of meas.s), 0x100 bytes
+                                                @ (MEASUREMENT_FIX_DESIGN.md stages 2 / 2F / 2G,
+                                                @ revision 6): from the unused end of O_CTL
+        .equ    FUNC_SIZE,      0x100
         .equ    O_MEAS,         0x5EE0          @ meas.s state, 0x100 bytes (the measurement core,
                                                 @ MEASUREMENT_FIX_DESIGN.md section 0 "RAM": taken
                                                 @ from the unused end of the former O_CTL area)
@@ -488,7 +501,56 @@
         .equ    OWN_SCREEN,     OWN_RAM + O_SCREEN
         .equ    OWN_CTL,        OWN_RAM + O_CTL
         .equ    OWN_MEAS,       OWN_RAM + O_MEAS
+        .equ    OWN_FUNC,       OWN_RAM + O_FUNC
         .equ    OWN_PWR,        OWN_RAM + O_PWR
+
+@ OWN_FUNC words, each written only by the module named (cleared to 0 by own_start at every
+@ start; nothing of it is saved, design D7)
+        .equ    MF_MARK,        0x00            @ fmt.s: 1 when the value formatted last lies
+                                                @ outside the accuracy table (S2.1), else 0
+        .equ    MF_ROW0,        0x04            @ fmt.s: glyph object 0 of row 0 last marked, or 0
+        .equ    MF_ROW1,        0x08            @ fmt.s: the same for row 1
+        .equ    MF_SP,          0x0C            @ meas.s S2.6: 0 undecided, 1 series, 2 parallel
+        .equ    MF_AUTO,        0x10            @ cmp.s S2.5: AUTO class 0 undecided, 1 R, 2 C,
+                                                @ 3 L (meas.s sets 0 at a setting change)
+        .equ    MF_HOLDP,       0x14            @ meas.s S2.7: 1 while a hold is latched
+        .equ    MF_HL,          0x18            @ meas.s S2.7: 6 words latched at hold 0 -> 1
+                                                @ (frequency, level, bias, range, speed, circuit)
+        .equ    MF_PSEQ,        0x30            @ meas.s: publishes made (meas_tail)
+        .equ    MF_TMODE,       0x34            @ cmp.s S2.9: tolerance mode 0 vendor +- %, 1 %
+                                                @ limits, 2 absolute pF limits, 3 preset letter
+        .equ    MF_TLO,         0x38            @ cmp.s: float lower limit (% or pF), modes 1 / 2
+        .equ    MF_THI,         0x3C            @ cmp.s: float upper limit
+        .equ    MF_TLET,        0x40            @ cmp.s: preset letter (ASCII) of mode 3
+        .equ    MF_SKIND,       0x44            @ cmp.s: secondary limit 0 none, 1 D max, 2 Q min,
+                                                @ 3 ESR max
+        .equ    MF_SVAL,        0x48            @ cmp.s: its float value
+        .equ    MF_TOLW,        0x4C            @ cmp.s: bits of 0x20001188 when the mode was set
+        .equ    MF_RES,         0x50            @ cmp.s S2.8: result of the last judgement (CR_*)
+        .equ    MF_DEV,         0x54            @ cmp.s: its signed deviation (float, % or pF)
+        .equ    MF_EMODE,       0x58            @ cmp.s: its effective mode 0 vendor, 1 %, 2 pF
+        .equ    MF_ELO,         0x5C            @ cmp.s: its effective lower limit (% or pF)
+        .equ    MF_EHI,         0x60            @ cmp.s: its effective upper limit
+        .equ    MF_PREV,        0x64            @ cmp.s: compare value of the previous publish
+        .equ    MF_PVSEQ,       0x68            @ cmp.s: its publish number
+        .equ    MF_PVOK,        0x6C            @ cmp.s: 1 when MF_PREV holds a present value
+        .equ    MF_LED,         0x70            @ cmp.s: 0 LEDs idle, 1 OK level, 2 NG level
+        .equ    MF_BEEPN,       0x74            @ cmp.s: beeps still to sound
+        .equ    MF_BEEPT,       0x78            @ cmp.s: tick of the next beeper step
+        .equ    MF_BEEPS,       0x7C            @ cmp.s: 0 idle, 1 beeper on, 2 gap
+        .equ    MF_END,         0x80
+        .if     MF_END > FUNC_SIZE
+        .error  "own.inc: the OWN_FUNC words do not fit O_FUNC"
+        .endif
+
+@ compare results (MF_RES; COMPARE record offset 39)
+        .equ    CR_NONE,        0               @ no part present: "---"
+        .equ    CR_IN,          1               @ within the limits
+        .equ    CR_HI,          2               @ above the upper limit
+        .equ    CR_LO,          3               @ below the lower limit
+        .equ    CR_SEC,         4               @ primary within, the secondary limit failed
+        .equ    CR_OUT,         5               @ a reading above the presence limit (not counted)
+        .equ    CR_UNST,        6               @ a part present, the reading not yet stable: "---"
 
 @ meas.s words written by another module (offsets in its area; the others: meas.s header)
         .equ    MO_G,           0x00            @ re-arm generation: +1 per re-arm of DMA1 channel 1,

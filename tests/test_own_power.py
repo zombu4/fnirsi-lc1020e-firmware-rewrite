@@ -90,15 +90,19 @@ def run_until_off(rig, seconds):
 
 
 def check_power_off(rig, saves, reason, what):
-    """The power-off path of POWER_OFF ran: own_save wrote (count + 1, status 0), PA8 low, the reason
+    """The power-off path of POWER_OFF ran: own_save ran (count + 1, status 0, or 9 = SV_SAME when both
+    copies already held the block: nothing written, MEASUREMENT_FIX_DESIGN.md S2.10), PA8 low, the reason
     word, and 1.2 s later (USB power in the model: the meter still runs) the powered-off mode CF_OFF."""
     check(rig.m.st['pa8'] == 0, '%s: PA8 not low' % what)
     check(rig.rd(PW_REASON) == reason, '%s: reason %d, expected %d' % (what, rig.rd(PW_REASON), reason))
     check(rig.rd(PW_STARTS) == 1, '%s: power_path called %d times' % (what, rig.rd(PW_STARTS)))
-    check(rig.rd(SAVE_COUNT) == saves + 1 and rig.rd(SAVE_STATUS) == 0,
+    check(rig.rd(SAVE_COUNT) == saves + 1 and rig.rd(SAVE_STATUS) in (0, 9),
           '%s: save count %d (before %d), status 0x%X' % (what, rig.rd(SAVE_COUNT), saves, rig.rd(SAVE_STATUS)))
-    rig.run(1.2)
-    check(rig.rd(OWN_CTL + CT_FLAGS) & CF_OFF, '%s: powered-off mode not entered' % what)
+    # OFF_WAIT_MS 1000 from the request, plus one main-loop pass for off_step (up to about 0.71 s on
+    # the slow core of p1..p3, MEASUREMENT_FIX_DESIGN.md revision 5 item 23); with a save that writes
+    # nothing (SV_SAME) PA8 goes low long before the wait ends, so the bound is 2.5 s from here
+    end = rig.m.run_for(seconds=2.5, until=lambda mm: rig.rd(OWN_CTL + CT_FLAGS) & CF_OFF)
+    check(end is None and rig.rd(OWN_CTL + CT_FLAGS) & CF_OFF, '%s: powered-off mode not entered (%r)' % (what, end))
 
 
 def off_rig(offtime, usb=False):

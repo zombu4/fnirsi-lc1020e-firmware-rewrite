@@ -532,8 +532,10 @@ ds_circuit:
 @ ds_hold - hold 0x200011A4 = r0 (DIRECT_SET_DESIGN.md 1.2, app_01.s 475-486, 617-619):
 @   1: fn_08023558([0x200001DC], 1) shows the HOLD object (tail call); 0: fn_08023050
 @   ([0x200001DC], 1) hides it, byte 0x200011C4 = 1 (the measurement restart request of the
-@   DMA interrupt). Stack: 8 bytes.
+@   DMA interrupt). Stack: 8 bytes. Also called by meas.s meas_hold (S2.7: a hold ends at a
+@   change of its settings).
 @ ----------------------------------------------------------------------------
+	.global	ds_hold
 	.thumb_func
 	.type	ds_hold, %function
 ds_hold:

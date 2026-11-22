@@ -77,16 +77,26 @@ def status(result, step=0, copy=0):
     return result | step << 8 | copy << 16
 
 
+# the setting words save.s load_fix checks (MEASUREMENT_FIX_DESIGN.md S2.11), block offset -> a valid
+# value (fn_0800b4c8's defaults): frequency 1000, level 0.6, bias 0, Func 0, range 0, circuit 0,
+# compare quantity 1, nominal 1000.0, tolerance 5.0
+VALID_WORDS = {0xBC8: 1000, 0xBBC: 0x3F19999A, 0xBC0: 0, 0xBCC: 0, 0xBD0: 0, 0xBD8: 0, 0xBFC: 1,
+               0xC08: 0x447A0000, 0xC0C: 0x40A00000}
+
+
 def block(tag):
     """A test block: pattern bytes, both markers, an erased-value run at 0x200; the first-start flag
     (0xBC4) and the language word (0xBE0) 1, as save.s set_english stores them in every copy and in
-    RAM (English only: a copy with other values is loaded and written with 1 / 1, test_own_lang.py)."""
+    RAM (English only: a copy with other values is loaded and written with 1 / 1, test_own_lang.py);
+    the setting words of VALID_WORDS valid, so load_fix (S2.11) leaves the loaded block as it is."""
     b = bytearray((31 * i + 7 * tag) & 0xFF for i in range(BLK))
     struct.pack_into('<I', b, 0, MARKER)
     struct.pack_into('<I', b, MARK_END, MARKER)
     b[0x200:0x210] = b'\xff' * 16
     struct.pack_into('<I', b, LANG_SET, 1)
     struct.pack_into('<I', b, LANGUAGE, 1)
+    for off, v in VALID_WORDS.items():
+        struct.pack_into('<I', b, off, v)
     return bytes(b)
 
 
@@ -779,6 +789,10 @@ def s19_interrupt_changes_live_block_during_save():
     m.scs[0xE000ED08] = RAM_VT                   # VTOR (meter_model reads the vector from there)
     # SysTick every 1 ms, processor clock, interrupt on (CSR 7); set in the model's SysTick state
     m.tm['st'].update(csr=7, rvr=CORE_HZ_1MS - 1, v0=0, t_ref=m.now(), done=0)
+    # one word changed before the save (0x104, not the handler's word): the block differs from both
+    # copies whether or not a tick lands before the snapshot, so the save writes (an unchanged
+    # snapshot would be SV_SAME, MEASUREMENT_FIX_DESIGN.md S2.10)
+    rig.wr(V_BLOCK + 0x104, w32(rig.ram_block(), 0x104) ^ 0x01)
     v0 = w32(rig.ram_block(), 0x100)
     rig.clear_log()
     r = rig.call('own_save')
@@ -836,6 +850,157 @@ def s20_watchdog_stretch_of_whole_saves():
         out.append('%s %.1f ms (%d instructions), %d feeds, save %.3f s'
                    % (name, longest * 1e3, st['longest']['insns'], n, t1 - t0))
     NOTES.append('s20: ' + '; '.join(out))
+    return True
+
+
+# ---------------------------------------------------------------- MEASUREMENT_FIX_DESIGN.md stage 2 / 2F
+# (the design's s06..s09 and the S2.12 persistence; named s21.. here, s06..s20 are taken)
+
+SV_SAME = 9                               # own.inc: both copies hold the block, nothing written
+FREQ_OFF = 0xBC8                          # block offset of 0x20001144
+
+
+@case
+def s21_unchanged_save_writes_nothing():
+    """S2.10: A (trailer, CRC valid) and B valid, both equal to the RAM block: own_save erases and
+    programs nothing, status SV_SAME, the count + 1, both copies unchanged; the save answer status of
+    SV_SAME is 0 (cmd.s sv_map, checked in test_own_func.py)."""
+    b1 = block(1)
+    a, b = copy_image(b1, 5), copy_image(b1, 5)
+    rig = loaded_rig(a, b)
+    check(rig.ram_block() == b1, 'RAM block is not the loaded copy')
+    rig.clear_log()
+    r = rig.call('own_save')
+    check(r == SV_SAME and rig.status() == SV_SAME and rig.rd(COUNT) == 1, 'status %r / %r count %r'
+          % (r, rig.status(), rig.rd(COUNT)))
+    check(not rig.ops(), 'flash written: %r' % rig.ops()[:3])
+    check(rig.copy(SET_A) == a and rig.copy(SET_B) == b, 'a copy changed')
+    check(rig.flags() == 0, 'flags 0x%X' % rig.flags())
+    # B stale (other tables, SF_DIFFERS): written as before, not skipped
+    rig = loaded_rig(copy_image(b1, 5), copy_image(block(2), 4))
+    rig.clear_log()
+    r = rig.call('own_save')
+    check(r == SV_OK and rig.ops(), 'B differs: status 0x%X, %d operations' % (r, len(rig.ops())))
+    return True
+
+
+@case
+def s22_one_changed_byte_saves():
+    """S2.10: one byte of the user table changed in RAM: the normal save (B then A, sequence + 1)."""
+    b1 = block(1)
+    rig = loaded_rig(copy_image(b1, 5), copy_image(b1, 5))
+    nb = bytearray(b1)
+    nb[0x900] ^= 0x01
+    nb = bytes(nb)
+    rig.wr(V_BLOCK, nb)
+    rig.clear_log()
+    r = rig.call('own_save')
+    check(r == SV_OK and rig.status() == SV_OK, 'status 0x%X' % r)
+    erases = [x[1] for x in rig.ops() if x[0] == 'erase']
+    check(erases == [SET_B, SET_B + PAGE, SET_A, SET_A + PAGE], 'erase order %r' % [hex(e) for e in erases])
+    for base in (SET_B, SET_A):
+        check(valid_copy(rig.copy(base), nb, 6), 'copy 0x%08X is not the changed block, sequence 6' % base)
+    return True
+
+
+@case
+def s23_vendor_format_a_is_saved():
+    """S2.10: A in the vendor format with the same bytes as RAM and B: not skipped, A gets its trailer
+    (SETTINGS_SAVE_DESIGN step 4 (a))."""
+    b1 = block(1)
+    rig = loaded_rig(copy_image(b1), copy_image(b1, 3))
+    rig.clear_log()
+    r = rig.call('own_save')
+    check(r == SV_OK, 'status 0x%X' % r)
+    check(valid_copy(rig.copy(SET_A), b1, 4), 'A has no trailer with sequence 4')
+    check(valid_copy(rig.copy(SET_B), b1, 4), 'B not sequence 4')
+    rig.clear_log()
+    check(rig.call('own_save') == SV_SAME and not rig.ops(), 'second save not skipped: 0x%X' % rig.status())
+    return True
+
+
+@case
+def s24_invalid_loaded_words_repaired_in_ram():
+    """S2.11: invalid setting words of a valid copy take fn_0800b4c8's defaults in RAM (save.s
+    load_fix): no flash operation at load, the copies unchanged, the calibration tables of the RAM
+    block equal to the copy's; each word's expected value from the save.s header."""
+    def with_words(words):
+        b = bytearray(block(3))
+        for off, v in words.items():
+            struct.pack_into('<I', b, off, v & 0xFFFFFFFF)
+        return bytes(b)
+    f2u = lambda x: struct.unpack('<I', struct.pack('<f', x))[0]
+    L01, L03, L06, B05 = 0x3DCCCCCD, 0x3E99999A, 0x3F19999A, 0x3F000000
+    cases = [
+        # (words written into the copy, expected RAM words)
+        ({0xBC8: 60, 0xBBC: 0x3F000000, 0xBC0: 0x3E000000, 0xBCC: 7, 0xBD0: 9, 0xBD8: 3, 0xBFC: 0,
+          0xC08: 0, 0xC0C: f2u(-1.0)},
+         {0xBC8: 100, 0xBBC: L06, 0xBC0: 0, 0xBCC: 0, 0xBD0: 0, 0xBD8: 0, 0xBFC: 1, 0xC08: 0x447A0000,
+          0xC0C: 0x40A00000}),
+        ({0xBC8: 50, 0xBBC: L06, 0xBC0: B05, 0xBFC: 4, 0xC08: f2u(-5.0), 0xC0C: f2u(100.0)},
+         {0xBC8: 1000, 0xBBC: L03, 0xBC0: B05, 0xBFC: 1, 0xC08: 0x447A0000, 0xC0C: 0x40A00000}),
+        ({0xBC8: 100000, 0xBBC: L01, 0xBC0: B05, 0xBCC: 4, 0xBD0: 4, 0xBD8: 2, 0xBFC: 3,
+          0xC08: 0x7F800000, 0xC0C: f2u(99.9)},
+         {0xBC8: 100000, 0xBBC: L01, 0xBC0: B05, 0xBCC: 4, 0xBD0: 4, 0xBD8: 2, 0xBFC: 3,
+          0xC08: 0x447A0000, 0xC0C: f2u(99.9)}),
+        ({0xBC8: 120, 0xC08: 0x7FC00000, 0xC0C: 0},
+         {0xBC8: 120, 0xC08: 0x447A0000, 0xC0C: 0}),
+    ]
+    for k, (words, want) in enumerate(cases):
+        blk = with_words(words)
+        a, b = copy_image(blk, 5), copy_image(blk, 5)
+        rig = Rig(a, b)
+        rig.load()
+        check(not rig.ops(), 'case %d: own_load wrote flash %r' % (k, rig.ops()[:3]))
+        check(rig.copy(SET_A) == a and rig.copy(SET_B) == b, 'case %d: a copy changed' % k)
+        ram = rig.ram_block()
+        check(ram[CAL_LO:CAL_END] == blk[CAL_LO:CAL_END], 'case %d: calibration tables changed' % k)
+        for off, v in want.items():
+            got = struct.unpack_from('<I', ram, off)[0]
+            check(got == v, 'case %d: word 0x%X = 0x%08X, expected 0x%08X' % (k, off, got, v))
+        rest = [i for i in range(0, BLK, 4) if i not in want and not CAL_LO <= i < CAL_END]
+        check(all(ram[i:i + 4] == blk[i:i + 4] for i in rest), 'case %d: another word changed' % k)
+    return True
+
+
+@case
+def s25_sixty_hertz_is_saved_as_100():
+    """S2.12 D60-a: RAM at 60 Hz: own_save writes 100 at block offset 0xBC8 of both copies (CRC valid),
+    RAM keeps 60; a second save with nothing changed is SV_SAME; SETTINGS_WRITE_BLOCK of a block with 60
+    (CRC of the bytes as sent) writes 100; SETTINGS_ACCEPT_DEFAULTS of a RAM block with 60 writes 100;
+    a load of such a copy starts at 100."""
+    b1 = block(1)
+    rig = loaded_rig(copy_image(b1, 5), copy_image(b1, 5))
+    rig.wr(V_BLOCK + FREQ_OFF, 60)
+    r = rig.call('own_save')
+    check(r == SV_OK, 'save at 60 Hz: 0x%X' % r)
+    saved = bytearray(b1)
+    struct.pack_into('<I', saved, FREQ_OFF, 100)
+    saved = bytes(saved)
+    for base in (SET_B, SET_A):
+        check(valid_copy(rig.copy(base), saved, 6), 'copy 0x%08X: not the block with 100 Hz, sequence 6' % base)
+    check(rig.rd(V_BLOCK + FREQ_OFF) == 60, 'RAM frequency %d' % rig.rd(V_BLOCK + FREQ_OFF))
+    rig.clear_log()
+    check(rig.call('own_save') == SV_SAME and not rig.ops(), 'unchanged session at 60 Hz not skipped: 0x%X'
+          % rig.status())
+    erased = b'\xff' * SET_SIZE
+    host = bytearray(block(5))
+    struct.pack_into('<I', host, FREQ_OFF, 60)
+    host = bytes(host)
+    rig = loaded_rig(erased, erased)
+    rig.wr(OWN_STAGE, host)
+    check(rig.call('save_write_block', zlib.crc32(host)) == SV_OK, 'write block: 0x%X' % rig.status())
+    want = bytearray(host)
+    struct.pack_into('<I', want, FREQ_OFF, 100)
+    for base in (SET_B, SET_A):
+        check(valid_copy(rig.copy(base), bytes(want), 1), 'write block, copy 0x%08X: not 100 Hz' % base)
+    rig = loaded_rig(erased, erased)
+    rig.wr(V_BLOCK, host)
+    check(rig.call('save_accept_defaults') == SV_OK, 'accept defaults: 0x%X' % rig.status())
+    for base in (SET_B, SET_A):
+        check(valid_copy(rig.copy(base), bytes(want), 1), 'accept defaults, copy 0x%08X: not 100 Hz' % base)
+    rig2 = loaded_rig(rig.copy(SET_A), rig.copy(SET_B))
+    check(rig2.rd(V_BLOCK + FREQ_OFF) == 100, 'load: frequency %d' % rig2.rd(V_BLOCK + FREQ_OFF))
     return True
 
 

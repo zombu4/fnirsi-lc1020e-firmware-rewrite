@@ -254,6 +254,7 @@ ctl_loop:
 	bl	ev_detect		@ (4)
 	bl	scr_step
 	bl	stream_step
+	bl	own_cmp_step		@ the compare beeper / LED steps (cmp.s, S2.8)
 	bl	rx_poll			@ (5)
 	bl	ans_step		@ (6)
 	pop	{r4, pc}
@@ -986,6 +987,9 @@ key_step:
 	bl	now
 	str	r0, [r4, #CT_OFF_T]
 .Lk_call:
+	mov	r0, r7
+	mov	r1, r8
+	bl	own_cmp_key		@ the counter reset of screen 2 (cmp.s, S2.8 / D16)
 	ldr	r0, =own_save_count
 	ldr	r0, [r0]
 	str	r0, [r4, #CT_SAVES_SEEN]
@@ -2185,10 +2189,11 @@ tab_level:
 	.global	tab_bias
 tab_bias:
 	.word	0x00000000, 0x3F000000
-@ frequencies in Hz (fn_0800d940 mode 0 cycle)
+@ frequencies in Hz (fn_0800d940 mode 0 cycle), index 5 = 60 Hz appended (S2.12, meas.s
+@ own_freq_step; the hosts' indices 0..4 unchanged)
 	.global	tab_freq
 tab_freq:
-	.word	100, 120, 1000, 10000, 100000
+	.word	100, 120, 1000, 10000, 100000, 60
 @ sorting scales 0.001, 1.0, 1000.0, 1e6 (fn_0800e224 literals 0x0800E484.., s3); also read by
 @ dset.s ds_compare
 	.global	tab_scale

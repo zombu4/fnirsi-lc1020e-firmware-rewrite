@@ -14,7 +14,8 @@ Library:
             print(ev)
 
 Command line (python3 -I tools/lc1020e.py --help):
-    info, ping, state, stream, events, key, screen, measure, set, compare, hold, calibrate, settings,
+    info, ping, state, stream, events, key, screen, measure, set, compare, tolerance, hold, calibrate,
+    settings,
     cal-read, backup, restore-block, screenshot, mem, battery, factory-mode, update,
     boot-status, boot-update, power-off, reset; --selftest checks the CRCs, the frame encoder and
     parser, the record decoders and the PNG writer without a meter.
@@ -51,7 +52,7 @@ C = dict(
     INFO=0x00, PING=0x01, RESET=0x02, BATTERY=0x03, POWER_OFF=0x05, FACTORY_MODE=0x06,
     STATE=0x10, STREAM=0x11, SCREEN=0x12, KEY=0x13,
     LCR_TABLES=0x20, LCR_SET=0x21, MEASURE=0x22, MEASURE_STREAM=0x23, COMPARE=0x24,
-    COMPARE_SET=0x25, HOLD=0x26, CALIBRATE=0x27,
+    COMPARE_SET=0x25, HOLD=0x26, CALIBRATE=0x27, TOLERANCE_SET=0x28,
     SETTINGS_TABLES=0x50, SETTINGS_SET=0x51, SETTINGS_SAVE=0x52, CAL_READ=0x53,
     RESTORE_DEFAULTS=0x54, SETTINGS_RESTORE_B=0x55, SETTINGS_ACCEPT_A=0x56,
     SETTINGS_WRITE_BLOCK=0x57, SETTINGS_ACCEPT_B=0x59,
@@ -117,7 +118,13 @@ SAVE_FLAGS = {0x01: 'saves held', 0x02: 'backup differs', 0x04: 'no valid copy a
               0x20: 'copy A damaged', 0x40: 'rewrite of A pending', 0x80: 'restart pending'}
 SF_RESTART = 0x80
 SAVE_RESULT = {0: 'OK', 1: 'held', 2: 'refused', 3: 'trailer mark failed', 4: 'erase failed',
-               5: 'program failed', 6: 'verify failed', 7: 'bad block', 8: 'source copy invalid'}
+               5: 'program failed', 6: 'verify failed', 7: 'bad block', 8: 'source copy invalid',
+               9: 'unchanged (nothing written)'}
+# compare results of the COMPARE tail (byte 40) and the tolerance modes (bytes 29 / 30)
+COMPARE_RESULT = {0: '---', 1: 'IN', 2: 'HI', 3: 'LO', 4: 'secondary limit', 5: 'out of range',
+                  6: '--- (not stable)'}
+TOL_MODE = {0: 'vendor +-%', 1: '% limits', 2: 'pF limits', 3: 'letter'}
+SEC_LIMIT = {0: 'none', 1: 'D max', 2: 'Q min', 3: 'ESR max'}
 SAVE_STEP = {0: '', 0x01: 'check', 0x41: 'mark', 0x42: 'erase', 0x43: 'program', 0x44: 'verify'}
 SAVE_COPY = {0: '', 1: 'A', 2: 'B'}
 FLASH_RESULT = {0: 'OK', 1: 'outside the gate', 2: 'word not erased', 3: 'controller locked',
@@ -152,7 +159,9 @@ CAPS = ['STATE / STREAM', 'SCREEN', 'KEY', 'LCR_TABLES / LCR_SET', 'MEASURE / ME
         'COMPARE / COMPARE_SET', 'HOLD', 'CALIBRATE', 'SETTINGS_*', 'CAL_READ', 'SCREENSHOT',
         'MEM_READ', 'events', 'UPDATE_MODE', 'BOOT_*', 'BATTERY', 'POWER_OFF', 'RESTORE_DEFAULTS',
         'settings recovery', 'FACTORY_MODE',
-        'SETUP_LANGUAGE (not used, English only)', 'direct set']   # bit 20 clear, bit 21
+        'SETUP_LANGUAGE (not used, English only)', 'direct set',   # bit 20 clear, bit 21
+        '60 Hz (frequency index 5)', 'TOLERANCE_SET / COMPARE tail',
+        'MEASURE markers / save result unchanged']                 # bits 22..24
 
 
 # ----------------------------------------------------------------------------------------------
@@ -378,6 +387,8 @@ class Measure:
     speed: int
     circuit: int
     raw: bytes = field(repr=False, default=b'')
+    markers: int = 0     # byte 64 (capability bit 24): bit 0 main, bit 1 secondary outside the
+                         # accuracy table; 0 for a 64-byte record of older firmware
     SIZE = 64
 
     @classmethod
@@ -389,8 +400,9 @@ class Measure:
         skind = d[24]
         sec = Value.parse(d, 25)
         par, z, th, fq, lv, bs, rg, sp, ci = struct.unpack_from('<BffIffBBB', d, 40)
+        mk = d[64] if len(d) > 64 else 0
         return cls(res, t, mrow, main, skind, sec, par, z, th, fq, lv, bs, rg, sp, ci,
-                   bytes(d[:cls.SIZE]))
+                   bytes(d[:65 if len(d) > 64 else cls.SIZE]), mk)
 
 
 @dataclass
@@ -407,13 +419,19 @@ class Compare:
     warn_sound: int
     warn_led: int
     raw: bytes = field(repr=False, default=b'')
+    tail: tuple = None   # bytes 29..49 (capability bit 23): (mode in force, mode set, letter,
+                         # lower, upper, result, signed deviation, secondary kind, secondary value);
+                         # None for a 29-byte record of older firmware
     SIZE = 29
+    TAIL_SIZE = 50
 
     @classmethod
     def parse(cls, d):
         if len(d) < cls.SIZE:
             raise MeterError('COMPARE record of %d bytes, expected %d' % (len(d), cls.SIZE))
-        return cls(*struct.unpack_from('<BfffBIIfBBB', d), raw=bytes(d[:cls.SIZE]))
+        tail = (struct.unpack_from('<BBBffBfBf', d, 29) if len(d) >= cls.TAIL_SIZE else None)
+        n = cls.TAIL_SIZE if tail is not None else cls.SIZE
+        return cls(*struct.unpack_from('<BfffBIIfBBB', d), raw=bytes(d[:n]), tail=tail)
 
 
 @dataclass
@@ -941,6 +959,13 @@ class Meter:
         return self._ok(C['COMPARE_SET'], struct.pack('<ffBBB', nominal, tolerance, warn_type,
                                                        warn_sound, warn_led), parse=Compare.parse)
 
+    def tolerance_set(self, mode, lower=0, upper=0, letter=b'\x00', sec_kind=0, sec_value=0.0):
+        """TOLERANCE_SET (capability bit 23, PROTOCOL.md 5.3): mode 0 vendor +-%, 1 lower / upper in
+        0.01 %, 2 lower / upper in 0.01 pF (compare quantity C), 3 an IEC 60062 letter; the
+        secondary limit 0 none, 1 D max, 2 Q min, 3 ESR max. RAM only."""
+        return self._ok(C['TOLERANCE_SET'], struct.pack('<BiicBf', mode, lower, upper, letter,
+                                                         sec_kind, sec_value), parse=Compare.parse)
+
     def hold(self, on):
         return self._ok(C['HOLD'], bytes([1 if on else 0]), parse=State.parse)
 
@@ -1273,20 +1298,30 @@ def fmt_state(s):
 
 
 def fmt_measure(m):
-    return ('#%d t=%d  %s = %s   %s = %s   |Z| %.6g ohm  theta %.4g deg  %s  %d Hz %.3g V bias '
+    um = ' (unspecified)'
+    return ('#%d t=%d  %s = %s%s   %s = %s%s   |Z| %.6g ohm  theta %.4g deg  %s  %d Hz %.3g V bias '
             '%.3g V range %d speed %d' % (
                 m.result, m.time, MAIN_NAME.get(m.main_row, m.main_row), m.main,
-                SECONDARY_NAME.get(m.secondary_kind, m.secondary_kind), m.secondary, m.z, m.theta,
+                um if m.markers & 1 else '', SECONDARY_NAME.get(m.secondary_kind, m.secondary_kind),
+                m.secondary, um if m.markers & 2 else '', m.z, m.theta,
                 'parallel' if m.parallel else 'series', m.frequency, m.level, m.bias, m.range,
                 m.speed))
 
 
 def fmt_compare(c):
-    return ('quantity %s, nominal %.6g, tolerance %.3g %%, deviation %.4g %% %s, pass %d, fail %d, '
-            'value %.6g, warn type %d, sound %d, LED %d' % (
-                {1: 'R', 2: 'C', 3: 'L'}.get(c.quantity, c.quantity), c.nominal, c.tolerance,
-                c.deviation, 'OK' if c.ok else 'NG', c.passed, c.failed, c.value, c.warn_type,
-                c.warn_sound, c.warn_led))
+    s = ('quantity %s, nominal %.6g, tolerance %.3g %%, deviation %.4g %% %s, pass %d, fail %d, '
+         'value %.6g, warn type %d, sound %d, LED %d' % (
+             {1: 'R', 2: 'C', 3: 'L'}.get(c.quantity, c.quantity), c.nominal, c.tolerance,
+             c.deviation, 'OK' if c.ok else 'NG', c.passed, c.failed, c.value, c.warn_type,
+             c.warn_sound, c.warn_led))
+    if c.tail is not None:
+        em, tm, let, lo, hi, res, dev, sk, sv = c.tail
+        unit = 'pF' if em == 2 else '%'
+        s += ('; mode %s%s, limits %.4g .. %.4g %s, result %s, deviation %+.4g %s, secondary %s%s' % (
+            TOL_MODE.get(tm, tm), ' %s' % chr(let) if tm == 3 else '', lo, hi, unit,
+            COMPARE_RESULT.get(res, res), dev, unit, SEC_LIMIT.get(sk, sk),
+            ' %.4g' % sv if sk else ''))
+    return s
 
 
 def fmt_info(i):
@@ -1378,6 +1413,9 @@ def cmd_main(a, m):
                               cur.warn_sound if a.warn_sound is None else a.warn_sound,
                               cur.warn_led if a.warn_led is None else a.warn_led)
             print(fmt_compare(r))
+    elif c == 'tolerance':
+        print(fmt_compare(m.tolerance_set(a.mode, a.lower, a.upper, a.letter.encode()[:1] or b'\x00',
+                                          a.secondary, a.secondary_value)))
     elif c == 'hold':
         print(fmt_state(m.hold(a.on == 'on')))
     elif c == 'calibrate':
@@ -1535,6 +1573,15 @@ def build_parser():
     x.add_argument('--warn-type', type=_num, choices=(0, 1))
     x.add_argument('--warn-sound', type=_num, choices=(0, 1))
     x.add_argument('--warn-led', type=_num, choices=(0, 1))
+    x = sp.add_parser('tolerance', help='TOLERANCE_SET (RAM only): mode 0 vendor +-%%, 1 lower / upper '
+                      'in 0.01 %%, 2 lower / upper in 0.01 pF (C only), 3 --letter B C D F G J K M Z')
+    x.add_argument('mode', type=_num, choices=(0, 1, 2, 3))
+    x.add_argument('--lower', type=_num, default=0)
+    x.add_argument('--upper', type=_num, default=0)
+    x.add_argument('--letter', default='')
+    x.add_argument('--secondary', type=_num, choices=(0, 1, 2, 3), default=0,
+                   help='0 none, 1 D max, 2 Q min, 3 ESR max')
+    x.add_argument('--secondary-value', type=float, default=0.0)
     x = sp.add_parser('hold', help='HOLD on / off')
     x.add_argument('on', choices=('on', 'off'))
     x = sp.add_parser('calibrate', help='CALIBRATE: 0 short, 11 open (1..10 factory mode only)')
@@ -1627,8 +1674,15 @@ def selftest():
                        struct.pack('<BffIffBBB', 0, 3386.0, -89.5, 1000, 0.6, 0.0, 0, 1, 0))
     check('MEASURE decoder (64 bytes)', ms.result == 9 and ms.main.unit == 5 and ms.main.text == '4.70'
           and ms.secondary.decimals == 3 and ms.frequency == 1000 and ms.speed == 1)
+    check('MEASURE 64 bytes: no markers', ms.markers == 0)
+    ms2 = Measure.parse(ms.raw + b'\x03')
+    check('MEASURE decoder (65 bytes, markers)', ms2.markers == 3 and ms2.frequency == 1000)
     cp = Compare.parse(struct.pack('<BfffBIIfBBB', 1, 1000.0, 5.0, 1.5, 1, 10, 2, 1015.0, 0, 1, 1))
-    check('COMPARE decoder (29 bytes)', cp.ok == 1 and cp.passed == 10 and cp.warn_led == 1)
+    check('COMPARE decoder (29 bytes)', cp.ok == 1 and cp.passed == 10 and cp.warn_led == 1
+          and cp.tail is None)
+    cp2 = Compare.parse(cp.raw + struct.pack('<BBBffBfBf', 1, 3, ord('Z'), -20.0, 80.0, 1, 1.5, 1, 0.01))
+    check('COMPARE decoder (50 bytes, tail)', cp2.tail[1] == 3 and cp2.tail[2] == ord('Z')
+          and cp2.tail[5] == 1 and abs(cp2.tail[6] - 1.5) < 1e-6 and cp2.tail[7] == 1)
     inf = Info.parse(struct.pack('<BI16s12sBIII', 1, 0x0FFFFF, b'LC1020E V1.1 OWN', bytes(12), 1, 2,
                                  300000, 1))
     check('INFO decoder (46 bytes)', inf.has(19) and not inf.has(20) and inf.firmware ==

@@ -197,10 +197,12 @@
                                                 @ except POWER_OFF (USB_CONTROL_DESIGN.md 9)
         .equ    ST_DEFER,       0xFF            @ handler result: the answer comes from the job
                                                 @ (or was made pending by job_answer already)
-        .equ    CAPS_ALL,       0x002FFFFF      @ capability bits 0..19 (4.8; bit 20, SETUP_LANGUAGE,
-                                                @ clear: English only) and bit 21: SCREEN, LCR_SET,
+        .equ    CAPS_ALL,       0x01EFFFFF      @ capability bits 0..19 (4.8; bit 20, SETUP_LANGUAGE,
+                                                @ clear: English only), bit 21: SCREEN, LCR_SET,
                                                 @ HOLD, SETTINGS_SET, COMPARE_SET set directly
-                                                @ (DIRECT_SET_DESIGN.md revision 2)
+                                                @ (DIRECT_SET_DESIGN.md revision 2), bits 22..24:
+                                                @ CAP_F60, CAP_TOL, CAP_DISP2 (own.inc;
+                                                @ MEASUREMENT_FIX_DESIGN.md stage 2, revision 6)
         .equ    ID_CAL_TABLES,  0xFFFE          @ SETTING_CHANGED id: words changed in the
                                                 @ calibration tables (value = their number)
         .equ    V_SCALE,        0x2000119C      @ sorting nominal unit / scale index 0..3

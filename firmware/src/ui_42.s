@@ -532,6 +532,9 @@ fn_0800d8f0:
 @    above 0x3f000000.
 @ 3: adds r0 to the word 0x2000114c, wraps 5 to 0 and below 0 to 4.
 @ After a change in the modes 0 to 2 it tail-calls fn_08009f10.
+@ Our build: mode 0 branches to own_freq_step (own/meas.s, .ifdef OWN at 0x0800D97A), the
+@ cycle 60 -> 100 -> 120 -> 1000 -> 10000 -> 100000 -> 60 and back (MEASUREMENT_FIX_DESIGN.md
+@ S2.12).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800d940,"ax",%progbits
 	.p2align 2
@@ -562,8 +565,13 @@ fn_0800d940:
 	movs	r0, #0
 	b.n	.L0800da44
 .L0800d97a:
+.ifdef OWN
+	b.w	own_freq_step		@ 0x0800D97A: the cycle with 60 Hz (own/meas.s, S2.12); the
+					@ rest of the mode-0 block is not reached in our build
+.else
 	ldr	r1, .L0800da4c
 	movs	r5, #0x64
+.endif
 	movs	r7, #0x78
 	ldr	r3, .L0800da58		@ 100000
 	ldr.w	r1, [r1, #0xbc8]	@ word 0x20001144

@@ -1349,7 +1349,11 @@ fn_0800d294:
 	add	r1, sp, #0xc
 	vabs.f32	s0, s0
 	add	r0, sp, #4
+.ifdef OWN
+	bl	own_fmt_rs		@ 0x0800D2E4: the signed R (own/fmt.s, S2.1 / S2.2 / S2.4)
+.else
 	bl	fn_0800e028
+.endif
 	b.n	.L0800d332
 .L0800d2ea:
 	ldr	r1, .L0800d3b4
@@ -1386,7 +1390,11 @@ fn_0800d294:
 	mov	r2, sp
 	add	r1, sp, #0xc
 	add	r0, sp, #4
+.ifdef OWN
+	bl	own_fmt_r		@ 0x0800D32A: X (own/fmt.s; one '-' only)
+.else
 	bl	fn_0800e028
+.endif
 	str.w	r7, [r6, #0xc1c]
 .L0800d332:
 	ldr	r0, [sp]
@@ -1406,7 +1414,11 @@ fn_0800d294:
 	mov	r2, sp
 	add	r1, sp, #0xc
 	add	r0, sp, #4
+.ifdef OWN
+	bl	own_fmt_dq		@ 0x0800D356: D / Q (own/fmt.s, S2.4)
+.else
 	bl	fn_0800dd44
+.endif
 	b.n	.L0800d37c
 .L0800d35c:
 	ldr	r1, .L0800d3d0
@@ -1419,11 +1431,19 @@ fn_0800d294:
 	mov	r2, sp
 	add	r1, sp, #0xc
 	add	r0, sp, #4
+.ifdef OWN
+	bl	own_fmt_th		@ 0x0800D378: theta (own/fmt.s: no marker)
+.else
 	bl	fn_0800dfc4
+.endif
 .L0800d37c:
 	add	r1, sp, #4
 	movs	r0, #1
+.ifdef OWN
+	bl	own_row_draw		@ 0x0800D380: row 1 with its S2.1 marker (own/fmt.s)
+.else
 	bl	fn_0800d14c
+.endif
 	ldr	r0, [sp]
 	cbz	r0, .L0800d39e
 	ldr.w	r0, [r6, #0xbec]
@@ -1542,7 +1562,11 @@ fn_0800d3d8:
 	mov	r2, sp
 	add	r1, sp, #0xc
 	add	r0, sp, #4
+.ifdef OWN
+	bl	own_fmt_r		@ 0x0800D43C: R or |Z| (own/fmt.s, S2.1 / S2.2 / S2.4)
+.else
 	bl	fn_0800e028
+.endif
 	ldr	r0, [sp]
 	cmp	r0, #4
 	bne.n	.L0800d412
@@ -1552,7 +1576,11 @@ fn_0800d3d8:
 	mov	r2, sp
 	add	r1, sp, #0xc
 	add	r0, sp, #4
+.ifdef OWN
+	bl	own_fmt_c		@ 0x0800D452: C (own/fmt.s)
+.else
 	bl	fn_0800db24
+.endif
 	ldr	r0, [sp]
 	cmp	r0, #1
 	beq.n	.L0800d46a
@@ -1584,7 +1612,11 @@ fn_0800d3d8:
 	mov	r2, sp
 	add	r1, sp, #0xc
 	add	r0, sp, #4
+.ifdef OWN
+	bl	own_fmt_l		@ 0x0800D48C: L (own/fmt.s)
+.else
 	bl	fn_0800de2c
+.endif
 	ldr	r0, [sp]
 	cmp	r0, #3
 	beq.n	.L0800d4a0
@@ -1609,7 +1641,11 @@ fn_0800d3d8:
 .L0800d4b4:
 	add	r1, sp, #4
 	movs	r0, #0
+.ifdef OWN
+	bl	own_row_draw		@ 0x0800D4B8: row 0 with its S2.1 marker (own/fmt.s)
+.else
 	bl	fn_0800d14c
+.endif
 	ldr	r0, [sp]
 	mov.w	r1, #1
 	cmp	r0, #0

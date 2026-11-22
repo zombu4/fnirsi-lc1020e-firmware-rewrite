@@ -93,14 +93,16 @@ S_OK, S_UNKNOWN, S_BAD_ARG, S_NOT_NOW, S_BUSY, S_STORAGE, S_SAFETY, S_XFER_CRC =
 SF_HELD, SF_RESTART = 0x01, 0x80
 C = dict(INFO=0x00, PING=0x01, RESET=0x02, BATTERY=0x03, POWER_OFF=0x05, FACTORY_MODE=0x06, STATE=0x10,
          STREAM=0x11, SCREEN=0x12, KEY=0x13, LCR_TABLES=0x20, LCR_SET=0x21, MEASURE=0x22, MEASURE_STREAM=0x23,
-         COMPARE=0x24, COMPARE_SET=0x25, HOLD=0x26, CALIBRATE=0x27, SET_TABLES=0x50, SET_SET=0x51,
+         COMPARE=0x24, COMPARE_SET=0x25, HOLD=0x26, CALIBRATE=0x27, TOL_SET=0x28, SET_TABLES=0x50, SET_SET=0x51,
          SET_SAVE=0x52, CAL_READ=0x53, RESTORE_DEF=0x54, RESTORE_B=0x55, ACCEPT_A=0x56, WRITE_BLOCK=0x57,
          SETUP_LANGUAGE=0x58, ACCEPT_B=0x59, ACCEPT_DEF=0x5A, SCREENSHOT=0x60, MEM_READ=0xF0,
          UPDATE_MODE=0x84, BOOT_BEGIN=0x85, BOOT_DATA=0x86, BOOT_END=0x87, BOOT_INSTALL=0x88, BOOT_STATUS=0x89)
 E_KEY, E_SCREEN, E_SETTING, E_POWERED_OFF, E_MEASURE, E_SAVE, E_CAL = 0x90, 0x91, 0x93, 0x94, 0x95, 0x96, 0x97
 OK2, OFF2 = struct.pack('<H', 0x4F4B), struct.pack('<H', 0x4F46)
-CAPS_ALL, INFO_SIZE, STATE_SIZE, MEASURE_SIZE, COMPARE_SIZE = 0x002FFFFF, 46, 32, 64, 29   # bit 20 clear,
-                                                                                     # bit 21 direct set
+CAPS_ALL, INFO_SIZE, STATE_SIZE, MEASURE_SIZE, COMPARE_SIZE = 0x01EFFFFF, 46, 32, 65, 50   # bit 20 clear,
+                                     # bit 21 direct set, bits 22..24 MEASUREMENT_FIX_DESIGN.md stage 2
+                                     # (60 Hz, tolerance modes, MEASURE marker byte 64 / SV_SAME);
+                                     # MEASURE 64 + 1, COMPARE 29 + 21
 KEY_POWER, KEY_UP, KEY_OK = 0x0001, 0x0002, 0x0008
 LSI = 60000                      # the shortest period, 2501 * 16 / 60000 s, for every watchdog check
 PERIOD_MIN = 0.67                # USB_CONTROL_DESIGN.md requirement 2
@@ -844,13 +846,20 @@ def k09_reset_and_power_off():
     check(rig.ask('POWER_OFF', b'\x00\x00')[0] == S_BAD_ARG and rig.ask('POWER_OFF', OK2)[0] == S_BAD_ARG,
           'POWER_OFF with a wrong confirmation')
     saves = rig.rd(SAVE_COUNT)
+    ops0 = len(rig.flash_ops())
+    same = rig.rd(0x2000057C, 0xC14) == rig.m.get(0x0807F000, 0xC14) == rig.m.get(0x08066000, 0xC14)
     check(rig.ask('POWER_OFF', OFF2)[0] == S_OK, 'POWER_OFF status')
     # the path from 0x08009452: own_save writes both copies (2 page erases and about 0xC14 / 4 words
     # each: 4 x T_ERASE 100 ms + 1550 x T_PROG 225 us of meter_model = 0.75 s), fn_08008120(200),
-    # then 0x0800B274 sets PA8 low
+    # then 0x0800B274 sets PA8 low; with the block unchanged in both copies the save writes nothing
+    # and reports SV_SAME 9 (MEASUREMENT_FIX_DESIGN.md S2.10)
     rig.run(1.5)
     check(rig.m.st['pa8'] == 0, 'PA8 not low after POWER_OFF')
-    check(rig.rd(SAVE_COUNT) == saves + 1 and rig.rd(SAVE_STATUS) == 0, 'the power-off save did not run')
+    want = 9 if same else 0
+    check(rig.rd(SAVE_COUNT) == saves + 1 and rig.rd(SAVE_STATUS) == want,
+          'the power-off save did not run as expected: status %d, expected %d' % (rig.rd(SAVE_STATUS), want))
+    check((len(rig.flash_ops()) == ops0) == same, 'power-off save: flash written %d operations, block unchanged %r'
+          % (len(rig.flash_ops()) - ops0, same))
     rig.run(1.2)                                         # OFF_WAIT_MS 1000: powered-off mode
     check(rig.rd(OWN_CTL + CT_FLAGS) & CF_OFF, 'powered-off mode not entered')
     ev = [f for f in rig.drain(0.1) if f['type'] == FR_EVENT and f['cmd'] == E_POWERED_OFF]

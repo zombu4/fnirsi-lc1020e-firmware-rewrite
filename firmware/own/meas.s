@@ -24,6 +24,15 @@
 @   no-reading set after 2 s without an in-band acquisition.
 @ While hold (0x200011A4) is set the measurement runs on and windows close, but nothing is
 @ published (the display freeze of design decision D1).
+@ Stage 2 (revision 6): S2.6 series / parallel with hysteresis (meas_serpar), S2.7 a hold that
+@ ends at a change of frequency, level, bias, range, speed or circuit (meas_hold, D2), the
+@ publish number MF_PSEQ and the compare judgement call in meas_tail (S2.8), 60 Hz (S2.12:
+@ own_dac_setup n = 150, the 100 Hz calibration entry, own_freq_step for the frequency key).
+@ A window always holds at least 3 accepted acquisitions: it closes at the first addition with
+@ N >= 3 and T_win passed (meas_add), so a window that would hold fewer in T_win is extended
+@ until the third (the A6 D bound of the design's fix 4 needs N >= 3; revision 6).
+@ The words of OWN_FUNC this file writes: MF_SP, MF_HOLDP, MF_HL, MF_PSEQ, and MF_AUTO = 0 at a
+@ setting change (own.inc).
 @
 @ Vendor RAM words written here (each also written by fn_0800a068 in V1.1, same meaning unless
 @ the design's section 2 table says otherwise): 0x20005090 / 94 (|Zm| / theta of the last
@@ -126,6 +135,7 @@
 	.equ	VB_BIAS,	0xBC0		@ 0x2000113C bias (float volts)
 	.equ	VB_FREQ,	0xBC8		@ 0x20001144 frequency, Hz
 	.equ	VB_SPEED,	0xBD4		@ 0x20001150 speed 0 / 1 / 2
+	.equ	VB_RANGE,	0xBD0		@ 0x2000114C range 0 auto, 1..4 forced
 	.equ	VB_CIRCUIT,	0xBD8		@ 0x20001154 circuit 0 auto, 1 series, 2 parallel
 	.equ	VB_SCREEN,	0xBEC		@ 0x20001168 screen
 	.equ	VB_CMP,		0xBFC		@ 0x20001178 compare quantity 1 R, 2 C, 3 L
@@ -180,7 +190,6 @@
 	.equ	EXP_MASK,	0x7F800000	@ exponent field of a float: all ones = Inf or NaN
 	.equ	F_1E10,		0x501502F9	@ 1e10, the vendor's "0L" value (measure_33.s .L0800a7e4)
 	.equ	F_M400,		0xC3C80000	@ -400.0, its theta (.L0800a7e0)
-	.equ	F_SER_LIM,	0x49864700	@ 1.1e6: series below it (.L0800a7dc)
 	.equ	F_OPEN,		0x4CD1CEF0	@ 1.1e8: the vendor's open exemption (fn_08008ea8)
 @ ---- offsets in the float table meas_k ----
 	.equ	K_Q12,		0		@ 1/12
@@ -193,6 +202,9 @@
 	.equ	K_W,		28		@ 2 pi
 	.equ	K_M1E9,		32		@ -1e9
 	.equ	K_1E6,		36		@ 1e6
+	.equ	K_SP1K,		40		@ 1000: parallel -> series below it (S2.6)
+	.equ	K_SP10K,	44		@ 10000: series -> parallel above it
+	.equ	K_SPMID,	48		@ 3162.28: the undecided start
 
 @ ============================================================================
 @ own_measure - one step of the measurement, called once per main-loop pass instead of
@@ -224,6 +236,7 @@ own_measure:
 	subs	r0, r0, #1
 	cmp	r0, #2
 	bhi	.Lom_ret		@ screen 0 or another: nothing measured
+	bl	meas_hold		@ S2.7: a latched hold ends at a change of its settings
 	bl	meas_watch		@ r0 = 1: fn_08009f10 ran since the last call
 	cmp	r0, #0
 	bne	.Lom_arm		@ restart: our own request first (step 4)
@@ -336,10 +349,67 @@ meas_watch:
 	movlo	r7, #5			@ range or gain: 5 ms ([S12] p.35)
 .Lmw_done:
 	cbz	r7, .Lmw_ret
+	cmp	r7, #26
+	bne	.Lmw_change
+	ldr	r0, =OWN_FUNC		@ a setting change or a restart (S2.5, S2.6): AUTO class
+	movs	r1, #0			@ and series / parallel decide anew
+	str	r1, [r0, #MF_SP]
+	str	r1, [r0, #MF_AUTO]
+.Lmw_change:
 	mov	r0, r7
 	bl	meas_change
 .Lmw_ret:
 	mov	r0, r6
+	pop	{r6, r7, r8, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_hold - S2.7 (design D1 / D2). Hold 0x200011A4 = 0: MF_HOLDP = 0. Hold set and MF_HOLDP 0
+@   (hold went 0 -> 1, by the key 0x400, app_01.s 475-481, or HOLD, dset.s ds_hold): frequency,
+@   level, bias, range, speed and circuit (0x20001144 / 38 / 3C / 4C / 50 / 54) latched in MF_HL,
+@   MF_HOLDP = 1. Hold set and MF_HOLDP 1: any of the six differing from its latched value ends
+@   the hold through ds_hold(0) (the HOLD object hidden, the restart request byte, as the key
+@   release does) and MF_HOLDP = 0. Func and secondary are not watched (they show the held
+@   measurement in another quantity). Changes r0..r3, r12.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_hold, %function
+meas_hold:
+	push	{r6, r7, r8, lr}
+	ldr	r6, =OWN_FUNC
+	ldr	r0, [r5, #VB_HOLD]
+	cbnz	r0, .Lmh_on
+	str	r0, [r6, #MF_HOLDP]	@ no hold: nothing latched
+	pop	{r6, r7, r8, pc}
+.Lmh_on:
+	ldr	r7, =hold_words
+	add	r8, r6, #MF_HL
+	ldr	r0, [r6, #MF_HOLDP]
+	cbnz	r0, .Lmh_cmp
+	movs	r2, #6
+.Lmh_latch:
+	ldrh	r1, [r7], #2		@ block offset of the word
+	ldr	r0, [r5, r1]
+	str	r0, [r8], #4
+	subs	r2, r2, #1
+	bne	.Lmh_latch
+	movs	r0, #1
+	str	r0, [r6, #MF_HOLDP]
+	pop	{r6, r7, r8, pc}
+.Lmh_cmp:
+	movs	r2, #6
+.Lmh_next:
+	ldrh	r1, [r7], #2
+	ldr	r0, [r5, r1]
+	ldr	r3, [r8], #4
+	cmp	r0, r3
+	bne	.Lmh_end
+	subs	r2, r2, #1
+	bne	.Lmh_next
+	pop	{r6, r7, r8, pc}	@ unchanged: the hold stays
+.Lmh_end:
+	movs	r0, #0
+	str	r0, [r6, #MF_HOLDP]
+	bl	ds_hold			@ r0 = 0: hold off (dset.s)
 	pop	{r6, r7, r8, pc}
 
 @ ----------------------------------------------------------------------------
@@ -1216,9 +1286,9 @@ meas_add:
 @   (meas_interp). Then |Z|c to 0x200050C4, theta to 0x200050CC, Rs = |Z|c cos, Xs = |Z|c sin,
 @   Rp = |Z|c / cos, Xp = |Z|c / sin (signed infinity for a zero divisor), Cs / Cp = -1e9 /
 @   (w Xs / Xp), Ls / Lp = Xs / Xp 1e6 / w (w = 2 pi f), Q = 0 for Xs = 0, +Inf for Rs = 0, else
-@   |Xs / Rs|; D = 0 for Rs = 0, +Inf for Xs = 0, else |Rs / Xs|; series / parallel as V1.1
-@   (circuit 0 and |Z|c below 1.1e6 as a signed bit compare, or circuit 1: series); then
-@   meas_tail. Always ends with meas_reset, then MO_TFIRST = the tick now and the anchor bit set
+@   |Xs / Rs|; D = 0 for Rs = 0, +Inf for Xs = 0, else |Rs / Xs|; series / parallel: circuit 1
+@   series, 2 parallel, 0 by meas_serpar (S2.6, with hysteresis); the calibration entry of 60 Hz
+@   is the 100 Hz entry of the level (S2.12); then meas_tail. Always ends with meas_reset, then MO_TFIRST = the tick now and the anchor bit set
 @   (the next window is timed from this close). Changes r0..r3, r12, s0..s31.
 @ ----------------------------------------------------------------------------
 	.thumb_func
@@ -1287,6 +1357,9 @@ meas_publish:
 	vmov.f32	s19, s0		@ s19 = theta, degrees
 .Lpb_comp:
 	ldr	r0, [r5, #VB_FREQ]
+	cmp	r0, #60
+	it	eq
+	moveq	r0, #100		@ S2.12: 60 Hz takes the 100 Hz entry of its level
 	ldr	r1, [r5, #VB_LEVEL]
 	vmov	s0, r1
 	bl	fn_080090a4		@ r0 = table entry of this frequency and level
@@ -1378,10 +1451,9 @@ meas_publish:
 	beq	.Lpb_ser
 	b	.Lpb_par
 .Lpb_auto:
-	vmov	r0, s22
-	ldr	r1, =F_SER_LIM
-	cmp	r0, r1
-	bge	.Lpb_par		@ 1.1 Mohm and above: parallel
+	bl	meas_serpar		@ S2.6: r0 = 0 series, 1 parallel
+	cmp	r0, #0
+	bne	.Lpb_par
 .Lpb_ser:
 	movs	r0, #0
 	str	r0, [r5, #VB_SERPAR]
@@ -1432,6 +1504,49 @@ meas_divinf:
 	bx	lr
 .Ldv_div:
 	vdiv.f32	s0, s0, s1
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ meas_serpar - S2.6 (design D4): r0 = 0 series, 1 parallel for |Z|c = s22, with the state
+@   MF_SP (0 undecided after a setting change or restart, meas_watch; 1 series; 2 parallel):
+@   series goes parallel above 10 kohm, parallel goes series below 1 kohm, in between the mode is
+@   kept; undecided: series below sqrt(1 kohm * 10 kohm) = 3162.28 ohm, else parallel ([J] of the
+@   design). Replaces V1.1's single compare at 1.1 Mohm. Changes r0..r2, s0, s1.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_serpar, %function
+meas_serpar:
+	ldr	r1, =OWN_FUNC
+	ldr	r0, [r1, #MF_SP]
+	ldr	r2, =meas_k
+	cmp	r0, #1
+	beq	.Lsp_series
+	cmp	r0, #2
+	beq	.Lsp_par
+	vldr	s1, [r2, #K_SPMID]	@ undecided: 3162.28
+	b	.Lsp_cmp
+.Lsp_series:
+	vldr	s1, [r2, #K_SP10K]	@ series: parallel above 10 kohm
+	b	.Lsp_cmp
+.Lsp_par:
+	vldr	s1, [r2, #K_SP1K]	@ parallel: series below 1 kohm
+	vcmpe.f32	s22, s1
+	vmrs	APSR_nzcv, fpscr
+	bge	.Lsp_isp
+	b	.Lsp_iss
+.Lsp_cmp:
+	vcmpe.f32	s22, s1
+	vmrs	APSR_nzcv, fpscr
+	ble	.Lsp_iss		@ not above: series
+.Lsp_isp:
+	movs	r0, #2
+	str	r0, [r1, #MF_SP]
+	movs	r0, #1			@ parallel
+	bx	lr
+.Lsp_iss:
+	movs	r0, #1
+	str	r0, [r1, #MF_SP]
+	movs	r0, #0			@ series
 	bx	lr
 
 @ ----------------------------------------------------------------------------
@@ -1488,14 +1603,19 @@ meas_pub_nr:
 @ meas_tail - the end of every publish, as fn_0800a068 (measure_33.s .L0800a740..): presence
 @   (byte 0x2000000B = 1 when float(fn_0800a030() / 10) < |Z| 0x200050C4; else, when it was 1,
 @   0 and word 0x2000511C = 0), the compare value 0x200050DC from R / C / L by the word
-@   0x20001178 = 1 / 2 / 3, fn_0800f854 (the AUTO function), 0x20001208 = 0, and the new-result
-@   word 0x20001200 written 1 then 0 (set and cleared within the call, as V1.1).
-@   Changes r0..r3, r12, s0..s15.
+@   0x20001178 = 1 / 2 / 3, the publish number MF_PSEQ + 1 and the compare judgement
+@   (own_cmp_judge, cmp.s; S2.8: it replaces fn_0800a7ec), fn_0800f854 (the AUTO function and the
+@   display), 0x20001208 = 0, and the new-result word 0x20001200 written 1 then 0 (set and
+@   cleared within the call, as V1.1). Changes r0..r3, r12, s0..s15.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	meas_tail, %function
 meas_tail:
 	push	{r6, lr}
+	ldr	r0, =OWN_FUNC
+	ldr	r1, [r0, #MF_PSEQ]
+	adds	r1, r1, #1
+	str	r1, [r0, #MF_PSEQ]	@ one more publish
 	bl	fn_0800a030		@ the open limit of this frequency
 	movs	r1, #10
 	sdiv	r0, r0, r1
@@ -1535,6 +1655,7 @@ meas_tail:
 .Ltl_store:
 	vstr	s0, [r6, #VR_CMPV]	@ 0x200050DC
 .Ltl_auto:
+	bl	own_cmp_judge		@ S2.8 on screen 2 (cmp.s)
 	bl	fn_0800f854
 	movs	r0, #0
 	str	r0, [r5, #VB_NR]	@ 0x20001208 = 0
@@ -1765,7 +1886,8 @@ meas_rej_inc:
 @   0x40012C00 through fn_0800c33c, init_eleven_field_record and fn_0800c590 with the period
 @   halfword (+4) = 144000000 / r4 - 1 (the vendor has no - 1: the timer period is AR + 1 ticks,
 @   so the vendor's 128 samples spanned 1.00089 periods at 1 kHz; here exactly 1, 4 or 16, as
-@   144e6 / (k f) is an integer for all five frequencies: 11250, 9375, 1125, 450, 180), then the
+@   144e6 / (k f) is an integer for all five frequencies: 11250, 9375, 1125, 450, 180, and for
+@   60 Hz of S2.12: 18750, AR 18749), then the
 @   channel block (0x70, 1, 1, 0) through fn_0800c504, as the vendor.
 @ ============================================================================
 	.global	own_tim1_setup
@@ -1825,7 +1947,8 @@ own_tim1_setup:
 @   r0 = frequency, s0 = amplitude (the level float); no result.
 @   n = 180 entries and divisor 2.34 below 100 kHz, n = 36 and 2.1 from 100 kHz, as the vendor,
 @   except n = 150 at 120 Hz: TIM6 then counts 72e6 / 120 / 150 = 4000 exactly (AR 3999), where
-@   the vendor's 72e6 / 120 / 180 = 3333 (truncated) gave 120.012 Hz. The table 0x20005120
+@   the vendor's 72e6 / 120 / 180 = 3333 (truncated) gave 120.012 Hz; and n = 150 at 60 Hz
+@   (S2.12): 72e6 / 60 / 150 = 8000 (AR 7999), exactly 60.0000 Hz. The table 0x20005120
 @   (room for 180 halfwords) holds one period, so the DMA2 ch3 interrupt still comes once per
 @   period. Table entry i = (short)(sin(2 pi i / n) * 2047.5 * amplitude / divisor + bias float
 @   0x2000113C * 620.0 + 2047.5); DMA2 ch3 0x40020430 (0x40007408 DAC_DR12CH1, the table, 0x10,
@@ -1847,8 +1970,11 @@ own_dac_setup:
 	movs	r4, #180		@ n = 180
 	vldr	s1, .Lds_234		@ 2.34
 	cmp	r0, #120
+	beq	.Lds_150
+	cmp	r0, #60
 	bne	.Lds_n
-	movs	r4, #150		@ 120 Hz: n = 150
+.Lds_150:
+	movs	r4, #150		@ 120 Hz and 60 Hz (S2.12): n = 150
 	b	.Lds_n
 .Lds_hi:
 	movs	r4, #36			@ n = 36
@@ -1967,6 +2093,52 @@ own_dac_setup:
 	.word	0x40001000
 
 @ ============================================================================
+@ own_freq_step - S2.12: the frequency step of fn_0800d940 mode 0, entered by b.w at 0x0800D97A
+@   (src/ui_42.s, .ifdef OWN) with r0 = step, r2 = 0x2000057C and {r4, r5, r6, r7} pushed by
+@   fn_0800d940 (ui_42.s 542-545). The word 0x20001144 steps through freq_cycle, both directions
+@   wrapping as the vendor's (up 60 -> 100 -> 120 -> 1000 -> 10000 -> 100000 -> 60; down the
+@   reverse, 100000 -> 10000 -> 1000 -> 120 -> 100 -> 60 -> 100000); step 0 or a word not in the
+@   cycle: no change. Then the vendor's exit .L0800da38: pop {r4, r5, r6, r7}, b.w fn_08009f10
+@   (the measurement restarts at the new frequency).
+@ ============================================================================
+	.global	own_freq_step
+	.thumb_func
+	.type	own_freq_step, %function
+own_freq_step:
+	ldr	r1, [r2, #VB_FREQ]
+	ldr	r3, =freq_cycle
+	movs	r4, #0			@ r4 = index (r4..r7 are fn_0800d940's, restored below)
+.Lfs_find:
+	ldr	r5, [r3, r4, lsl #2]
+	cmp	r5, r1
+	beq	.Lfs_found
+	adds	r4, r4, #1
+	cmp	r4, #6
+	blo	.Lfs_find
+	b	.Lfs_out		@ unknown word: left as it is
+.Lfs_found:
+	cmp	r0, #0
+	beq	.Lfs_out		@ step 0
+	blt	.Lfs_down
+	adds	r4, r4, #1
+	cmp	r4, #6
+	it	eq
+	moveq	r4, #0			@ 100000 -> 60
+	b	.Lfs_store
+.Lfs_down:
+	subs	r4, r4, #1
+	it	mi
+	movmi	r4, #5			@ 60 -> 100000
+.Lfs_store:
+	ldr	r1, [r3, r4, lsl #2]
+	str	r1, [r2, #VB_FREQ]
+.Lfs_out:
+	pop	{r4, r5, r6, r7}
+	b.w	fn_08009f10
+
+	.ltorg
+
+@ ============================================================================
 @ Constant data
 @ ============================================================================
 	.section .rodata.own.meas,"a",%progbits
@@ -1984,6 +2156,19 @@ meas_k:
 	.word	0x40C90FDB		@ 6.2831855 = 2 pi (as measure_33.s .L0800a7d4)
 	.word	0xCE6E6B28		@ -1e9 (.L0800a7d8)
 	.word	0x49742400		@ 1e6 (.L0800a4ac)
+	.word	0x447A0000		@ 1000 (S2.6, D4)
+	.word	0x461C4000		@ 10000
+	.word	0x4545A471		@ 3162.2776 = sqrt(1000 * 10000)
+
+@ freq_cycle - the frequency key cycle of own_freq_step (S2.12), Hz
+freq_cycle:
+	.word	60, 100, 120, 1000, 10000, 100000
+
+@ hold_words - block offsets of the six words a hold latches (meas_hold, S2.7 / D2): frequency,
+@   level, bias, range, speed, circuit
+hold_words:
+	.short	VB_FREQ, VB_LEVEL, VB_BIAS, VB_RANGE, VB_SPEED, VB_CIRCUIT
+	.p2align 2
 
 @ meas_ib - (B_k, S_k) of the decade interpolation, k = 1..9 (measure_33.s literals)
 meas_ib:

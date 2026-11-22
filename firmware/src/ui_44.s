@@ -797,6 +797,20 @@ fn_0800f854:
 	ldr	r5, .L0800fa14
 	ldr.w	r0, [r4, #0xbcc]
 	cbnz	r0, .L0800f8d6
+.ifdef OWN
+	@ MEASUREMENT_FIX_DESIGN.md S2.5: the AUTO decision with hysteresis (own/cmp.s); the rest
+	@ of the vendor block is not reached (same size, the labels the code outside uses kept)
+	bl	own_auto_class		@ 0x0800F874
+	b.n	.L0800f8ec		@ 0x0800F878
+	.rept	46			@ 0x0800F87A..0x0800F8D5: not reached
+	nop.n
+	.endr
+.L0800f8d6:
+	b.n	.L0800f8ec		@ 0x0800F8D6: the target of the cbnz (Func not AUTO)
+	.rept	10			@ 0x0800F8D8..0x0800F8EB: not reached
+	nop.n
+	.endr
+.else
 	ldr	r1, .L0800fa18
 	ldr.w	r0, [r5, #0x32c]
 	ldr	r7, .L0800fa1c
@@ -847,12 +861,27 @@ fn_0800f854:
 .L0800f8e4:
 	strb.w	r0, [r4, #0xc68]
 	str.w	r0, [r4, #0xc6c]
+.endif
 .L0800f8ec:
 	bl	fn_0800d3d8
 	bl	fn_0800d294
 	ldr.w	r0, [r4, #0xbec]
 	cmp	r0, #2
 	bne.n	.L0800f94a
+.ifdef OWN
+	@ MEASUREMENT_FIX_DESIGN.md S2.8 / S2.9: the compare screen's result, deviation and nominal
+	@ (own/cmp.s); the rest of the vendor block is not reached (same size, .L0800f94a kept)
+	bl	own_cmp_show		@ 0x0800F8FC
+	b.n	.L0800fa04		@ 0x0800F900
+	.rept	36			@ 0x0800F902..0x0800F949: not reached
+	nop.n
+	.endr
+.L0800f94a:
+	b.n	.L0800fa04		@ 0x0800F94A: the target of the screen tests above
+	.rept	92			@ 0x0800F94C..0x0800FA03: not reached
+	nop.n
+	.endr
+.else
 	ldr	r7, .L0800fa34
 	vldr	s18, [r7, #8]
 	vmov	r0, s18
@@ -952,6 +981,7 @@ fn_0800f854:
 	adr	r1, .L0800fa5c
 	ldr	r0, [r6, #0x34]
 	bl	fn_080228d0
+.endif
 .L0800fa04:
 	add	sp, #0x14
 	vpop	{d8, d9}

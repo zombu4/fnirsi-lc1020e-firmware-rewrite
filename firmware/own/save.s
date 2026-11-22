@@ -36,6 +36,12 @@
 @ RAM (own.inc): the staging buffer OWN_STAGE (0xC14 bytes) and the save.s words at OWN_SAVE;
 @ own_injected (ctl.s) is only read. No section of RAM is defined here.
 @
+@ MEASUREMENT_FIX_DESIGN.md stage 2 / 2F (revision 6): own_save skips the write when both copies
+@ already hold the staged block (S2.10, SV_SAME); own_load repairs invalid setting words of the
+@ loaded block in RAM only (S2.11, load_fix; the calibration tables are not examined); every block
+@ our firmware stages for a write from RAM or from the host holds 100, never 60, as its frequency
+@ (S2.12 D60-a, stage_freq_fix in own_save, save_accept_defaults and save_write_block).
+@
 @ Calling convention of every exported function: AAPCS; r0..r3, r12 and the flags clobbered,
 @ r4..r11 kept, no FPU register used. Stack: at most 72 bytes below the caller's SP.
 
@@ -69,6 +75,13 @@
 gate_ranges:
 	.word	SET_B, SET_B + SET_SIZE
 	.word	SET_A, SET_A + SET_SIZE
+@ load_freqs - the five frequencies a loaded block may hold (load_fix, S2.11)
+load_freqs:
+	.word	100, 120, 1000, 10000, 100000
+@ load_levels - load_fix's floats: the levels 0.1, 0.3, 0.6 (fn_0800d940 mode 1), the default
+@   nominal 1000.0, the tolerance limit 99.9 and the default tolerance 5.0 (fn_0800b4c8)
+load_levels:
+	.word	0x3DCCCCCD, 0x3E99999A, 0x3F19999A, 0x447A0000, 0x42C7CCCD, 0x40A00000
 
 	.section .text.own.save,"ax",%progbits
 	.p2align 2
@@ -514,6 +527,185 @@ stage_markers:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
+@ stage_freq_fix - S2.12 (D60-a): the frequency word of the staged block (OWN_STAGE + 0xBC8, the
+@   offset of 0x20001144) 60 -> 100, any other value kept, so no copy our firmware writes holds
+@   60 and the meter (and V1.1 after a downgrade) starts at 100 Hz. Uses r1, r2.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	stage_freq_fix, %function
+stage_freq_fix:
+	ldr	r1, =OWN_STAGE + (V_FREQ - V_BLOCK)
+	ldr	r2, [r1]
+	cmp	r2, #60
+	bne	.Lff_out
+	movs	r2, #100
+	str	r2, [r1]
+.Lff_out:
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ stage_same - S2.10: r0 = 1 when copy A is valid with its trailer (not the vendor format) and
+@   copy B is valid, and both hold exactly the 0xC14 staged bytes; else 0. Every other case saves
+@   as before (A in the vendor format gets its trailer; a stale or differing B is written; a
+@   copy marked for rewrite fails its CRC and is never valid). Uses r1..r3, r12.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	stage_same, %function
+stage_same:
+	push	{r4, lr}
+	bl	eval_copies
+	and	r0, r0, #EV_A_VALID | EV_A_VENDOR | EV_B_VALID
+	cmp	r0, #EV_A_VALID | EV_B_VALID
+	bne	.Lsa_no
+	ldr	r0, =SET_A
+	bl	stage_equal
+	cmp	r0, #0
+	beq	.Lsa_no
+	ldr	r0, =SET_B
+	bl	stage_equal
+	pop	{r4, pc}
+.Lsa_no:
+	movs	r0, #0
+	pop	{r4, pc}
+
+@ ----------------------------------------------------------------------------
+@ stage_equal - r0 = copy base: r0 = 1 when its 0xC14 block bytes equal OWN_STAGE, else 0.
+@   Uses r1..r3, r12.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	stage_equal, %function
+stage_equal:
+	ldr	r1, =OWN_STAGE
+	movw	r2, #BLK_SIZE
+.Lse_word:
+	ldr	r3, [r0], #4
+	ldr	r12, [r1], #4
+	cmp	r3, r12
+	bne	.Lse_diff
+	subs	r2, r2, #4
+	bne	.Lse_word
+	movs	r0, #1
+	bx	lr
+.Lse_diff:
+	movs	r0, #0
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ load_fix - S2.11, after own_load copied a valid block to 0x2000057C: each setting word outside
+@   its valid values takes the value of fn_0800b4c8's defaults, in RAM only (nothing is written
+@   to flash at load; the calibration tables are not examined):
+@   frequency 0x20001144: 100, 120, 1000, 10000, 100000; 60 (never saved by our firmware, D60-a)
+@     becomes 100, any other value 1000;
+@   level 0x20001138: the floats 0.1, 0.3, 0.6, else 0.6; bias 0x2000113C: 0.0 or 0.5, else 0.0;
+@     bias 0.5 with level 0.6 (the meter's keys never make it, fn_0800d940 mode 2): level 0.3;
+@   Func 0x20001148 0..4 and range 0x2000114C 0..4, else 0; circuit 0x20001154 0..2, else 0;
+@   compare quantity 0x20001178 1..3, else 1;
+@   nominal 0x20001184: finite and above 0, else 1000.0;
+@   tolerance 0x20001188: 0.0 .. 99.9, else 5.0.
+@   (Speed, brightness, volume and language: the vendor's start-up clamp 0x08028046.. after the
+@   load, system_40.s.) Uses r0..r3, r12.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	load_fix, %function
+load_fix:
+	ldr	r0, =V_BLOCK
+	ldr	r1, [r0, #V_FREQ - V_BLOCK]
+	cmp	r1, #60
+	bne	.Llf_f5
+	movs	r1, #100
+	b	.Llf_fset
+.Llf_f5:
+	ldr	r2, =load_freqs
+	movs	r3, #0
+.Llf_fnext:
+	ldr	r12, [r2, r3, lsl #2]
+	cmp	r12, r1
+	beq	.Llf_level		@ one of the five: kept
+	adds	r3, r3, #1
+	cmp	r3, #5
+	blo	.Llf_fnext
+	mov	r1, #1000
+.Llf_fset:
+	str	r1, [r0, #V_FREQ - V_BLOCK]
+.Llf_level:
+	ldr	r1, [r0, #V_LEVEL - V_BLOCK]
+	ldr	r2, =load_levels
+	ldr	r3, [r2, #0]
+	cmp	r1, r3
+	beq	.Llf_bias
+	ldr	r3, [r2, #4]
+	cmp	r1, r3
+	beq	.Llf_bias
+	ldr	r3, [r2, #8]
+	cmp	r1, r3
+	beq	.Llf_bias
+	str	r3, [r0, #V_LEVEL - V_BLOCK]	@ the default 0.6
+.Llf_bias:
+	ldr	r1, [r0, #V_BIAS - V_BLOCK]
+	cmp	r1, #0
+	beq	.Llf_ints
+	cmp	r1, #0x3F000000		@ 0.5
+	beq	.Llf_bias5
+	movs	r1, #0
+	str	r1, [r0, #V_BIAS - V_BLOCK]
+	b	.Llf_ints
+.Llf_bias5:
+	ldr	r1, [r0, #V_LEVEL - V_BLOCK]
+	ldr	r3, [r2, #8]		@ 0.6
+	cmp	r1, r3
+	bne	.Llf_ints
+	ldr	r3, [r2, #4]		@ 0.3, as the bias key sets it
+	str	r3, [r0, #V_LEVEL - V_BLOCK]
+.Llf_ints:
+	ldr	r1, [r0, #V_FUNC - V_BLOCK]
+	cmp	r1, #4
+	bls	.Llf_range
+	movs	r1, #0
+	str	r1, [r0, #V_FUNC - V_BLOCK]
+.Llf_range:
+	ldr	r1, [r0, #V_RANGE - V_BLOCK]
+	cmp	r1, #4
+	bls	.Llf_circ
+	movs	r1, #0
+	str	r1, [r0, #V_RANGE - V_BLOCK]
+.Llf_circ:
+	ldr	r1, [r0, #V_CIRCUIT - V_BLOCK]
+	cmp	r1, #2
+	bls	.Llf_cmp
+	movs	r1, #0
+	str	r1, [r0, #V_CIRCUIT - V_BLOCK]
+.Llf_cmp:
+	ldr	r1, [r0, #V_CMP_TYPE - V_BLOCK]
+	subs	r1, r1, #1
+	cmp	r1, #2
+	bls	.Llf_nom
+	movs	r1, #1
+	str	r1, [r0, #V_CMP_TYPE - V_BLOCK]
+.Llf_nom:
+	ldr	r1, [r0, #V_NOMINAL - V_BLOCK]
+	cmp	r1, #0
+	ble	.Llf_nom_def		@ 0, -0.0 and negative (sign bit set)
+	cmp	r1, #0x7F800000
+	blo	.Llf_tol		@ finite and positive (below +Inf)
+.Llf_nom_def:
+	ldr	r1, [r2, #12]		@ 1000.0
+	str	r1, [r0, #V_NOMINAL - V_BLOCK]
+.Llf_tol:
+	ldr	r1, [r0, #V_TOLERANCE - V_BLOCK]
+	cmp	r1, #0
+	blt	.Llf_tol_def		@ negative
+	ldr	r3, [r2, #16]		@ 99.9
+	cmp	r1, r3
+	bls	.Llf_out		@ 0.0 .. 99.9 (positive floats order as their bits)
+.Llf_tol_def:
+	ldr	r1, [r2, #20]		@ 5.0
+	str	r1, [r0, #V_TOLERANCE - V_BLOCK]
+.Llf_out:
+	bx	lr
+
+	.ltorg
+
+@ ----------------------------------------------------------------------------
 @ set_english - r0 = block base (V_BLOCK or OWN_STAGE): the words at block
 @   offsets 0xBC4 (first-start flag) and 0xBE0 (language) set to 1, so that no
 @   path starts the language chooser 0x0800C86C or selects the Chinese row
@@ -795,7 +987,8 @@ flags_ok:
 @     the check 0x08028034..0x08028048 calls 0x0800B4C8(1), whose save
 @     (0x0800B5C0) is held.
 @   The chosen copy's 0xC14 bytes go to 0x2000057C, then its first-start flag
-@   and language words are set to 1 (set_english); own_save_flags and
+@   and language words are set to 1 (set_english) and its invalid setting
+@   words repaired in RAM (load_fix, S2.11); own_save_flags and
 @   own_save_loaded are written whole.
 @ ----------------------------------------------------------------------------
 	.global	own_load
@@ -874,6 +1067,7 @@ own_load:
 	bne	.Ll_cp_word
 	ldr	r0, =V_BLOCK
 	bl	set_english		@ a copy with 0 / 0 (V1.1, chooser not run) starts English
+	bl	load_fix		@ S2.11: invalid setting words repaired in RAM
 .Ll_store:
 	str	r6, [r4, #SVO_FLAGS]
 	str	r7, [r4, #SVO_LOADED]
@@ -890,9 +1084,11 @@ own_load:
 @   start-up chooser 0x080281F8 and the Chinese rows are never reached).
 @   Writes nothing and returns SV_REFUSED while own_injected is set (guard,
 @   USB_CONTROL_DESIGN.md 4.3) and SV_HELD while SF_HELD or SF_RESTART is
-@   set. Otherwise: snapshot of the RAM block 0x2000057C into OWN_STAGE, then
-@   save_stage(MODE_ORDER, highest valid sequence + 1). SV_OK clears
-@   SF_REWRITE_A (every successful save writes A).
+@   set. Otherwise: snapshot of the RAM block 0x2000057C into OWN_STAGE, its
+@   frequency 60 -> 100 (stage_freq_fix, S2.12); when both copies already
+@   hold exactly that block (stage_same, S2.10): SV_SAME, nothing erased or
+@   programmed; else save_stage(MODE_ORDER, highest valid sequence + 1).
+@   SV_OK clears SF_REWRITE_A (every successful save writes A).
 @   Returns r0 = status, also in own_save_status; own_save_count + 1.
 @ ----------------------------------------------------------------------------
 	.global	own_save
@@ -912,12 +1108,19 @@ own_save:
 	bne	.Lsv_held
 	ldr	r0, =V_BLOCK		@ design step 1: snapshot
 	bl	stage_copy
+	bl	stage_freq_fix		@ S2.12: 60 Hz is saved as 100 Hz
+	bl	stage_same		@ S2.10: both copies hold it already?
+	cmp	r0, #0
+	bne	.Lsv_same
 	movs	r0, #MODE_ORDER
 	movs	r1, #0
 	bl	save_stage
 	movs	r1, #SF_REWRITE_A
 	movs	r2, #0
 	bl	flags_ok
+	b	.Lsv_done
+.Lsv_same:
+	movs	r0, #SV_SAME		@ nothing erased, nothing programmed
 	b	.Lsv_done
 .Lsv_refused:
 	movs	r0, #SV_REFUSED
@@ -1030,6 +1233,7 @@ save_accept_defaults:
 	beq	.Lad_refused
 	ldr	r0, =V_BLOCK
 	bl	stage_copy
+	bl	stage_freq_fix		@ S2.12: 60 Hz is saved as 100 Hz
 	bl	stage_markers
 	cmp	r0, #0
 	bne	.Lad_badblock
@@ -1072,6 +1276,7 @@ save_write_block:
 	bl	stage_markers
 	cmp	r0, #0
 	bne	.Lwb_badblock
+	bl	stage_freq_fix		@ S2.12: after the host's CRC check, before the seal
 	movs	r0, #MODE_ORDER
 	movs	r1, #0
 	bl	save_stage

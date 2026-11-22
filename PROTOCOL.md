@@ -159,12 +159,13 @@ is their data length. RESET, UPDATE_MODE and the BOOT_* commands take no confirm
 |---|---|---|---|
 | 0x20 | LCR_TABLES | list id u8 (0..7), or nothing | with an id: the list (section 8.1); without: the number of lists u8 (8) |
 | 0x21 | LCR_SET | setting u8 (0 Func, 1 secondary, 2 frequency, 3 level, 4 bias, 5 range, 6 speed, 7 circuit mode), value index u8 (below the list's count) | MEASURE (section 6.2). Screens 1 and 2 only (else status 3). Direct (table below, section 5.3.4); a value the meter's keys do not reach is refused with status 3 and nothing changed: level 0.6 V while the bias is 0.1 V or more (the bias float's bits 0x3DCCCCCD or above), Func AUTO or Z in the compare screen |
-| 0x22 | MEASURE | - | MEASURE record, 64 bytes |
+| 0x22 | MEASURE | - | MEASURE record, 65 bytes (64 before capability bit 24) |
 | 0x23 | MEASURE_STREAM | u16: 0 = a frame for every new result, 0xFFFF = stop, else period in ms | none; MEASURE records follow as stream frames cmd 0x22 |
-| 0x24 | COMPARE | - | COMPARE record (section 6.3), 29 bytes |
-| 0x25 | COMPARE_SET | nominal f32, tolerance f32 (percent), warn type u8, warn sound u8, warn LED u8 (11 bytes, all required) | COMPARE. Direct, in screens 1..3 (section 5.3.1): the values as the sorting editor stores them; the screen stays; RAM only |
-| 0x26 | HOLD | u8: 0 off, 1 on | STATE. Screens 1 and 2 only (else status 3). Direct: the hold word 0x200011A4 and the HOLD mark, as key 0x400 sets them |
+| 0x24 | COMPARE | - | COMPARE record (section 6.3), 50 bytes (29 before capability bit 23) |
+| 0x25 | COMPARE_SET | nominal f32, tolerance f32 (percent), warn type u8, warn sound u8, warn LED u8 (11 bytes, all required) | COMPARE. Direct, in screens 1..3 (section 5.3.1): the values as the sorting editor stores them; the screen stays; RAM only. A changed tolerance returns the tolerance mode of TOLERANCE_SET to 0 |
+| 0x26 | HOLD | u8: 0 off, 1 on | STATE. Screens 1 and 2 only (else status 3). Direct: the hold word 0x200011A4 and the HOLD mark, as key 0x400 sets them. A change of frequency, level, bias, range, speed or circuit mode ends hold (Func and secondary do not) |
 | 0x27 | CALIBRATE | type u8, confirmation u16 at byte 1 (3 bytes) | calibration status u8 (0x200050EC: 0 start, 1 busy, 2 finish, 3 fail), type u8 (0x200050E0), save status u32 (section 9.1); 6 bytes, with every status (section 5.3.3) |
+| 0x28 | TOLERANCE_SET | mode u8, lower i32, upper i32, letter u8, secondary kind u8, secondary value f32 (15 bytes; section 5.3.5) | COMPARE, with every status. Capability bit 23. RAM only, answered at once; status 2 for a bad argument, 3 for the pF mode with a quantity other than C |
 
 Settings of LCR_SET (the work of the meter's measure-screen handler 0x08009614 for the press of
 its key that lands on the value; the key is named for reference, it is not pressed):
@@ -173,7 +174,7 @@ its key that lands on the value; the key is named for reference, it is not press
 |---|---|---|---|
 | 0 Func | 0 AUTO, 1 R, 2 C, 3 L, 4 Z (word 0x20001148) | 0x0200 | AUTO: the Func picture; R..Z: main row and secondary = the value (R -> X, C -> D, L -> Q, Z -> theta) with their pictures; then the Func text, the measurement restart; in the compare screen its rule (C / L kept as the compare quantity, any other value: R); the result display |
 | 1 secondary | 0 R, 1 X, 2 D, 3 Q, 4 theta (word 0x200011E8) | 0x0040 | the result display |
-| 2 frequency | 0: 100 Hz, 1: 120 Hz, 2: 1 kHz, 3: 10 kHz, 4: 100 kHz (word 0x20001144) | 0x2000 | cursor on FREQ, the measurement restart, the cursor row redrawn |
+| 2 frequency | 0: 100 Hz, 1: 120 Hz, 2: 1 kHz, 3: 10 kHz, 4: 100 kHz, 5: 60 Hz (capability bit 22; word 0x20001144) | 0x2000 | cursor on FREQ, the measurement restart, the cursor row redrawn |
 | 3 level | 0: 0.1 V, 1: 0.3 V, 2: 0.6 V (float 0x20001138) | 0x0800 | cursor on AMP, the measurement restart, the cursor row |
 | 4 bias | 0: 0 V, 1: 0.5 V (float 0x2000113C) | 0x0100 | cursor on BIAS; 0.5 V with the level 0.6 V sets the level to 0.3 V (as the key does); the measurement restart, the cursor row |
 | 5 range | 0 AUTO, 1: 100 ohm, 2: 1 kohm, 3: 10 kohm, 4: 100 kohm (word 0x2000114C) | 0x0080 | cursor on RANGE, the cursor row (no restart, as the key) |
@@ -251,6 +252,30 @@ Differences from the results of the jobs of earlier firmware (firmware without b
   bit or one bit apart).
 - No intermediate values: speed 2 -> 1 no longer passes 0, circuit mode 1 -> 0 no longer passes
   parallel, frequency and level no longer restart the measurement once per press.
+
+#### 5.3.5 TOLERANCE_SET and the compare judgement (capability bit 23)
+
+Request (15 bytes, little-endian): mode u8, lower i32, upper i32, letter u8, secondary kind u8,
+secondary value f32. Modes: 0 the meter's own symmetric tolerance (COMPARE_SET's, 0x20001188; the
+mode after every start); 1 lower / upper in 0.01 % steps (-9999..99990, lower <= upper); 2 lower /
+upper in 0.01 pF steps (-99999..99999, lower <= upper; compare quantity C only, else status 3); 3 an
+IEC 60062 letter: B C D F G J K M = +-0.1 / 0.25 / 0.5 / 1 / 2 / 5 / 10 / 20 %, Z = -20 / +80 %; B, C
+and D are +-0.1 / 0.25 / 0.5 pF for a C nominal below 10 pF (decided at every judgement). Secondary
+kind: 0 none, 1 D maximum, 2 Q minimum, 3 ESR (the series R) maximum; its value finite and >= 0.
+Fields a mode does not use are not checked. The modes are RAM only: lost at power-off, and any
+later change of 0x20001188 (the meter's sorting editor or COMPARE_SET) returns to mode 0.
+
+The judgement (screen 2, every new result): a part is present when |Z| is not above the meter's
+presence limit (110 Mohm / 10 = 11 Mohm at 60 Hz..1 kHz, 1.1 Mohm at 10 kHz, 110 kohm at 100 kHz).
+Not present: "---" (no reading, overload, or above the measurement range) or "OUT" (a reading above
+the presence limit; not counted). Present: the signed deviation (in % of the nominal, or in pF for
+the pF modes) against the limits gives IN, HI or LO; IN with a failed secondary limit is reported
+separately. The result is final once two consecutive results agree within min(band / 4, 0.1 %)
+(band: the smaller limit); before that "---". It is counted once per insertion (pass for IN, fail
+for every other result, each counter at most 999); the alarm follows the warn type (1 on IN, 0 on
+every other result): the LED level held until the part is removed or the screen is left, and 1
+beep (IN) or 2 beeps (other) of 200 ms. A long press of key bit 8 (mask 0x100) on the compare screen
+resets both counters (once per press).
 
 ### 5.4 Settings and storage
 
@@ -332,7 +357,7 @@ or done, 4 last save failed, 5 backup differs, 6 calibration running (0x200050E4
 mode (0x200011C0 = 2), 8 saves held, 9 restart pending (flash differs from RAM), 10 powered-off
 mode (section 7.5).
 
-### 6.2 MEASURE (64 bytes)
+### 6.2 MEASURE (65 bytes; 64 before capability bit 24)
 
 | Offset | Type | Field |
 |---|---|---|
@@ -351,6 +376,7 @@ mode (section 7.5).
 | 61 | u8 | range |
 | 62 | u8 | speed |
 | 63 | u8 | circuit mode |
+| 64 | u8 | markers (capability bit 24): bit 0 the main value, bit 1 the secondary value lies outside the manual's accuracy table for the frequency (the meter shows the digits in amber); 60 Hz has no table column (always marked); theta, D and Q are never marked |
 
 Value block (15 bytes):
 
@@ -360,22 +386,26 @@ Value block (15 bytes):
 | 4 | u8 | unit code of the display text: 0 none, 1 ohm, 2 kohm, 3 Mohm, 4 pF, 5 nF, 6 uF, 7 mF, 8 uH, 9 mH, 10 H, 11 degree |
 | 5 | u8 | decimals: digits after the point in the display text |
 | 6 | u8 | validity: 0 valid, 1 overload ("0L" from the formatter), 2 no reading (the meter's no-reading counter 0x2000120C above 200), 3 held. Checked in the order 3, 2, 1 |
-| 7 | 8 | display text, ASCII, zero padded (the meter's own formatters: 0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L, 0x0800DD44 D / Q, 0x0800DFC4 theta) |
+| 7 | 8 | display text, ASCII, zero padded: the text the display shows (firmware/own/fmt.s on the meter's formatters 0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L, 0x0800DD44 D / Q, 0x0800DFC4 theta): "0L" above the measurement range (R, Z, X above 10 Mohm, C above 100 mF, L above 100 H, or not finite), a '-' in front of a negative R, C, L or X, at most 19,999 counts (one decimal less above; D and Q from 20,000 have no decimal to drop and keep 5 digits) |
 
 Sources: main row 1 R 0x200050B8, 2 C 0x200050BC, 3 L 0x200050C0, 4 Z 0x200050C4; secondary 0 R
-(its magnitude, 0x200050B8), 1 X 0x200050C8 (sign kept), 2 D 0x200050D4, 3 Q 0x200050D0, 4 theta
-0x200050CC. A main row or secondary outside these values gives a block with value 0, unit 0,
-decimals 0 and an empty text (validity 3 or 2 as above, else 0).
+(0x200050B8, signed as the display shows it), 1 X 0x200050C8 (sign kept), 2 D 0x200050D4, 3 Q
+0x200050D0, 4 theta 0x200050CC. A main row or secondary outside these values gives a block with
+value 0, unit 0, decimals 0 and an empty text (validity 3 or 2 as above, else 0).
 
 The measured values (firmware/own/meas.s): theta (offset 45) is the phase of the measured
 impedance in degrees from -180 to 180, not folded into -90..90 as the vendor firmware V1.1 did, so
-a part with a negative resistive part keeps its sign in R (0x200050B8 in series mode; the value
-block of R carries the magnitude, as above). A new result comes once per averaging window: 1, 2
-or 4 per second for speed 0, 1 or 2. An overload (ADC saturated with no range step left, or no
+a part with a negative resistive part keeps its sign in R (0x200050B8 in series mode). A new result
+comes once per averaging window: 1, 2 or 4 per second for speed 0, 1 or 2 (a window holds at least
+3 acquisitions, so it can last longer when an acquisition is slow). Series / parallel in circuit
+mode auto: series below 1 kohm, parallel above 10 kohm, the mode in use kept in between (after a
+change of frequency, level, bias or speed: series below 3.16 kohm). In AUTO the main quantity
+changes R -> C below -11 degrees, R -> L above 11 degrees and back to R above -9 / below 9 degrees;
+R shows theta as its secondary. An overload (ADC saturated with no range step left, or no
 finite value) and the no-reading result (no in-band acquisition for 2 s) carry |Z| 1e10 and theta
 -400, the vendor firmware's values; while hold is on no result is published.
 
-### 6.3 COMPARE (29 bytes)
+### 6.3 COMPARE (50 bytes; 29 before capability bit 23)
 
 | Offset | Type | Field |
 |---|---|---|
@@ -383,13 +413,22 @@ finite value) and the no-reading result (no in-band acquisition for 2 s) carry |
 | 1 | f32 | nominal (0x20001184), in the quantity's base unit as above |
 | 5 | f32 | tolerance in percent (0x20001188) |
 | 9 | f32 | deviation in percent (0x200050D8) |
-| 13 | u8 | OK: 1 when deviation <= tolerance (as the display decides it), else 0 |
-| 14 | u32 | pass counter (0x200050F0, RAM only) |
-| 18 | u32 | fail counter (0x200050F4, RAM only). The meter's counter counts deviation = tolerance as fail while the display shows OK |
+| 13 | u8 | OK: 1 when the judgement (offset 40) is IN, else 0 |
+| 14 | u32 | pass counter (0x200050F0, RAM only, at most 999) |
+| 18 | u32 | fail counter (0x200050F4, RAM only, at most 999) |
 | 22 | f32 | compare value (0x200050DC) |
 | 26 | u8 | warn type (0x2000116C) |
 | 27 | u8 | warn sound (0x20001170): 0 / 1 |
 | 28 | u8 | warn LED (0x20001174): 0 / 1 |
+| 29 | u8 | tolerance mode in force: 0 the meter's symmetric %, 1 % limits, 2 pF limits (section 5.3.5) |
+| 30 | u8 | tolerance mode as set: 0 vendor, 1 %, 2 pF, 3 letter |
+| 31 | u8 | the letter of mode 3 (ASCII), else as last set |
+| 32 | f32 | lower limit in force (% or pF by offset 29) |
+| 36 | f32 | upper limit in force |
+| 40 | u8 | judgement: 0 no part ("---"), 1 IN, 2 HI, 3 LO, 4 the secondary limit failed, 5 out of range (a reading above the presence limit, not counted), 6 not yet stable ("---") |
+| 41 | f32 | signed deviation of the last judgement (% or pF by offset 29) |
+| 45 | u8 | secondary limit: 0 none, 1 D maximum, 2 Q minimum, 3 ESR maximum |
+| 46 | f32 | its value |
 
 ### 6.4 INFO (46 bytes)
 
@@ -522,7 +561,7 @@ left out (count stays).
 |---|---|---|---|---|---|---|
 | 0 | Func | 5 | index | "Func" | the meter's Func names (0x20000270) | "" |
 | 1 | secondary | 5 | index | "Secondary" | "R", "X", "D", "Q", "theta" | "" |
-| 2 | frequency | 5 | u32 | the meter's cursor label (0x20000234: "FREQ") | "100Hz", "120Hz", "1kHz", "10kHz", "100kHz"; values 100, 120, 1000, 10000, 100000 | "Hz" |
+| 2 | frequency | 6 (5 before capability bit 22) | u32 | the meter's cursor label (0x20000234: "FREQ") | "100Hz", "120Hz", "1kHz", "10kHz", "100kHz", "60Hz"; values 100, 120, 1000, 10000, 100000, 60 | "Hz" |
 | 3 | level | 3 | f32 | cursor label ("AMP") | "0.1V", "0.3V", "0.6V"; values 0.1, 0.3, 0.6 | "V" |
 | 4 | bias | 2 | f32 | cursor label ("BIAS") | "0V", "0.5V"; values 0.0, 0.5 | "V" |
 | 5 | range | 5 | index | cursor label ("RANGE") | the meter's range names (0x20000244) | "ohm" |
@@ -580,6 +619,7 @@ Save status u32 = result | step << 8 | copy << 16:
 | 6 | the copy read back differs | 5 |
 | 7 | bad block: markers missing or transfer CRC wrong | 7 |
 | 8 | the source copy of a recovery is not valid | 5 |
+| 9 | unchanged (capability bit 24): both copies already hold the block, nothing erased or written (a save of the meter or SETTINGS_SAVE with nothing changed) | 0 |
 
 Step: 0x01 the check before any write, 0x41 mark, 0x42 erase, 0x43 program, 0x44 verify. Copy: 0
 none, 1 A, 2 B.
@@ -755,7 +795,7 @@ BOOT_STATUS and BOOT_BEGIN (the free slot is erased and written again).
 
 ## 14. Capability bits and versioning
 
-INFO bits (bits 0..19 and 21 set in this firmware, 0x002FFFFF): 0 STATE / STREAM, 1 SCREEN, 2 KEY,
+INFO bits (bits 0..19 and 21..24 set in this firmware, 0x01EFFFFF): 0 STATE / STREAM, 1 SCREEN, 2 KEY,
 3 LCR_TABLES / LCR_SET, 4 MEASURE / MEASURE_STREAM, 5 COMPARE / COMPARE_SET, 6 HOLD, 7 CALIBRATE,
 8 SETTINGS_TABLES / SET / SAVE, 9 CAL_READ, 10 SCREENSHOT, 11 MEM_READ, 12 events, 13 UPDATE_MODE,
 14 BOOT_*, 15 BATTERY, 16 POWER_OFF, 17 RESTORE_DEFAULTS, 18 settings recovery (SETTINGS_RESTORE_B,
@@ -764,6 +804,10 @@ clear: English only (section 5.6); 21 direct set: SCREEN, LCR_SET, HOLD, SETTING
 COMPARE_SET set the value directly (sections 4.1, 4.3, 5.3.4; requests and answer records are the
 same as without the bit, so the protocol version stays 1). A host waits the answer times of
 section 4.3 by this bit: firmware without it runs these commands as jobs of key presses.
+22 60 Hz: frequency index 5 of LCR_TABLES / LCR_SET (the frequency key cycles 60 -> 100 -> 120 ->
+1k -> 10k -> 100k -> 60; 60 Hz is never saved: the copies hold 100 and the meter starts at 100 Hz).
+23 TOLERANCE_SET and the COMPARE tail (offsets 29..49, section 5.3.5). 24 the MEASURE marker byte
+64, the display rules of its value texts (section 6.2) and the save result 9 (section 9.1).
 
 Rules: the protocol version changes only when the frame format or the meaning of an existing field
 changes. Within a version, records and answers grow only at the end, new commands and events get

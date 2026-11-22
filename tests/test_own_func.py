@@ -1,0 +1,735 @@
+#!/usr/bin/env python3
+"""test_own_func.py - the instrument functions of our build (MEASUREMENT_FIX_DESIGN.md revision 6: stage 2
+S2.1..S2.7, S2.9; stage 2F S2.12 (60 Hz); stage 2G S2.8; firmware/own/fmt.s, cmp.s and the stage-2 parts
+of meas.s), in the emulator. Cases f20..f29 are the design's 5.1 lists m20..m28 and the F60 list; the
+save cases s06..s09 of the design are test_own_save.py s21..s25.
+
+Usage (from the repository root, after `make -C firmware` (build/app.elf for the V1.1 control) and
+`make -C firmware own`):
+    <python with unicorn 2.1.4> tests/test_own_func.py [case-name-prefix ...]
+
+Rigs: test_own_measure.own_rig (test_own_control.Ctl with the measurement path, the m15 table watch and
+the probe, imported, not changed) and test_own_measure.VRig (V1.1). Most checks call the functions of
+the built image directly in a stopped rig (fcall below: the CPU context is saved and restored around the
+call, the arguments in r0..r3 / s0, text buffers at 0x20014400, above the heap end 0x2001424C and far
+below the stack in use, as test_own_measure m03 places its array); the cases that need the main loop
+(the host record, hold, the compare screen with a part inserted and removed, 60 Hz) run it.
+
+Expected values: every formatted text below is derived by hand from the vendor format thresholds of the
+ui_42.s headers (0x0800E028, 0x0800DB24, 0x0800DE2C, 0x0800DD44) and the rules of fmt.s: OL above the
+measurement range, one decimal less above 19,999 counts, a '-' for a negative value; the accuracy table
+of fmt.s fmt_spec (design S2.1); the AUTO thresholds 10 / 11 / 9 degrees (D3); series / parallel at
+1 k / 10 k / 3162.28 ohm (D4); the compare rules of the cmp.s header. RUN LIMIT: one run of this file
+per case prefix, 10 cases.
+"""
+
+import os
+import struct
+import sys
+
+from unicorn import UC_HOOK_CODE
+from unicorn.arm_const import UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_S0, UC_ARM_REG_S22, \
+    UC_ARM_REG_LR
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import test_own_measure as M  # noqa: E402
+from test_own_measure import (own_rig, VRig, TDut, mo, tap, settings_item, wait_until,  # noqa: E402
+                              V_FREQ, V_LEVEL, V_BIAS, V_RANGE, V_SPEED, V_CIRCUIT, V_SCREEN, V_HOLD,
+                              V_CAL_RUN, KEY_OK, KEY_HOLD, MAIN_LOOP, u32f, f2u)
+from test_own_control import check, S_OK  # noqa: E402
+from measure_model import DutSource, TIM1, TIM6  # noqa: E402
+
+CASES = []
+NOTES = []
+
+OWN_FUNC = 0x20018000 + 0x5DE0
+MF = dict(MARK=0x00, ROW0=0x04, ROW1=0x08, SP=0x0C, AUTO=0x10, HOLDP=0x14, HL=0x18, PSEQ=0x30, TMODE=0x34,
+          TLO=0x38, THI=0x3C, TLET=0x40, SKIND=0x44, SVAL=0x48, TOLW=0x4C, RES=0x50, DEV=0x54, EMODE=0x58,
+          ELO=0x5C, EHI=0x60, PREV=0x64, PVSEQ=0x68, PVOK=0x6C, LED=0x70, BEEPN=0x74, BEEPT=0x78, BEEPS=0x7C)
+CR_NONE, CR_IN, CR_HI, CR_LO, CR_SEC, CR_OUT, CR_UNST = range(7)
+V_FUNC, V_SECONDARY, V_MAIN_ROW, V_CMP_TYPE = 0x20001148, 0x200011E8, 0x200011E4, 0x20001178
+V_NOMINAL, V_TOLERANCE, V_DISP_A8, V_KEY_BUSY = 0x20001184, 0x20001188, 0x200011A8, 0x20001190
+V_SIGN_MODE, V_PASS, V_FAIL, V_DEV = 0x20001198, 0x200050F0, 0x200050F4, 0x200050D8
+V_R, V_Z, V_TH, V_CS, V_L, V_CMPV, V_D, V_Q, V_RS = (0x200050B8, 0x200050C4, 0x200050CC, 0x200050A8, 0x200050C0,
+                                                    0x200050DC, 0x200050D4, 0x200050D0, 0x200050A0)
+OBJS = 0x200001D4                     # +0 ring index, +1 latch, +0x14 AUTO picture, +0x38 / +0x3C counters,
+                                      # +0x40 result text, +0x44 deviation text
+GLYPHS = 0x200059A8
+TXT, UNIT, IDX = 0x20014400, 0x20014410, 0x20014418
+S_BAD_ARG, S_NOT_NOW = 2, 3
+GPIOB, TIM2 = 0x40010C00, 0x40000000
+
+
+def case(fn):
+    CASES.append(fn)
+    return fn
+
+
+# ---------------------------------------------------------------- direct calls
+
+def fcall(rig, name, *regs, s0=None, s22=None):
+    """name(r0..r3) with s0 / s22 set, in the stopped rig; the CPU context restored afterwards; returns r0."""
+    uc = rig.m.uc
+    ctx = uc.context_save()
+    if s0 is not None:
+        uc.reg_write(UC_ARM_REG_S0, f2u(s0))
+    if s22 is not None:
+        uc.reg_write(UC_ARM_REG_S22, f2u(s22))
+    r = rig.m.call(rig.s[name], *regs)
+    end = rig.m.st['end']
+    uc.context_restore(ctx)
+    check(end == 'return', '%s did not return: %r' % (name, end))
+    rig.m.st['end'] = None                                    # the chip runs on (meter_model run_for)
+    return r
+
+
+def fcall_bits(rig, name, bits):
+    """name(TXT, UNIT, IDX) with s0 = the raw float bits (Inf, NaN), context restored."""
+    uc = rig.m.uc
+    ctx = uc.context_save()
+    uc.reg_write(UC_ARM_REG_S0, bits)
+    rig.m.call(rig.s[name], TXT, UNIT, IDX)
+    end = rig.m.st['end']
+    uc.context_restore(ctx)
+    check(end == 'return', '%s did not return: %r' % (name, end))
+    rig.m.st['end'] = None
+
+
+def cstr(rig, addr, n=16):
+    b = rig.rd(addr, n)
+    return b.split(b'\x00')[0].decode('latin-1')
+
+
+def fmt(rig, name, v, freq=None):
+    """One formatter call: (text, unit text, unit index, MF_MARK)."""
+    if freq is not None:
+        rig.wr(V_FREQ, freq)
+    rig.wr(TXT, bytes(32))
+    rig.wr(OWN_FUNC + MF['MARK'], 0x55)
+    fcall(rig, name, TXT, UNIT, IDX, s0=v)
+    return cstr(rig, TXT), cstr(rig, UNIT, 8), rig.rd(IDX), rig.rd(OWN_FUNC + MF['MARK'])
+
+
+def mf(rig, k):
+    return rig.rd(OWN_FUNC + MF[k])
+
+
+def mff(rig, k):
+    return u32f(rig.rd(OWN_FUNC + MF[k]))
+
+
+def wf(rig, addr, x):
+    rig.wr(addr, f2u(x))
+
+
+def entry_hook(rig, name, regs=(UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2)):
+    """A list that collects (time, r0, r1, r2) at every entry of the function."""
+    out = []
+    a = rig.s[name] & ~1
+
+    def hook(uc, addr, size, user):
+        out.append((rig.m.now(),) + tuple(uc.reg_read(r) for r in regs))
+    rig.m.uc.hook_add(UC_HOOK_CODE, hook, begin=a, end=a)
+    return out
+
+
+_BASE = []
+
+
+def base_rig():
+    """One rig of our build on screen 1 (R 1 kohm, 1 kHz), up to the main loop, shared by the
+    direct-call cases (they never resume it)."""
+    if not _BASE:
+        _BASE.append(own_rig(DutSource('R', 1000.0)))
+    return _BASE[0]
+
+
+# ---------------------------------------------------------------- f20 OL and the specified range
+
+@case
+def f20_ol_and_marker():
+    """m20 (S2.1): values just inside and just outside every limit of the measurement range (OL) and of
+    the accuracy table (marker) per frequency column; |Z| and X go through the R row (own_fmt_r); 60 Hz
+    has no column (always marked); NaN / Inf are OL. own_row_draw colours the seven glyphs of the row
+    with key 0x47 / 0x48 when marked and switches it off again (fn_080265dc / fn_080265f4)."""
+    rig = base_rig()
+    check(mf(rig, 'TMODE') == 0, 'tolerance mode %d after the start' % mf(rig, 'TMODE'))
+    # (formatter, value, frequency, OL expected, marker expected)
+    rows = [
+        ('own_fmt_r', 1.0e7, 1000, False, False), ('own_fmt_r', 1.0001e7, 1000, True, False),
+        ('own_fmt_r', 0.01, 100, False, False), ('own_fmt_r', 0.0099, 100, False, True),
+        ('own_fmt_r', 0.01, 120, False, False), ('own_fmt_r', 1.0e7, 120, False, False),
+        ('own_fmt_r', 1.0e6, 10000, False, False), ('own_fmt_r', 1.0001e6, 10000, False, True),
+        ('own_fmt_r', 1.0e6, 100000, False, False), ('own_fmt_r', 1.0001e6, 100000, False, True),
+        ('own_fmt_r', 1000.0, 60, False, True), ('own_fmt_r', -1.0001e7, 1000, True, False),
+        ('own_fmt_c', 1.0e8, 1000, False, False), ('own_fmt_c', 1.0001e8, 1000, True, False),
+        ('own_fmt_c', 1000.0, 100, False, False), ('own_fmt_c', 999.0, 100, False, True),
+        ('own_fmt_c', 0.001, 1000, False, False), ('own_fmt_c', 0.00099, 1000, False, True),
+        ('own_fmt_c', 1.0e6, 10000, False, False), ('own_fmt_c', 1.0001e6, 10000, False, True),
+        ('own_fmt_c', 0.001, 100000, False, False), ('own_fmt_c', 1.0001e6, 100000, False, True),
+        ('own_fmt_l', 1.0e8, 1000, False, False), ('own_fmt_l', 1.0001e8, 1000, True, False),
+        ('own_fmt_l', 10.0, 100, False, False), ('own_fmt_l', 9.99, 100, False, True),
+        ('own_fmt_l', 1.0, 1000, False, False), ('own_fmt_l', 0.999, 1000, False, True),
+        ('own_fmt_l', 1.0e6, 10000, False, False), ('own_fmt_l', 1.0001e6, 100000, False, True),
+    ]
+    for name, v, f, ol, mark in rows:
+        t, u, i, mk = fmt(rig, name, v, f)
+        what = '%s(%g) at %d Hz' % (name, v, f)
+        check((t == '0L  ') == ol, '%s: text %r, OL expected %r' % (what, t, ol))
+        if ol:
+            check(u == '' and i == 0 and mk == 0, '%s: OL with unit %r index %d marker %d' % (what, u, i, mk))
+        else:
+            check(mk == int(mark), '%s: marker %d, expected %d' % (what, mk, mark))
+    for bits in (0x7F800000, 0xFF800000, 0x7FC00000):
+        rig.wr(TXT, bytes(16))
+        fcall_bits(rig, 'own_fmt_r', bits)
+        check(cstr(rig, TXT) == '0L  ', 'own_fmt_r(0x%08X): %r, not OL' % (bits, cstr(rig, TXT)))
+    # theta and D / Q never carry the marker
+    for name, v in (('own_fmt_th', -45.0), ('own_fmt_dq', 0.5)):
+        t, u, i, mk = fmt(rig, name, v, 60)
+        check(mk == 0, '%s at 60 Hz: marker %d' % (name, mk))
+    # the row colour: amber by key 0x47, key 0x48 0xFF on the row's glyphs, then 0 again
+    rig.wr(V_FREQ, 1000)
+    c47 = entry_hook(rig, 'fn_080265dc')
+    c48 = entry_hook(rig, 'fn_080265f4')
+    amber = fcall(rig, 'rgb_to_565_0801d792', 0xFD, 0xD0, 0x1B) & 0xFFFF
+    objs = [rig.rd(GLYPHS + 4 * i) for i in range(7)]
+    live = [o for o in objs if o]
+    check(len(live) == 7, 'row 0 glyph objects %r' % [hex(o) for o in objs])
+    rig.wr(TXT, b'1.2345\x00')
+    rig.wr(OWN_FUNC + MF['MARK'], 1)
+    fcall(rig, 'own_row_draw', 0, TXT)
+    check([(o, c & 0xFFFF) for _, o, c, _ in c47] == [(o, amber) for o in live], 'key 0x47 calls %r' % c47)
+    check([(o, c) for _, o, c, _ in c48] == [(o, 0xFF) for o in live], 'key 0x48 calls %r' % c48)
+    check(mf(rig, 'ROW0') == objs[0] and mf(rig, 'MARK') == 0, 'MF_ROW0 0x%X, MF_MARK %d' % (mf(rig, 'ROW0'), mf(rig, 'MARK')))
+    del c47[:], c48[:]
+    fcall(rig, 'own_row_draw', 0, TXT)                        # MF_MARK 0 now: colour off
+    check(not c47 and [(o, c) for _, o, c, _ in c48] == [(o, 0) for o in live], 'switch-off calls %r' % c48)
+    check(mf(rig, 'ROW0') == 0, 'MF_ROW0 0x%X after the switch-off' % mf(rig, 'ROW0'))
+    del c48[:]
+    fcall(rig, 'own_row_draw', 0, TXT)
+    check(not c48, 'unmarked row touched again: %r' % c48)
+    NOTES.append('f20: %d limit rows, NaN / +-Inf OL, row colour on 7 glyphs, amber 0x%04X' % (len(rows), amber))
+    rig.watch.check(what='f20')
+    return True
+
+
+# ---------------------------------------------------------------- f21 signs (formatter part)
+
+@case
+def f21_signs():
+    """m21 (S2.2): R, C, L and X negative get one '-' (X with 0x20001198 = 2, as the X row sets it); the
+    secondary R takes 0x200050B8 signed (own_fmt_rs ignores the s0 its caller made absolute); every text
+    fits 7 characters; then the host record: Func R on z = -1 + j100 ohm at 1 kHz (TDut as m10), the MEASURE
+    main text equals the text the display drew on row 0 and carries the '-'."""
+    rig = base_rig()
+    rows = [('own_fmt_r', -1.5, '-1.5000'), ('own_fmt_c', -0.0005, '-0.5'), ('own_fmt_l', -100.0, '-100.00'),
+            ('own_fmt_r', -79.999, '-80.00'), ('own_fmt_c', -0.799, '-799.0'), ('own_fmt_l', -79.9, '-79.9')]
+    for name, v, want in rows:
+        t, u, i, mk = fmt(rig, name, v, 1000)
+        check(t == want and len(t) <= 7, '%s(%g): %r, expected %r' % (name, v, t, want))
+    rig.wr(V_SIGN_MODE, 2)
+    t = fmt(rig, 'own_fmt_r', -12.3456, 1000)[0]
+    rig.wr(V_SIGN_MODE, 0)
+    check(t == '-12.346', 'X with 0x20001198 = 2: %r (one sign expected)' % t)
+    wf(rig, V_R, -0.05)
+    t = fmt(rig, 'own_fmt_rs', 0.05, 1000)[0]
+    check(t == '-0.0500', 'secondary R from 0x200050B8: %r' % t)
+    rig.watch.check(what='f21 formatters')
+    # the host record against the display
+    z = complex(-1, 100)
+    hr = own_rig(DutSource(z=lambda f, zz=z: zz, counts_per_volt=4095 / 3.3), usb=True)
+    rows0 = []
+    a = hr.s['own_row_draw'] & ~1
+
+    def rowdraw(uc, addr, size, user):
+        if uc.reg_read(UC_ARM_REG_R0) == 0:
+            rows0.append(bytes(uc.mem_read(uc.reg_read(UC_ARM_REG_R1), 8)).split(b'\x00')[0])
+    hr.m.uc.hook_add(UC_HOOK_CODE, rowdraw, begin=a, end=a)
+    hr.ask_ok('LCR_SET', bytes([0, 1]))                      # Func R: main row R, secondary X
+    hr.run(2.0)
+    d = hr.ask_ok('MEASURE', size=M.T.MEASURE_SIZE)
+    text = d[16:24].split(b'\x00')[0]
+    check(d[8] == 1 and rows0 and text == rows0[-1], 'MEASURE main row %d text %r, display %r' % (d[8], text, rows0[-1:]))
+    check(text.startswith(b'-'), 'negative R without a sign: %r' % text)
+    check(d[64] == 0, 'marker byte %d for R about 1 ohm at 1 kHz' % d[64])
+    NOTES.append('f21: R of z = -1 + j100 shown %r on the display and in MEASURE' % text)
+    hr.watch.check(what='f21 record')
+    return True
+
+
+# ---------------------------------------------------------------- f22 D / Q at the extremes
+
+@case
+def f22_dq_extremes():
+    """m22 (S2.3 / S1.8): D or Q of +Inf (Xs = 0 for D, Rs = 0 for Q) is "0L", 0 is "0.0000"."""
+    rig = base_rig()
+    fcall_bits(rig, 'own_fmt_dq', 0x7F800000)
+    check(cstr(rig, TXT) == '0L  ', 'D = +Inf: %r' % cstr(rig, TXT))
+    check(fmt(rig, 'own_fmt_dq', 0.0)[0] == '0.0000', 'Q = 0: %r' % fmt(rig, 'own_fmt_dq', 0.0)[0])
+    rig.watch.check(what='f22')
+    return True
+
+
+# ---------------------------------------------------------------- f23 digits
+
+@case
+def f23_digits():
+    """m23 (S2.4, D5): 19,999 / 20,000 counts in each vendor format range: the text keeps its decimals at
+    19,999 and drops one at 20,000 (in the unit the vendor formatter chose)."""
+    rig = base_rig()
+    rows = [('own_fmt_r', 1.9999, '1.9999'), ('own_fmt_r', 2.0, '2.000'), ('own_fmt_r', 19.999, '19.999'),
+            ('own_fmt_r', 20.0, '20.00'), ('own_fmt_r', 199.99, '199.99'), ('own_fmt_r', 200.0, '200.0'),
+            ('own_fmt_r', 1999.9, '1.9999'), ('own_fmt_r', 2000.0, '2.000'),
+            ('own_fmt_c', 1.9999, '1.9999'), ('own_fmt_c', 2.0, '2.000'), ('own_fmt_c', 20.0, '20.00'),
+            ('own_fmt_c', 200.0, '200.0'), ('own_fmt_c', 2000.0, '2.000'),
+            ('own_fmt_l', 199.99, '199.99'), ('own_fmt_l', 200.0, '200.0'), ('own_fmt_l', 2000.0, '2.000'),
+            ('own_fmt_l', 2.0e6, '2.000'),
+            ('own_fmt_dq', 1.9999, '1.9999'), ('own_fmt_dq', 2.0, '2.000'), ('own_fmt_dq', 9.9999, '10.000'),
+            ('own_fmt_dq', 20.0, '20.00'), ('own_fmt_dq', 200.0, '200.0'), ('own_fmt_dq', 2000.0, '2000'),
+            ('own_fmt_dq', 20000.0, '20000')]
+    for name, v, want in rows:
+        t = fmt(rig, name, v, 1000)[0]
+        check(t == want, '%s(%g): %r, expected %r' % (name, v, t, want))
+    NOTES.append('f23: %d texts at 19,999 / 20,000 counts' % len(rows))
+    rig.watch.check(what='f23')
+    return True
+
+
+# ---------------------------------------------------------------- f24 AUTO
+
+@case
+def f24_auto():
+    """m24 (S2.5, D3): a theta sweep down and up through -T / +T: R -> C only below -11, C -> R only above
+    -9; R -> L only above 11, L -> R only below 9; undecided decides with T alone; C or L without its
+    validity window goes to R; the -400 set keeps the class; the main row / secondary / picture follow
+    (R 1 / 4 theta, C 2 / 2, L 3 / 3); a frequency change in the running rig resets the class."""
+    rig = base_rig()
+    pics = entry_hook(rig, 'fn_08021c14')
+    wf(rig, V_CS, 10.0)                       # 10 nF: inside 0.5 pF .. 0.2 F
+    wf(rig, V_L, 1000.0)                      # 1 mH: inside 0.5 uH .. 1e8 uH
+    rig.wr(V_FUNC, 0)
+
+    def step(th, cls=None):
+        if cls is not None:
+            rig.wr(OWN_FUNC + MF['AUTO'], cls)
+        wf(rig, V_TH, th)
+        fcall(rig, 'own_auto_class')
+        return mf(rig, 'AUTO')
+    seq = [(None, 0.0, 1), (None, -10.5, 1), (None, -11.5, 2), (None, -9.5, 2), (None, -8.5, 1),
+           (None, 10.5, 1), (None, 11.5, 3), (None, 9.5, 3), (None, 8.5, 1),
+           (0, -10.5, 2), (0, 10.5, 3), (0, 9.9, 1), (2, 50.0, 1), (3, -50.0, 1), (2, -400.0, 2), (0, -400.0, 1)]
+    for cls, th, want in seq:
+        got = step(th, cls)
+        check(got == want, 'theta %.1f from class %r: class %d, expected %d' % (th, cls, got, want))
+    sec = {1: 4, 2: 2, 3: 3}
+    for cls_from, th, want in ((1, -11.5, 2), (2, 0.0, 1), (1, 11.5, 3)):
+        del pics[:]
+        step(th, cls_from)
+        check(rig.rd8(V_MAIN_ROW) == want and rig.rd(V_SECONDARY) == sec[want], 'class %d: main %d secondary %d'
+              % (want, rig.rd8(V_MAIN_ROW), rig.rd(V_SECONDARY)))
+        pic = {1: 'd_0803d2fc', 2: 'd_0803d3d4', 3: 'd_0803d584'}[want]
+        check(pics and pics[-1][2] == rig.s[pic], 'class %d: picture %r' % (want, pics[-1:]))
+    wf(rig, V_CS, 1.0e-4)                     # 0.1 pF: C not valid
+    check(step(-30.0, 2) == 1 and step(-30.0, 1) == 1, 'C without its validity window')
+    rig.watch.check(what='f24 direct')
+    # the reset at a setting change, in a running rig
+    r2 = own_rig(DutSource('R', 1000.0))
+    r2.run(1.5)
+    check(mo(r2, 'SEQ') > 0 and r2.rd(OWN_FUNC + MF['AUTO']) == 1, 'AUTO class %d after the first windows'
+          % r2.rd(OWN_FUNC + MF['AUTO']))
+    r2.wr(V_FREQ, 10000)
+    r2.run(0.03)
+    check(r2.rd(OWN_FUNC + MF['AUTO']) == 0 and r2.rd(OWN_FUNC + MF['SP']) == 0,
+          'after the frequency change: AUTO %d, series / parallel %d' % (r2.rd(OWN_FUNC + MF['AUTO']), r2.rd(OWN_FUNC + MF['SP'])))
+    r2.watch.check(what='f24 reset')
+    return True
+
+
+# ---------------------------------------------------------------- f25 series / parallel
+
+@case
+def f25_serpar():
+    """m25 (S2.6, D4): meas_serpar on a |Z| sweep up and down through 1 k / 10 k: series stays up to
+    10 k, parallel stays down to 1 k; undecided: series up to 3162.28, parallel above."""
+    rig = base_rig()
+
+    def sp(z, state=None):
+        if state is not None:
+            rig.wr(OWN_FUNC + MF['SP'], state)
+        return fcall(rig, 'meas_serpar', s22=z), mf(rig, 'SP')
+    want = [(0, 3000.0, 0), (0, 3200.0, 1)]
+    for st, z, par in want:
+        r, s = sp(z, st)
+        check(r == par and s == 2 - (par == 0), 'undecided, |Z| %.0f: %d (state %d)' % (z, r, s))
+    rig.wr(OWN_FUNC + MF['SP'], 1)
+    up = [(500.0, 0), (5000.0, 0), (9999.0, 0), (10001.0, 1), (20000.0, 1)]
+    down = [(9999.0, 1), (1001.0, 1), (999.0, 0), (500.0, 0), (9999.0, 0)]
+    for z, par in up + down:
+        r, s = sp(z)
+        check(r == par, '|Z| %.0f: %s, expected %s' % (z, 'parallel' if r else 'series', 'parallel' if par else 'series'))
+    rig.watch.check(what='f25')
+    return True
+
+
+# ---------------------------------------------------------------- f26 hold
+
+@case
+def f26_hold():
+    """m26 (S2.7, D1 / D2): under hold the output words stay and windows keep closing (MO_SEQ); each of
+    frequency, level, bias, range, speed and circuit ends hold (ds_hold(0) from meas_hold: the HOLD object
+    hidden, the restart request); Func and secondary do not."""
+    rig = own_rig(DutSource('R', 1000.0))
+    rig.run(1.5)
+    check(rig.probe.normal(), 'f26: no window before hold')
+    offs = entry_hook(rig, 'ds_hold', regs=(UC_ARM_REG_R0, UC_ARM_REG_LR))
+    fcall(rig, 'ds_hold', 1)
+    check(rig.rd(V_HOLD) == 1, 'hold not set')
+    words = {k: rig.rd(a) for k, a in M.WORDS.items()}
+    seq0, npub = mo(rig, 'SEQ'), len(rig.probe.pubs)
+    rig.run(1.2)
+    check(mo(rig, 'SEQ') >= seq0 + 2, 'windows under hold: %d -> %d' % (seq0, mo(rig, 'SEQ')))
+    check(len(rig.probe.pubs) == npub, 'published under hold')
+    check({k: rig.rd(a) for k, a in M.WORDS.items()} == words, 'output words changed under hold')
+    check(mf(rig, 'HOLDP') == 1, 'hold not latched')
+    ends = []
+    changes = [('frequency', V_FREQ, 10000), ('level', V_LEVEL, 0x3E99999A), ('bias', V_BIAS, 0x3F000000),
+               ('range', V_RANGE, 1), ('speed', V_SPEED, 2), ('circuit', V_CIRCUIT, 1)]
+    for name, addr, v in changes:
+        if rig.rd(V_HOLD) == 0:
+            fcall(rig, 'ds_hold', 1)
+        rig.run(0.05)
+        check(mf(rig, 'HOLDP') == 1, '%s: hold not latched' % name)
+        old = rig.rd(addr)
+        del offs[:]
+        rig.wr(addr, v)
+        rig.run(0.05)
+        check(rig.rd(V_HOLD) == 0, '%s change: hold stays' % name)
+        lo, hi = M.func_ranges(rig.s)['meas_hold']
+        check(any(r0 == 0 and lo <= (lr & ~1) < hi for _, r0, lr in offs), '%s: ds_hold(0) not from meas_hold %r'
+              % (name, offs))
+        rig.wr(addr, old)
+        rig.run(0.05)
+        ends.append(name)
+    fcall(rig, 'ds_hold', 1)
+    rig.run(0.05)
+    for name, addr, v in (('Func', V_FUNC, 1), ('secondary', V_SECONDARY, 3)):
+        old = rig.rd(addr)
+        rig.wr(addr, v)
+        rig.run(0.05)
+        check(rig.rd(V_HOLD) == 1, '%s change ended hold' % name)
+        rig.wr(addr, old)
+    NOTES.append('f26: windows under hold %d -> %d, hold ended by %s' % (seq0, mo(rig, 'SEQ'), ', '.join(ends)))
+    rig.watch.check(what='f26')
+    return True
+
+
+# ---------------------------------------------------------------- f27 compare judgement, f28 tolerance
+
+def judge(rig, v, nom=1000.0, z=None, th=0.0, prev=None, consecutive=True, latch=1, freq=1000):
+    """own_cmp_judge on crafted words (screen 2 rig stopped): compare value v, nominal, |Z| (default v),
+    theta, the previous publish (prev, None: no valid previous); returns MF_RES."""
+    rig.wr(V_FREQ, freq)
+    wf(rig, V_CMPV, v)
+    wf(rig, V_NOMINAL, nom)
+    wf(rig, V_Z, abs(v) if z is None else z)
+    wf(rig, V_TH, th)
+    rig.wr(OBJS + 1, bytes([latch]))
+    seq = mf(rig, 'PSEQ')
+    if prev is None:
+        rig.wr(OWN_FUNC + MF['PVOK'], 0)
+    else:
+        rig.wr(OWN_FUNC + MF['PVOK'], 1)
+        wf(rig, OWN_FUNC + MF['PREV'], prev)
+        rig.wr(OWN_FUNC + MF['PVSEQ'], (seq - (1 if consecutive else 2)) & 0xFFFFFFFF)
+    fcall(rig, 'own_cmp_judge')
+    return mf(rig, 'RES')
+
+
+def tol(rig, mode, lo=0, hi=0, letter=b'\x00', skind=0, sval=0.0, n=15):
+    p = struct.pack('<BiicBf', mode, lo, hi, letter, skind, sval)[:n]
+    rig.wr(TXT, p + bytes(16))
+    return fcall(rig, 'own_tol_set', TXT, n)
+
+
+@case
+def f27_compare():
+    """m27 (S2.8): on screen 2 with nominal 1000 ohm, 5 %, WarnType 0 (alarm on NG), sound and LED on (the
+    block defaults): a 1 kohm part is counted once (pass), shown "---" until two windows agree, then "IN";
+    removed (no current: the no-reading set) it shows "---" and the latch clears; a 1.2 kohm part is
+    counted as fail with the alarm: LED PB13 high / PB12 low held, two beeps of 200 ms with 150 ms
+    between them stepped by own_cmp_step while the main loop runs; counters saturate at 999; long key
+    0x100 resets them once per hold; out of range above the presence limit; nothing NaN."""
+    marks = [1e9, 1e9]                                        # removal, second insertion (emulated s)
+
+    def zt(f, t):
+        return 1000.0 if t < marks[0] else 1e15 if t < marks[1] else 1200.0
+    rig = own_rig(TDut(zt, counts_per_volt=4095 / 3.3), usb=True)
+    texts = entry_hook(rig, 'fn_080228d0')
+    # the LED and beeper calls of cmp.s only (the vendor's key beep fn_08008120 also reaches
+    # fn_0800c6ec): kept when the return address lies in cmp_led, cmp_alarm or own_cmp_step
+    rngs = [M.func_ranges(rig.s)[n] for n in ('cmp_led', 'cmp_alarm', 'own_cmp_step')]
+    regs = (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_LR)
+    leds_all = entry_hook(rig, 'fn_08008350', regs=regs)
+    beeps_all = entry_hook(rig, 'fn_0800c6ec', regs=regs)
+
+    class Own(list):
+        """A view of the entries whose LR lies in cmp.s (time, r0, r1, r2)."""
+        def __init__(self, src):
+            super().__init__()
+            self.src = src
+
+        def __iter__(self):
+            return iter([x[:4] for x in self.src if any(lo <= (x[4] & ~1) < hi for lo, hi in rngs)])
+
+        def __delitem__(self, k):
+            del self.src[k]
+    leds, beeps = Own(leds_all), Own(beeps_all)
+    loops = []
+    rig.m.uc.hook_add(UC_HOOK_CODE, lambda uc, a, s, u: loops.append(rig.m.now()), begin=MAIN_LOOP, end=MAIN_LOOP)
+    p0, f0 = rig.rd(V_PASS), rig.rd(V_FAIL)                  # screen 1: nothing judged yet
+    t0 = rig.m.now()
+    marks[0] = t0 + 4.5
+    marks[1] = marks[0] + 4.0
+    rig.press(KEY_HOLD, 1200)                                 # long 0x400: screen 1 -> 2
+    check(rig.rd(V_SCREEN) == 2, 'screen %d' % rig.rd(V_SCREEN))
+    st, d = rig.ask('TOL_SET', struct.pack('<BiicBf', 0, 0, 0, b'\x00', 0, 0.0))
+    check(st == S_OK and len(d) == M.T.COMPARE_SIZE, 'TOLERANCE_SET mode 0: status %d, %d bytes' % (st, len(d)))
+    st, d = rig.ask('TOL_SET', b'\x01\x00')
+    check(st == S_BAD_ARG and len(d) == M.T.COMPARE_SIZE, 'short TOLERANCE_SET: status %d, %d bytes' % (st, len(d)))
+    obj_res, obj_fail = rig.rd(OBJS + 0x40), rig.rd(OBJS + 0x3C)
+    rig.run(marks[0] - rig.m.now())
+    check(rig.rd(V_PASS) == p0 + 1 and rig.rd(V_FAIL) == f0, 'insertion 1: pass %d -> %d, fail %d -> %d'
+          % (p0, rig.rd(V_PASS), f0, rig.rd(V_FAIL)))
+    res_txt = [cstr(rig, r2) for t, r0, r1, r2 in texts if r0 == obj_res and t > t0]
+    check(res_txt and res_txt[0] == '---' and res_txt[-1] == 'IN', 'result texts %r' % res_txt)
+    check(mf(rig, 'RES') == CR_IN and rig.rd8(OBJS + 1) == 1, 'result %d latch %d' % (mf(rig, 'RES'), rig.rd8(OBJS + 1)))
+    check(not [x for x in leds if x[0] > t0] and not [x for x in beeps if x[0] > t0], 'alarm on IN with WarnType 0')
+    rig.run(marks[1] - rig.m.now())
+    check(mf(rig, 'RES') == CR_NONE and rig.rd8(OBJS + 1) == 0, 'removed: result %d latch %d' % (mf(rig, 'RES'), rig.rd8(OBJS + 1)))
+    del leds[:], beeps[:], loops[:]
+    t2 = rig.m.now()
+    rig.run(3.5)
+    check(rig.rd(V_FAIL) == f0 + 1 and rig.rd(V_PASS) == p0 + 1, 'insertion 2: fail %d pass %d' % (rig.rd(V_FAIL), rig.rd(V_PASS)))
+    check(mf(rig, 'RES') == CR_HI, 'insertion 2: result %d' % mf(rig, 'RES'))
+    lv = [(r1, r2) for _, r0, r1, r2 in leds if r0 == GPIOB and r1 in (0x1000, 0x2000)]
+    check(lv == [(0x2000, 1), (0x1000, 0)], 'LED writes %r (PB13 high, PB12 low expected, held)' % lv)
+    bp = [(t, r1) for t, r0, r1, _ in beeps if r0 == TIM2]
+    vol = rig.rd16(0x20001160)
+    check([v for _, v in bp] == [vol, 0, vol, 0], 'beeper writes %r (volume %d)' % (bp, vol))
+    on1, off1, on2, off2 = [t for t, _ in bp]
+    # tick 10 ms, and a step waits for the next pass of ctl_loop: a pass with the publish's display
+    # update takes about 0.12 s in the model (design revision 5 item 10)
+    check(0.195 <= off1 - on1 <= 0.34 and 0.145 <= on2 - off1 <= 0.29 and 0.195 <= off2 - on2 <= 0.34,
+          'beep times %.3f / %.3f / %.3f s' % (off1 - on1, on2 - off1, off2 - on2))
+    passes = [t for t in loops if on1 < t < off2]
+    check(len(passes) >= 3, 'main loop passes during the beeps: %d' % len(passes))
+    fail_txt = [r2 for t, r0, r1, r2 in texts if r0 == obj_fail and t > t2]
+    check(fail_txt and fail_txt[-1] == f0 + 1, 'fail counter text %r' % fail_txt)
+    # direct checks in the stopped rig: saturation, the reset key, out of range, NaN
+    rig.wr(V_FAIL, 999)
+    check(judge(rig, 1200.0, prev=1200.0, latch=0) == CR_HI and rig.rd(V_FAIL) == 999, 'fail at 999: %d' % rig.rd(V_FAIL))
+    rig.wr(V_PASS, 999)
+    check(judge(rig, 1000.0, prev=1000.0, latch=0) == CR_IN and rig.rd(V_PASS) == 999, 'pass at 999: %d' % rig.rd(V_PASS))
+    rig.wr(V_KEY_BUSY, bytes(2))
+    fcall(rig, 'own_cmp_key', 0xFE, 0x200)
+    check(rig.rd(V_PASS) == 999, 'mask 0x200 reset the counters')
+    fcall(rig, 'own_cmp_key', 0xFE, 0x100)
+    check(rig.rd(V_PASS) == 0 and rig.rd(V_FAIL) == 0 and rig.rd16(V_KEY_BUSY) == 1, 'reset: %d / %d busy %d'
+          % (rig.rd(V_PASS), rig.rd(V_FAIL), rig.rd16(V_KEY_BUSY)))
+    rig.wr(V_PASS, 5)
+    fcall(rig, 'own_cmp_key', 0xFE, 0x100)
+    check(rig.rd(V_PASS) == 5, 'a second reset in the same hold')
+    check(judge(rig, 5.0e5, freq=100000) == CR_OUT, '500 kohm at 100 kHz: not "out of range"')
+    check(judge(rig, 1.0e10, z=1.0e10, th=-400.0) == CR_NONE, 'the -400 set: not "no part"')
+    check(judge(rig, 5.0e7, freq=1000) == CR_NONE, '50 Mohm (above the measurement range): not "no part"')
+    for k in ('DEV', 'ELO', 'EHI', 'PREV'):
+        b = mf(rig, k)
+        check(not ((b & 0x7F800000) == 0x7F800000 and b & 0x7FFFFF), 'MF_%s NaN' % k)
+    NOTES.append('f27: beeps %.3f / %.3f / %.3f s with %d main-loop passes, counts pass %d fail %d'
+                 % (off1 - on1, on2 - off1, off2 - on2, len(passes), p0 + 1, f0 + 1))
+    rig.watch.check(what='f27')
+    return True
+
+
+@case
+def f28_tolerance():
+    """m28 (S2.9, D7): % limits (asymmetric), presets (Z, C as % and as pF below a 10 pF nominal), the pF
+    mode only for C, the refusals, the secondary limit, stability (min(band / 4, 0.1 %) between consecutive
+    publishes), the return to mode 0 when 0x20001188 changes; own_tol_set writes nothing outside OWN_FUNC
+    and no flash; after a start the mode is 0 (own RAM is cleared by own_start), 0x20001188 is the saved
+    block's word."""
+    rig = base_rig()
+    blk0 = rig.rd(0x2000057C, 0xC14)
+    rig.wr(V_SCREEN, 2)                                      # the judgement runs on screen 2 only; with the
+                                                             # latch 1 (judge) it counts nothing, so the
+                                                             # screen-2 counter objects are not used
+    ops0 = len(rig.flash_ops())
+    rig.wr(V_CMP_TYPE, 1)
+    check(tol(rig, 1, -500, 1000) == S_OK, 'mode 1 refused')
+    for v, want in ((1080.0, CR_IN), (1120.0, CR_HI), (940.0, CR_LO), (950.0, CR_IN)):
+        got = judge(rig, v, prev=v)
+        check(got == want, 'mode -5 / +10 %%, v %.0f: %d, expected %d' % (v, got, want))
+    check(abs(mff(rig, 'DEV') + 5.0) < 1e-4 and mf(rig, 'EMODE') == 1, 'deviation %r mode %d' % (mff(rig, 'DEV'), mf(rig, 'EMODE')))
+    check(tol(rig, 3, letter=b'Z') == S_OK, 'letter Z refused')
+    for v, want in ((1700.0, CR_IN), (1900.0, CR_HI), (790.0, CR_LO)):
+        check(judge(rig, v, prev=v) == want, 'Z, v %.0f' % v)
+    rig.wr(V_CMP_TYPE, 2)
+    check(tol(rig, 3, letter=b'C') == S_OK, 'letter C refused')
+    for v, want in ((0.0052, CR_IN), (0.0053, CR_HI), (0.0047, CR_LO)):
+        got = judge(rig, v, nom=0.005, prev=v)
+        check(got == want and mf(rig, 'EMODE') == 2, 'C at 5 pF, v %.4f nF: %d mode %d' % (v, got, mf(rig, 'EMODE')))
+    for v, want in ((100.2, CR_IN), (100.3, CR_HI)):
+        got = judge(rig, v, nom=100.0, prev=v)
+        check(got == want and mf(rig, 'EMODE') == 1, 'C at 100 nF, v %.1f: %d mode %d' % (v, got, mf(rig, 'EMODE')))
+    check(tol(rig, 2, -50, 50) == S_OK, 'pF mode for C refused')
+    check(judge(rig, 0.0104, nom=0.010, prev=0.0104) == CR_IN and judge(rig, 0.0106, nom=0.010, prev=0.0106) == CR_HI,
+          'pF mode +-0.5 pF')
+    rig.wr(V_CMP_TYPE, 1)
+    check(tol(rig, 2, -50, 50) == S_NOT_NOW, 'pF mode for R not refused')
+    for p, what in (((1, 100, -100), 'lower above upper'), ((5,), 'mode 5'), ((3, 0, 0, b'A'), 'letter A'),
+                    ((1, -10000, 100), 'lower below -99.99 %'), ((1, 0, 99991), 'upper above 999.9 %'),
+                    ((0, 0, 0, b'\x00', 4), 'secondary kind 4'), ((0, 0, 0, b'\x00', 1, -1.0), 'negative limit')):
+        check(tol(rig, *p) == S_BAD_ARG, '%s accepted' % what)
+    check(tol(rig, 0, n=14) == S_BAD_ARG, '14 bytes accepted')
+    # the secondary limit: D max 0.01
+    check(tol(rig, 0, 0, 0, b'\x00', 1, 0.01) == S_OK, 'secondary D refused')
+    wf(rig, V_D, 0.005)
+    check(judge(rig, 1000.0, prev=1000.0) == CR_IN, 'D 0.005 under 0.01')
+    wf(rig, V_D, 0.02)
+    check(judge(rig, 1000.0, prev=1000.0) == CR_SEC, 'D 0.02 over 0.01')
+    check(tol(rig, 0, 0, 0, b'\x00', 3, 5.0) == S_OK, 'secondary ESR refused')
+    wf(rig, V_RS, 6.0)
+    check(judge(rig, 1000.0, prev=1000.0) == CR_SEC, 'ESR 6 over 5')
+    check(tol(rig, 0) == S_OK, 'mode 0 refused')
+    # stability: 5 % -> min(1.25 %, 0.1 %) = 0.1 % of v
+    check(judge(rig, 1000.5, prev=1000.0) == CR_IN, '0.05 % apart: not stable')
+    check(judge(rig, 1002.0, prev=1000.0) == CR_UNST, '0.2 % apart: stable')
+    check(judge(rig, 1000.0, prev=1000.0, consecutive=False) == CR_UNST, 'publishes not consecutive: stable')
+    check(judge(rig, 1000.0) == CR_UNST, 'no previous publish: stable')
+    # a change of 0x20001188 returns to mode 0
+    check(tol(rig, 1, -100, 100) == S_OK and mf(rig, 'TMODE') == 1, 'mode 1')
+    wf(rig, V_TOLERANCE, 2.0)
+    judge(rig, 1000.0, prev=1000.0)
+    check(mf(rig, 'TMODE') == 0 and mf(rig, 'EMODE') == 0 and mff(rig, 'EHI') == 2.0, 'mode %d after the vendor '
+          'tolerance changed (limit %r)' % (mf(rig, 'TMODE'), mff(rig, 'EHI')))
+    wf(rig, V_TOLERANCE, 5.0)
+    # nothing written outside OWN_FUNC by own_tol_set (the block keeps its bytes except the words the
+    # judge calls above wrote themselves: compare value, |Z|, theta, nominal, tolerance, D, Rs, counters)
+    blk1 = rig.rd(0x2000057C, 0xC14)
+    diff = [i for i in range(0, 0xC14, 4) if blk0[i:i + 4] != blk1[i:i + 4]]
+    allowed = {a - 0x2000057C for a in (V_NOMINAL, V_TOLERANCE, V_CMP_TYPE, V_FREQ, V_SCREEN)}
+    check(set(diff) <= allowed, 'block words written: %r' % [hex(0x2000057C + i) for i in diff if i not in allowed])
+    check(len(rig.flash_ops()) == ops0, 'flash written')
+    n = fcall(rig, 'rec_compare', TXT)
+    rec = rig.rd(TXT, n)
+    check(n == M.T.COMPARE_SIZE and rec[30] == 0 and rec[40] == mf(rig, 'RES'), 'COMPARE record %d bytes: %r' % (n, rec))
+    NOTES.append('f28: modes 1 / 3 (Z, C % and pF) / 2, refusals, secondary D / ESR, stability, mode 0 on a '
+                 'tolerance change')
+    rig.watch.check(what='f28')
+    return True
+
+
+# ---------------------------------------------------------------- f29 60 Hz
+
+@case
+def f29_sixty_hertz():
+    """F60 list (S2.12): LCR_SET frequency index 5 sets 60 Hz; TIM1 AR 18749, TIM6 AR 7999 and 150 DAC
+    entries, the generator at 60 Hz; every calibration pointer lookup at 60 Hz asks for 100 Hz; the
+    LCR_TABLES frequency list has 6 entries, index 5 = 60 "60Hz"; MEASURE reports 60 Hz and the marker
+    (no accuracy column); at speed 2 every window holds at least 3 acquisitions; fn_0800a030 returns
+    110,000,000 for 60 / 100 / 120 / 1000, 11,000,000 for 10 kHz, 1,100,000 for 100 kHz (V1.1 returns
+    1,100,000 for 60: the control); the frequency key cycles 60 -> 100 -> 120 -> 1k -> 10k -> 100k -> 60
+    and back, an unknown word and step 0 stay, fn_08009f10 after every step; the calibration start on
+    screen 3 sets 100 Hz before any store."""
+    rig = own_rig(DutSource('R', 1000.0), usb=True, freq=100)
+    lut = entry_hook(rig, 'fn_080090a4')
+    lst = rig.ask_ok('LCR_TABLES', b'\x02')
+    check(len(lst) > 2 and lst[0] == 2 and lst[1] == 6 and lst[2] == 1, 'frequency list header %r' % lst[:8])
+    check(struct.pack('<I', 60) + b'60Hz\x00' in lst, 'frequency list without 60 / "60Hz": %r' % lst)
+    rig.ask_ok('LCR_SET', bytes([2, 5]))
+    check(rig.rd(V_FREQ) == 60, 'LCR_SET index 5: frequency %d' % rig.rd(V_FREQ))
+    t0 = rig.m.now()
+    rig.run(2.0)
+    check(rig.meas.tim[TIM1].reg(0x2C) == 18749, 'TIM1 AR %d' % rig.meas.tim[TIM1].reg(0x2C))
+    check(rig.meas.tim[TIM6].reg(0x2C) == 7999 and rig.meas.dma[1][2].init == 150, 'TIM6 AR %d, DAC table %d'
+          % (rig.meas.tim[TIM6].reg(0x2C), rig.meas.dma[1][2].init))
+    check(abs(rig.meas.frequency() - 60.0) <= 6e-8, 'generator %.9f Hz' % rig.meas.frequency())
+    at60 = [x for x in lut if x[0] > t0]
+    check(at60 and all(r0 == 100 for _, r0, _, _ in at60), 'calibration lookups at 60 Hz %r' % at60[:4])
+    pubs = rig.probe.normal(t0 + 0.5)
+    check(pubs and all(p['n'] >= 3 for p in pubs), '60 Hz windows N %r' % [p['n'] for p in pubs])
+    d = rig.ask_ok('MEASURE', size=M.T.MEASURE_SIZE)
+    check(struct.unpack_from('<I', d, 49)[0] == 60 and d[64] & 1, 'MEASURE frequency %d marker %d'
+          % (struct.unpack_from('<I', d, 49)[0], d[64]))
+    rig.ask_ok('LCR_SET', bytes([6, 2]))                      # speed 2: T_win 250 ms
+    t1 = rig.m.now()
+    rig.run(2.0)
+    fast = rig.probe.normal(t1 + 0.3)
+    check(len(fast) >= 4 and all(p['n'] >= 3 for p in fast), 'speed 2 at 60 Hz: N %r' % [p['n'] for p in fast])
+    ns = sorted({p['n'] for p in fast})
+    # the calibration start on screen 3 (menu item 5): 100 Hz before any store
+    stores = []
+    a_bb64 = rig.s['fn_0800bb64'] & ~1
+    rig.m.uc.hook_add(UC_HOOK_CODE, lambda uc, a, s, u: stores.append(rig.rd(V_FREQ)), begin=a_bb64, end=a_bb64)
+    settings_item(rig, 5)
+    tap(rig, KEY_OK)
+    tap(rig, KEY_OK)
+    wait_until(rig, lambda: rig.rd(V_CAL_RUN) != 0, 3.0, 'calibration start')
+    check(rig.rd(V_FREQ) == 100, 'calibration start: frequency %d' % rig.rd(V_FREQ))
+    rig.run(2.0)
+    check(60 not in stores, 'fn_0800bb64 entered at 60 Hz: %r' % stores)
+    # fn_0800a030 and the key cycle, direct
+    want = {60: 110000000, 100: 110000000, 120: 110000000, 1000: 110000000, 10000: 11000000, 100000: 1100000}
+    for f, w in want.items():
+        rig.wr(V_FREQ, f)
+        check(fcall(rig, 'fn_0800a030') == w, 'fn_0800a030 at %d Hz: %d' % (f, fcall(rig, 'fn_0800a030')))
+    cyc = [60, 100, 120, 1000, 10000, 100000]
+    f10 = entry_hook(rig, 'fn_08009f10')
+    rig.wr(V_DISP_A8, 0)
+    for i, f in enumerate(cyc):
+        for step, w in ((1, cyc[(i + 1) % 6]), (-1, cyc[(i - 1) % 6]), (0, f)):
+            rig.wr(V_FREQ, f)
+            n0 = len(f10)
+            fcall(rig, 'fn_0800d940', step & 0xFFFFFFFF)
+            check(rig.rd(V_FREQ) == w and len(f10) == n0 + 1, 'key step %d from %d: %d (fn_08009f10 %d)'
+                  % (step, f, rig.rd(V_FREQ), len(f10) - n0))
+    rig.wr(V_FREQ, 50)
+    fcall(rig, 'fn_0800d940', 1)
+    check(rig.rd(V_FREQ) == 50, 'unknown word changed to %d' % rig.rd(V_FREQ))
+    rig.watch.check(what='f29')
+    vr = VRig(DutSource('R', 1000.0))
+    vr.wr(V_FREQ, 60)
+    r = vr.m.call(vr.s['fn_0800a030'])
+    check(r == 1100000, 'V1.1 fn_0800a030 at 60 Hz: %r' % r)
+    NOTES.append('f29: %d windows at 60 Hz speed 1, N %r at speed 2 (%d windows), V1.1 OL limit at 60 Hz %d'
+                 % (len(pubs), ns, len(fast), r))
+    return True
+
+
+def main():
+    sel = sys.argv[1:]
+    bad = run = 0
+    for fn in CASES:
+        if sel and not any(fn.__name__.startswith(p) for p in sel):
+            continue
+        run += 1
+        try:
+            ok = fn()
+            msg = ''
+        except AssertionError as e:
+            ok, msg = False, str(e)
+        except Exception as e:      # a failing case must not hide the others
+            import traceback
+            traceback.print_exc()
+            ok, msg = False, 'raised %r' % e
+        print('%-52s %s %s' % (fn.__name__, 'ok' if ok else 'FAIL', msg), flush=True)
+        bad += not ok
+    for n in NOTES:
+        print('  note:', n)
+    print('%d tests, %d failed' % (run, bad))
+    sys.exit(1 if bad else 0)
+
+
+if __name__ == '__main__':
+    main()

@@ -617,7 +617,12 @@ fn_08027ff4:
 	ldr.w	r0, [r4, #0xb94]	@ word 0x20005110
 	cbz	r0, .L080281e6
 	str.w	r5, [r4, #0xb94]	@ clear it
+.ifdef OWN
+	nop.w				@ 0x080281E2: no vendor compare; own/cmp.s judges every
+					@ publish (meas_tail) and steps its beeper in ctl_loop (S2.8)
+.else
 	bl	fn_0800a7ec
+.endif
 .L080281e6:
 	ldr.w	r0, [r4, #0xb98]	@ word 0x20005114
 	cmp	r0, #0

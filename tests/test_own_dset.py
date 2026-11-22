@@ -164,7 +164,8 @@ KEY_BIT = {0x0004: 2, 0x0008: 3, 0x0010: 4, 0x0020: 5, 0x0040: 6, 0x0080: 7, 0x0
 LONG = 1100                                     # ctl.inc LONG_MS
 LEVELS = (0x3DCCCCCD, 0x3E99999A, 0x3F19999A)   # ctl.s tab_level
 BIASES = (0x00000000, 0x3F000000)               # ctl.s tab_bias
-FREQS = (100, 120, 1000, 10000, 100000)         # ctl.s tab_freq
+FREQS = (100, 120, 1000, 10000, 100000, 60)     # ctl.s tab_freq (index 5 = 60 Hz, the key cycle's
+                                                # sixth value, MEASUREMENT_FIX_DESIGN.md S2.12)
 # LCR_SET settings: id -> (word, key mask, hold, values)
 LCR = {0: (V_FUNC, 0x0200, 0, (0, 1, 2, 3, 4)), 1: (V_SECONDARY, 0x0040, 0, (0, 1, 2, 3, 4)),
        2: (V_FREQ, 0x2000, 0, FREQS), 3: (V_LEVEL, 0x0800, 0, LEVELS), 4: (V_BIAS, 0x0100, 0, BIASES),
@@ -936,6 +937,14 @@ def d04_screen_round_trips_heap():
         u = heap_walk(dict(ram=bytes(r.m.uc.mem_read(VRAM_LO, VRAM_N))))
         return len(u), sum(s for a, s in u)
     rig = base()
+    # one warm-up round trip via 3 and via 2 first: the rebuilt measure screen's row-0 glyphs can
+    # carry the image recolour style entries of fmt.s own_row_draw (keys 0x47 / 0x48, 7 entries
+    # of 20 -> 32 bytes, MEASUREMENT_FIX_DESIGN.md S2.1), which the glyphs of the first build never
+    # had; they belong to live objects and are freed with them, and from then on every round trip
+    # gives the same heap (measured: 7696 bytes before, 7780 after the first and the second trip)
+    for t in (3, 1, 2, 1):
+        st, s = rig.ask('SCREEN', bytes([t]))
+        check(st == S_OK and rig.rd(V_SCREEN) == t, 'warm-up via %d: status %d' % (t, st))
     u0 = live(rig)
     for mid in (3, 2):
         for k in range(50):

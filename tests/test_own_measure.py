@@ -629,7 +629,10 @@ def vendor_bin(rig, x, k):
 def m03_dft():
     """S1.2 at k = 1 / 4 / 16 (1 kHz, 10 kHz, 100 kHz, R 1 kohm, both channels in band 1500..3600 p-p):
     for captured buffers the own bin equals the vendor fn_080069dc bin within B = 2^-16 sum|x|; S1 equals
-    the integer sum; sigma^2 >= 0 in every acquisition and within 1e-4 count^2 of the float64 residual."""
+    the integer sum; sigma^2 >= 0 in every acquisition and within 1e-4 count^2 + 2e-5 sigma^2 of the float64
+    residual (the design's 1e-4 is the model's bound for noise up to 1 count; a buffer with a large residual
+    (an acquisition out of band, the 100 kHz DAC images) adds the float32 summation error of 128 rounded
+    squares, at most 128 * 2^-24 = 7.6e-6 of the sum, and the rounding of each residual term)."""
     for f in (1000, 10000, 100000):
         k = kbin(f)
         rig = own_rig(DutSource('R', 1000.0, noise_lsb=1.0), freq=f)
@@ -642,7 +645,7 @@ def m03_dft():
                 check(s1 == sum(x), '%d Hz %s: S1 %d, sum %d' % (f, ch, s1, sum(x)))
                 check(sig >= 0.0, '%d Hz %s: sigma^2 %r' % (f, ch, sig))
                 X64, s64 = dft64(x, k)
-                check(abs(sig - s64) <= 1e-4, '%d Hz %s: sigma^2 %.6f, float64 %.6f' % (f, ch, sig, s64))
+                check(abs(sig - s64) <= 1e-4 + 2e-5 * s64, '%d Hz %s: sigma^2 %.6f, float64 %.6f' % (f, ch, sig, s64))
             if all(1500 <= max(b) - min(b) <= 3600 for b in (a['v'], a['i'])):
                 inband.append(a)
         check(len(inband) >= 4, '%d Hz: %d in-band acquisitions' % (f, len(inband)))
@@ -1119,8 +1122,24 @@ def m10_unfolded_theta():
 
 # ---------------------------------------------------------------- m11 contract
 
-def expect_words(rig, p):
-    """Every output word of a publish from its sums and K (design section 2 / S1.8), float64."""
+def serpar_rule(zc, sp):
+    """S2.6 (D4, stage 2): circuit auto with the state sp[0] (0 undecided, 1 series, 2 parallel): series
+    goes parallel above 10 kohm, parallel goes series below 1 kohm, undecided decides at 3162.28 ohm
+    (float32 constants of meas.s). Returns True for series and updates sp[0]."""
+    s = sp[0]
+    if s == 1:
+        ser = not zc > 10000.0
+    elif s == 2:
+        ser = zc < 1000.0
+    else:
+        ser = not zc > struct.unpack('<f', struct.pack('<I', 0x4545A471))[0]
+    sp[0] = 1 if ser else 2
+    return ser
+
+
+def expect_words(rig, p, sp=None):
+    """Every output word of a publish from its sums and K (design section 2 / S1.8), float64; series /
+    parallel by serpar_rule with the state list sp (one per run from its start: undecided)."""
     sv = complex(p['sum'][0], p['sum'][1])
     si = complex(p['sum'][2], p['sum'][3])
     zb = p['k'] * sv / si
@@ -1142,7 +1161,8 @@ def expect_words(rig, p):
              CP=-1e9 / (w * xp), LS=xs * 1e6 / w, LP=xp * 1e6 / w,
              Q=0.0 if xs == 0 else math.inf if rs == 0 else abs(xs / rs),
              D=0.0 if rs == 0 else math.inf if xs == 0 else abs(rs / xs), X=xs)
-    ser = rig.rd(V_CIRCUIT) == 1 or (rig.rd(V_CIRCUIT) == 0 and struct.unpack('<i', struct.pack('<f', zc))[0] < 0x49864700)
+    circ = rig.rd(V_CIRCUIT)
+    ser = circ == 1 or (circ == 0 and serpar_rule(zc, sp if sp is not None else [0]))
     e['R'], e['C'], e['L'] = (rs, e['CS'], e['LS']) if ser else (rp, e['CP'], e['LP'])
     e['serpar'] = 0 if ser else 1
     return e
@@ -1151,8 +1171,8 @@ def expect_words(rig, p):
 @case
 def m11_contract():
     """Section 2 / S1.8: every output word against the formulas from the published sums (float64,
-    relative 2e-5), 0x200050C8 = Xs in series and in parallel mode, series below / parallel above 1.1 Mohm
-    (R 1 kohm, C 100 nF, R 2 Mohm); the no-reading path (ranging that never settles: I at p-p 1400 on even
+    relative 2e-5), 0x200050C8 = Xs in series and in parallel mode, series / parallel by the S2.6 rule of
+    stage 2 (serpar_rule; R 1 kohm, C 100 nF, R 2 Mohm); the no-reading path (ranging that never settles: I at p-p 1400 on even
     and 3700 on odd c6 codes, forced range): the 1e10 / -400 set after 2 s once, then 0x20001208 = 0;
     MEASURE_DONE (event 0x95) once per window whose |Z| / theta bits changed (USB, DTR set)."""
     for src, name in ((DutSource('R', 1000.0, noise_lsb=0.5), 'R 1 kohm'), (DutSource('C', 100e-9, noise_lsb=0.5), 'C 100 nF'),
@@ -1161,8 +1181,9 @@ def m11_contract():
         rig.run(2.0)
         pubs = rig.probe.normal()
         check(len(pubs) >= 2, 'm11 %s: %d windows' % (name, len(pubs)))
+        sp = [0]
         for p in pubs:
-            e = expect_words(rig, p)
+            e = expect_words(rig, p, sp)
             for kk in ('Z', 'TH', 'RS', 'XS', 'RP', 'XP', 'CS', 'CP', 'LS', 'LP', 'Q', 'D', 'X', 'R', 'C', 'L'):
                 got, want = u32f(p[kk]), e[kk]
                 ok = (math.isinf(want) and got == want) or abs(got - want) <= 2e-5 * abs(want) + (1e-3 if kk == 'TH' else 1e-30)
@@ -1472,12 +1493,17 @@ def m14_handshake():
     rig.run(0.5)
     used_after_own_request(rig, 'm14 (c)')
     # (e) wrap: G written before a restart (the Func key: fn_08009f10); the restart path's request
-    # sets G_exp = 0xFFFFFFFF
+    # sets G_exp = G + 1 = 0xFFFFFFFF, or 0 when the re-arm of the restart's own C4 = 1 (fn_08007bdc,
+    # measure_32.s 240) is served before own_measure sees the restart (it counts G to 0xFFFFFFFF
+    # first; which one comes first depends on the length of the key handler's pass). Both cross the
+    # wrap 0xFFFFFFFF -> 0 at the next re-arms, which the checks after it require.
     na = len(rig.probe.arms)
     rig.wr(OWN_MEAS + MO['G'], 0xFFFFFFFE)
     tap(rig, KEY_FUNC)
-    check(any(g == 0xFFFFFFFE for _, g in rig.probe.arms[na:]), 'm14 (e): no request with G_exp 0xFFFFFFFF: %r'
-          % [hex(g) for _, g in rig.probe.arms[na:na + 4]])
+    wrap_arms = [g for _, g in rig.probe.arms[na:na + 4]]
+    check(wrap_arms and wrap_arms[0] in (0xFFFFFFFE, 0xFFFFFFFF), 'm14 (e): the restart request at G %r'
+          % [hex(g) for g in wrap_arms])
+    NOTES.append('m14 (e): the restart request at G 0x%08X (G_exp 0x%08X)' % (wrap_arms[0], (wrap_arms[0] + 1) & 0xFFFFFFFF))
     n0 = len(rig.probe.acqs)
     rig.run(0.5)
     check(mo(rig, 'G') < 0x1000 and len(rig.probe.acqs) > n0 + 5, 'm14 (e): G 0x%08X, %d acquisitions after the wrap'
