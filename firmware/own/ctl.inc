@@ -1,6 +1,6 @@
-@ ctl.inc - private constants of the control core (own/ctl.s and own/cmd.s), included after
-@ own/own.inc by those two files and by own/power.s (which reads words of the control core,
-@ never writes them). Part of the FNIRSI LC1020E firmware rewrite (assembly).
+@ ctl.inc - private constants of the control core (own/ctl.s, own/cmd.s and own/dset.s),
+@ included after own/own.inc by those three files and by own/power.s (which reads words of the
+@ control core, never writes them). Part of the FNIRSI LC1020E firmware rewrite (assembly).
 @
 @ Only .equ lines and one .if check: nothing here emits code, data or a section.
 @ The RAM of the control core is the area O_CTL of own.inc (0x2EC0 bytes from OWN_CTL); the
@@ -68,6 +68,9 @@
         .equ    CT_J_NSTEPS,    0x0DC           @ steps in the program
         .equ    CT_J_GUARD,     0x0E0           @ 1: the guard refused an action of this job
         .equ    CT_J_STEPT,     0x0E4           @ tick at the start of the current step
+@ direct change (DIRECT_SET_DESIGN.md revision 2; own/dset.s)
+        .equ    CT_DS_OP,       0x0E8           @ command (C_*) of the pending change, 0 none
+        .equ    CT_DS_A,        0x0EC           @ its first argument (dset.s ds_check)
 @ BOOT_* writer
         .equ    CT_B_STATE,     0x0F0           @ BS_*
         .equ    CT_B_SLOT,      0x0F4           @ slot base being written (SLOT_A / SLOT_B)
@@ -80,6 +83,10 @@
 @ event queue
         .equ    CT_EQ_HEAD,     0x10C           @ index of the oldest entry
         .equ    CT_EQ_COUNT,    0x110           @ entries in the queue
+@ direct change, further arguments (dset.s ds_check)
+        .equ    CT_DS_B,        0x114           @ second argument
+        .equ    CT_DS_C,        0x118           @ third argument
+        .equ    CT_DS_D,        0x11C           @ fourth argument
 @ records of the starter (rec_scan), the cell being written
         .equ    CT_TAB,         0x120           @ 3 x {sequence, state, version, cell address}
         .equ    CT_CELL,        0x150           @ 16 bytes
@@ -141,36 +148,25 @@
         .equ    KEY_CODE_HELD,  0xFE
         .equ    KEY_CODE_REL,   0xFF
 
-@ job programs: step = op word (op, kind, max, reader), keys (a | b << 16), arg, target
+@ job programs: step = op word (op, kind, max, 0), keys (a | b << 16), arg, target
         .equ    PS_OP,          0
         .equ    PS_KIND,        1
         .equ    PS_MAX,         2
-        .equ    PS_READER,      3
         .equ    PS_KEYS,        4
-        .equ    PS_ARG,         8
+        .equ    PS_ARG,         8               @ OP_PRESS / OP_CHECK: address of the word read
         .equ    PS_TARGET,      12
         .equ    OP_END,         0               @ answer and finish
         .equ    OP_SCREEN,      1               @ go to screen target
-        .equ    OP_PRESS,       2               @ press until read(arg) is near target
+        .equ    OP_PRESS,       2               @ press until the word at arg is target
         .equ    OP_KEY,         3               @ one press of key a (arg = hold ms or 0)
-        .equ    OP_CHECK,       4               @ read(arg) = target, else status key a
+        .equ    OP_CHECK,       4               @ word at arg = target, else status key a
         .equ    OP_NODIALOG,    5               @ long key 8 until word 0x200011AC = 0
         .equ    OP_WAITCAL,     6               @ wait for the calibration's end
         .equ    OP_ERASE,       7               @ BOOT_BEGIN: one slot page per pass
+        .equ    OP_DIRECT,      8               @ wait for the direct change (dset.s ds_run)
         .equ    KB_LONG,        0x01            @ kind: long press (hold LONG_MS)
-        .equ    KB_TOL10,       0x10            @ kind: done when |target - value| < 10
-        .equ    KB_TOL100,      0x20            @ kind: done when |target - value| < 100
         .equ    KB_GOFF,        0x80            @ kind: guard off, no refusal (the command's
                                                 @ own path, USB_CONTROL_DESIGN.md 4.3 / 4.4)
-@ readers (PS_READER)
-        .equ    RD_WORD,        0               @ word at arg
-        .equ    RD_BYTE,        1               @ byte at arg
-        .equ    RD_LEVEL,       2               @ level float 0x20001138 as index 0..2 (3 other)
-        .equ    RD_BIAS,        3               @ bias float 0x2000113C as index 0..1 (2 other)
-        .equ    RD_FREQ,        4               @ frequency 0x20001144 as index 0..4 (5 other)
-        .equ    RD_DIGIT,       5               @ sorting nominal: digit arg (0..4) or, arg 5,
-                                                @ the scale word 0x2000119C
-        .equ    RD_TENTHS,      6               @ tolerance 0x20001188 in tenths of a percent
 @ answer kinds (CT_J_ANSWER)
         .equ    AN_STATE,       0               @ STATE record
         .equ    AN_MEASURE,     1               @ MEASURE record
@@ -181,6 +177,10 @@
         .equ    JOB_LIMIT_MS,   20000           @ time limit of a key job
         .equ    CAL_LIMIT_MS,   120000          @ time limit of CALIBRATE
         .equ    ERASE_LIMIT_MS, 10000           @ time limit of BOOT_BEGIN
+        .equ    DS_LIMIT_MS,    2000            @ time limit of a direct change (a key held)
+@ results of ds_check (dset.s); the refusals are the status codes S_* (2..6)
+        .equ    DS_GO,          0               @ a change to make
+        .equ    DS_SAME,        1               @ the value is already set: nothing to change
 
 @ BOOT_* writer states (CT_B_STATE)
         .equ    BS_NONE,        0
@@ -196,8 +196,11 @@
         .equ    CONFIRM_OK,     0x4F4B          @ "OK": confirmation of every confirming command
                                                 @ except POWER_OFF (USB_CONTROL_DESIGN.md 9)
         .equ    ST_DEFER,       0xFF            @ handler result: the answer comes from the job
-        .equ    CAPS_ALL,       0x000FFFFF      @ capability bits 0..19 (4.8; bit 20, SETUP_LANGUAGE,
-                                                @ clear: English only)
+                                                @ (or was made pending by job_answer already)
+        .equ    CAPS_ALL,       0x002FFFFF      @ capability bits 0..19 (4.8; bit 20, SETUP_LANGUAGE,
+                                                @ clear: English only) and bit 21: SCREEN, LCR_SET,
+                                                @ HOLD, SETTINGS_SET, COMPARE_SET set directly
+                                                @ (DIRECT_SET_DESIGN.md revision 2)
         .equ    ID_CAL_TABLES,  0xFFFE          @ SETTING_CHANGED id: words changed in the
                                                 @ calibration tables (value = their number)
         .equ    V_SCALE,        0x2000119C      @ sorting nominal unit / scale index 0..3
@@ -211,6 +214,17 @@
         .equ    V_TICK,         0x20000480      @ GUI tick, +10 per SysTick (fn_080277a0)
         .equ    V_ROOT_MEAS,    0x200001D8      @ root object of the measure screens
         .equ    V_ROOT_SET,     0x20000014      @ root object of the settings screen
+        .equ    V_OBJS,         0x200001D4      @ object words of the measure screens (fn_0800ca2c):
+        .equ    OB_HOLD,        0x08            @   +0x08 the HOLD object 0x200001DC
+        .equ    OB_SPEED,       0x0C            @   +0x0C the speed icon 0x200001E0
+        .equ    OB_CIRCUIT,     0x10            @   +0x10 the circuit icon 0x200001E4
+        .equ    OB_SECOND,      0x14            @   +0x14 the secondary picture 0x200001E8
+        .equ    OB_FUNC_TXT,    0x1C            @   +0x1C the Func text 0x200001F0
+        .equ    OB_FUNC_PIC,    0x28            @   +0x28 the Func picture 0x200001FC
+        .equ    V_MEAS_RESTART, 0x200011C4      @ byte: restart request of the DMA interrupt
+                                                @ (fn_080085d0; app_01.s 619 after hold off)
+        .equ    V_EVENT_511C,   0x2000511C      @ stored 0 by 0x08009400 for every event (app_01.s
+                                                @ 89); no reader in src/ or own/
         .equ    T_FUNC,         0x20000258      @ Func names: 6 pointers per language
         .equ    T_RANGE,        0x20000244      @ range names: one pointer per range
         .equ    T_CURSOR,       0x20000224      @ cursor labels: 4 pointers per language

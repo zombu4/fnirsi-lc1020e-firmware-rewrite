@@ -71,8 +71,9 @@ All multi-byte numbers are little-endian. `u8`, `u16`, `u32` are unsigned intege
 | 6 | refused for safety (section 7.3) |
 | 7 | CRC or length mismatch of transferred data (settings block, slot file) |
 
-Commands that run through the meter's own keys (section 4.1) answer their record also when the
-status is not 0: the record then shows the state the meter was left in.
+Commands that run through the meter's own keys (section 4.1) and the direct commands (SCREEN,
+LCR_SET, HOLD, SETTINGS_SET, COMPARE_SET) answer their record also when the status is not 0 (status
+2 excepted: no data): the record then shows the state the meter was left in.
 
 ## 4. Processing and timing
 
@@ -80,18 +81,27 @@ status is not 0: the record then shows the state the meter was left in.
 
 The control channel runs as one step of the meter's main loop, once per pass, after the watchdog
 feed and the timer walk: (1) one step of a running key job, (2) a pending key injection is posted,
-(3) the meter's key handler runs, (4) events are detected and the screenshot and streams advance,
-(5) received bytes are parsed, (6) a pending answer is sent. No step waits.
+(3) the meter's key handler runs, or, in a pass with no key event and no key held, a pending
+direct change, (4) events are detected and the screenshot and streams advance, (5) received bytes
+are parsed, (6) a pending answer is sent. No step waits.
 
 - At most one request is taken per pass, and none while an answer is still pending, a key job or a
   pending action (restart, update mode, power-off) runs, or a screenshot capture runs. Bytes sent
   meanwhile wait in the receive buffer. Hosts send the next request only after the answer of the
   previous one (and, for SCREENSHOT, after the capture has ended).
-- Commands that change something through the meter's keys (SCREEN, KEY, LCR_SET, HOLD,
-  COMPARE_SET, CALIBRATE, SETTINGS_SET) run as a **job**: a program of steps, one
-  step per pass, each step either pressing one key through the injection (section 7), waiting for
-  the meter to handle it, or checking a RAM word. A job answers when its program ends or fails, or
-  when its time limit passes (status 4). BOOT_BEGIN is a job too (one page erase per pass).
+- Commands that change something through the meter's keys (KEY, CALIBRATE) run as a **job**: a
+  program of steps, one step per pass, each step either pressing one key through the injection
+  (section 7), waiting for the meter to handle it, or checking a RAM word. A job answers when its
+  program ends or fails, or when its time limit passes (status 4). BOOT_BEGIN is a job too (one
+  page erase per pass).
+- SCREEN, LCR_SET, HOLD, SETTINGS_SET and COMPARE_SET are **direct** (capability bit 21, section
+  14): the request is checked (section 5.3.4) and the requested value is set at once, in step (3)
+  of the next pass that has no key event and no key held, with the same follow-up work the
+  meter's own key handler does for the press that lands on that value (redraws, the measurement
+  restart, the backlight), without key presses, beeps or intermediate values, and without
+  changing the screen (SETTINGS_SET and COMPARE_SET stay on the screen shown). The answer comes in
+  the pass after the change. A value that is already set is answered at once with nothing changed.
+  Firmware without bit 21 runs these five as jobs of key presses.
 
 ### 4.2 Time base
 
@@ -105,9 +115,8 @@ is 1 ms.
 |---|---|---|
 | every command not listed here | answered in the pass of the request | 1.5 s |
 | SETTINGS_SAVE, RESTORE_DEFAULTS, SETTINGS_RESTORE_B / ACCEPT_A / ACCEPT_B / ACCEPT_DEFAULTS, the last SETTINGS_WRITE_BLOCK chunk | one save inside the pass: up to 1.5 s (four page erases and the programming of two copies, one retry each; the watchdog is fed inside) | 4 s |
-| SCREEN, LCR_SET, HOLD, SETTINGS_SET | job, 20 000 ms | 23 s |
+| SCREEN, LCR_SET, HOLD, SETTINGS_SET, COMPARE_SET | direct (bit 21): the next pass without a key event or a held key, at most 2000 ms (status 4 when a key stays held that long; nothing is changed then) | 4 s with bit 21 set; without it (older firmware: jobs of key presses) 23 s, COMPARE_SET 63 s |
 | KEY | job, 20 000 ms + the hold time | 23 s + hold |
-| COMPARE_SET | job, 60 000 ms (it goes through the sorting editor row by row; about 25 s for a typical change, 33 s for the longest: every digit and the tolerance stepped through their whole range) | 63 s |
 | CALIBRATE | job, 120 000 ms | 126 s |
 | BOOT_BEGIN | job, 10 000 ms (12 pages, one erase per pass) | 13 s |
 | BOOT_INSTALL | one record write (with a page erase when the record page is full) | 4 s |
@@ -141,7 +150,7 @@ is their data length. RESET, UPDATE_MODE and the BOOT_* commands take no confirm
 |---|---|---|---|
 | 0x10 | STATE | - | STATE record (section 6.1), 32 bytes |
 | 0x11 | STREAM | period u16 ms, 0 stops | none; STATE records follow as stream frames cmd 0x10 every period (section 11) |
-| 0x12 | SCREEN | screen u8: 1 measure, 2 compare, 3 settings | STATE. Job: long presses of key 0x400 (screen 1 <-> 2) or key 0x008 (to and from the settings screen; it first closes an open dialog), at most 8 presses. Screen 0 (the vendor's language chooser) never occurs: the firmware is English only (section 5.6) |
+| 0x12 | SCREEN | screen u8: 1 measure, 2 compare, 3 settings | STATE. Direct (section 5.3.4): the meter's own screen builder of the requested screen runs (from the settings screen an open sorting dialog is closed first). Status 6 from the settings screen while the calibration dialog (menu item 5) or the restore-defaults dialog (item 6) is open; status 3 in screen 0 (the vendor's language chooser; it never occurs: the firmware is English only, section 5.6) |
 | 0x13 | KEY | key bit u8 0..13, hold u16 ms (optional, 0 or missing: short press) | STATE after the meter handled the key. Status 6 when the key is refused (section 7.3) or the guard stopped a flash write or defaults change; status 4 when a physical key ended the injection or the time limit passed; status 3 in powered-off mode |
 
 ### 5.3 Measurement
@@ -149,26 +158,27 @@ is their data length. RESET, UPDATE_MODE and the BOOT_* commands take no confirm
 | cmd | Name | Request | Answer |
 |---|---|---|---|
 | 0x20 | LCR_TABLES | list id u8 (0..7), or nothing | with an id: the list (section 8.1); without: the number of lists u8 (8) |
-| 0x21 | LCR_SET | setting u8 (0 Func, 1 secondary, 2 frequency, 3 level, 4 bias, 5 range, 6 speed, 7 circuit mode), value index u8 (below the list's count) | MEASURE (section 6.2). Screens 1 and 2 only (else status 3). Job: the setting's key is pressed until the value is reached (key table below); a value the meter does not reach ends with status 3 (level 0.6 V while bias 0.5 V is set; Func in the compare screen) |
+| 0x21 | LCR_SET | setting u8 (0 Func, 1 secondary, 2 frequency, 3 level, 4 bias, 5 range, 6 speed, 7 circuit mode), value index u8 (below the list's count) | MEASURE (section 6.2). Screens 1 and 2 only (else status 3). Direct (table below, section 5.3.4); a value the meter's keys do not reach is refused with status 3 and nothing changed: level 0.6 V while the bias is 0.1 V or more (the bias float's bits 0x3DCCCCCD or above), Func AUTO or Z in the compare screen |
 | 0x22 | MEASURE | - | MEASURE record, 64 bytes |
 | 0x23 | MEASURE_STREAM | u16: 0 = a frame for every new result, 0xFFFF = stop, else period in ms | none; MEASURE records follow as stream frames cmd 0x22 |
 | 0x24 | COMPARE | - | COMPARE record (section 6.3), 29 bytes |
-| 0x25 | COMPARE_SET | nominal f32, tolerance f32 (percent), warn type u8, warn sound u8, warn LED u8 (11 bytes, all required) | COMPARE. Job through the sorting editor (section 5.3.2) |
-| 0x26 | HOLD | u8: 0 off, 1 on | STATE. Screens 1 and 2 only (else status 3). Job: key 0x400 until the hold word 0x200011A4 equals the request, at most 3 presses |
+| 0x25 | COMPARE_SET | nominal f32, tolerance f32 (percent), warn type u8, warn sound u8, warn LED u8 (11 bytes, all required) | COMPARE. Direct, in screens 1..3 (section 5.3.1): the values as the sorting editor stores them; the screen stays; RAM only |
+| 0x26 | HOLD | u8: 0 off, 1 on | STATE. Screens 1 and 2 only (else status 3). Direct: the hold word 0x200011A4 and the HOLD mark, as key 0x400 sets them |
 | 0x27 | CALIBRATE | type u8, confirmation u16 at byte 1 (3 bytes) | calibration status u8 (0x200050EC: 0 start, 1 busy, 2 finish, 3 fail), type u8 (0x200050E0), save status u32 (section 9.1); 6 bytes, with every status (section 5.3.3) |
 
-Settings of LCR_SET (keys from the meter's measure-screen handler 0x08009614):
+Settings of LCR_SET (the work of the meter's measure-screen handler 0x08009614 for the press of
+its key that lands on the value; the key is named for reference, it is not pressed):
 
-| Setting | Values (index: value) | Key | Presses at most |
+| Setting | Values (index: value) | Key | Follow-up work of the direct change |
 |---|---|---|---|
-| 0 Func | 0 AUTO, 1 R, 2 C, 3 L, 4 Z (word 0x20001148) | 0x0200 | 6 |
-| 1 secondary | 0 R, 1 X, 2 D, 3 Q, 4 theta (word 0x200011E8) | 0x0040 | 6 |
-| 2 frequency | 0: 100 Hz, 1: 120 Hz, 2: 1 kHz, 3: 10 kHz, 4: 100 kHz (word 0x20001144) | 0x2000 | 6 |
-| 3 level | 0: 0.1 V, 1: 0.3 V, 2: 0.6 V (float 0x20001138) | 0x0800 | 4 |
-| 4 bias | 0: 0 V, 1: 0.5 V (float 0x2000113C) | 0x0100 | 3 |
-| 5 range | 0 AUTO, 1: 100 ohm, 2: 1 kohm, 3: 10 kohm, 4: 100 kohm (word 0x2000114C) | 0x0080 | 6 |
-| 6 speed | 0, 1, 2 (word 0x20001150) | 0x1000 | 4 |
-| 7 circuit mode | 0 auto, 1 series, 2 parallel (word 0x20001154) | 0x1000 long | 4 |
+| 0 Func | 0 AUTO, 1 R, 2 C, 3 L, 4 Z (word 0x20001148) | 0x0200 | AUTO: the Func picture; R..Z: main row and secondary = the value (R -> X, C -> D, L -> Q, Z -> theta) with their pictures; then the Func text, the measurement restart; in the compare screen its rule (C / L kept as the compare quantity, any other value: R); the result display |
+| 1 secondary | 0 R, 1 X, 2 D, 3 Q, 4 theta (word 0x200011E8) | 0x0040 | the result display |
+| 2 frequency | 0: 100 Hz, 1: 120 Hz, 2: 1 kHz, 3: 10 kHz, 4: 100 kHz (word 0x20001144) | 0x2000 | cursor on FREQ, the measurement restart, the cursor row redrawn |
+| 3 level | 0: 0.1 V, 1: 0.3 V, 2: 0.6 V (float 0x20001138) | 0x0800 | cursor on AMP, the measurement restart, the cursor row |
+| 4 bias | 0: 0 V, 1: 0.5 V (float 0x2000113C) | 0x0100 | cursor on BIAS; 0.5 V with the level 0.6 V sets the level to 0.3 V (as the key does); the measurement restart, the cursor row |
+| 5 range | 0 AUTO, 1: 100 ohm, 2: 1 kohm, 3: 10 kohm, 4: 100 kohm (word 0x2000114C) | 0x0080 | cursor on RANGE, the cursor row (no restart, as the key) |
+| 6 speed | 0, 1, 2 (word 0x20001150) | 0x1000 | the speed icon, the measurement restart |
+| 7 circuit mode | 0 auto, 1 series, 2 parallel (word 0x20001154) | 0x1000 long | the circuit icon |
 
 #### 5.3.1 Limits of COMPARE_SET
 
@@ -177,22 +187,19 @@ Settings of LCR_SET (keys from the meter's measure-screen handler 0x08009614):
   sound, LED: 0 or 1 each (else status 2).
 - The sorting editor holds the nominal as a scale (0.001, 1, 1000 or 1e6) and five digits. The
   scale is chosen by the nominal: below 1 -> 0.001, below 1000 -> 1, below 1e6 -> 1000, else 1e6;
-  the digit count is round(nominal x 100 / scale), limited to 100..99999. The tolerance is set in
-  tenths of a percent (round(tolerance x 10), at most 999). The value the meter stored is in the
-  COMPARE answer.
+  the digit count is round(nominal x 100 / scale), limited to 100..99999. COMPARE_SET stores the
+  scale index (word 0x2000119C) and the nominal float(count) / 100 x scale (the editor's formula
+  for a digit), only when the scale or the count differ from the stored ones. The tolerance is set
+  in tenths of a percent (round(tolerance x 10), at most 999) and stored as float(tenths) / 10,
+  only when the tenths differ. The value the meter stored is in the COMPARE answer.
+- In the settings screen with the sorting dialog open, the dialog is redrawn; in the compare screen
+  the deviation, OK / NG and the nominal are recomputed and redrawn.
 
 #### 5.3.2 What the jobs press
 
-- COMPARE_SET: settings screen, no dialog, menu item 0 (Sorting), key 0x008 opens the dialog
-  (checked: status 3 when it did not open); row 0: scale, then the five digits; row 1: the
-  tolerance digits; rows 2..4: warn type, sound, LED (keys 0x004 / 0x010); every row is left with a
-  long key 0x008, the dialog is closed at the end. The settings are changed in RAM only (no save).
-- SETTINGS_SET ids 0..2: settings screen, menu item id + 2 (keys 0x020 / 0x002; the menu has no
-  item 1, section 7.1), the value with keys 0x004 / 0x010. Ids 3..5: the sorting dialog, row
-  id - 1. RAM only.
 - Where a step has two keys, the job presses one and swaps them when the value did not move or
   moved away from the target. Every step has a press limit; a value not reached within it ends the
-  job with status 3.
+  job with status 3. CALIBRATE (5.3.3) is the only command with such a program; KEY presses one key.
 
 #### 5.3.3 CALIBRATE
 
@@ -210,12 +217,47 @@ Settings of LCR_SET (keys from the meter's measure-screen handler 0x08009614):
   (after a finished calibration: the result of the meter's own save of it).
 - While CALIBRATE runs, every other request waits (section 4.1) and every injected key is refused.
 
+#### 5.3.4 Direct changes: checks and differences from the jobs
+
+Checks, in this order, at the request and again when the change is to run (a physical key in
+between may have changed the state); a refusal changes nothing and answers the record:
+- powered-off mode, or the meter's power-off path ran (its save is done; a change now would be
+  lost): status 3;
+- a calibration runs: status 6;
+- the screen is not 1..3: status 3; LCR_SET and HOLD outside screens 1 and 2: status 3;
+- the value is set already: status 0 at once, nothing changed;
+- the refusals of the command (LCR_SET, SCREEN rows above).
+
+The change runs in a pass with no key event and no key held; a key held for 2000 ms ends the
+command with status 4 and nothing changed (the change does not run later). No key event, no beep,
+no change of the busy flag of the long presses; SETTING_CHANGED and SCREEN_CHANGED events come as
+for any change (section 10).
+
+Differences from the results of the jobs of earlier firmware (firmware without bit 21):
+- SETTINGS_SET and COMPARE_SET no longer go to the settings screen: the screen stays, the range is
+  no longer set to AUTO (the settings screen's builder does that), and the effect of the sorting
+  dialog the jobs opened goes away: with Func AUTO or Z they set Func to R, and they wrote the
+  compare quantity and the main row; now these stay as they are.
+- SCREEN from the settings screen to the measure screen when it was entered from the compare
+  screen no longer passes the compare screen; the resulting state is the same.
+- LCR_SET Func R in the compare screen from C or L: the job's presses passed Z (secondary theta)
+  and the compare screen's rule set R; the direct change takes R itself (secondary X). The
+  difference shows only in the secondary field of STATE / MEASURE while the compare screen is
+  shown (the compare screen hides the secondary row; the measure screen sets the secondary from
+  Func again).
+- COMPARE_SET: the tolerance is float(tenths) / 10 instead of the editor's stepped value; the
+  nominal is always float(count) / 100 x scale (the job could leave the editor's rescaled value
+  after a scale change with every digit already in place; both are the same number to the last
+  bit or one bit apart).
+- No intermediate values: speed 2 -> 1 no longer passes 0, circuit mode 1 -> 0 no longer passes
+  parallel, frequency and level no longer restart the measurement once per press.
+
 ### 5.4 Settings and storage
 
 | cmd | Name | Request | Answer |
 |---|---|---|---|
 | 0x50 | SETTINGS_TABLES | setting id u8 (0..5), or nothing | with an id: the setting (section 8.2); without: the number of settings u8 (6) |
-| 0x51 | SETTINGS_SET | id u8, value u16 (3 bytes); the value must lie in min..max and on the step of SETTINGS_TABLES (else status 2) | STATE. Job through the menu keys (section 5.3.2); RAM only, nothing saved |
+| 0x51 | SETTINGS_SET | id u8, value u16 (3 bytes); the value must lie in min..max and on the step of SETTINGS_TABLES (else status 2) | STATE. Direct in screens 1..3 (section 5.3.4): the setting's word; brightness also sets the backlight at once; in the settings screen the menu rows and an open dialog are redrawn; the screen stays. RAM only, nothing saved |
 | 0x52 | SETTINGS_SAVE | confirmation | save status u32, save flags u32 (section 9). Answer status: 0 saved; 3 saves held or refused; 5 a flash step failed; 7 bad block |
 | 0x53 | CAL_READ | copy u8 (0 = A at 0x0807F000, 1 = B at 0x08066000), offset u16, length u16 (1..256), offset + length <= 0x1000 (5 bytes) | the bytes of that copy as they are in flash |
 | 0x54 | RESTORE_DEFAULTS | confirmation | save status u32, save flags u32. Runs the meter's defaults routine 0x0800B4C8(0) with the guard off (it saves once itself), then redraws (backlight, the measure screen built anew). The user calibration table becomes the factory one; the first-start flag and the language word stay 1 (section 5.6; V1.1 clears the flag and shows its language chooser at the next start). Status 3 while saves are held or a restart is pending, or while a calibration runs |
@@ -405,7 +447,8 @@ Empty cells: no function that this document specifies.
 ### 7.3 Refusals (status 6, nothing posted)
 
 Injected keys (KEY and every job step except the procedures listed below) are refused before they
-reach the meter when:
+reach the meter when (the direct commands press no key; their refusals are in section 5.3.4,
+with the same status 6 while a calibration runs and for SCREEN from the dialogs of items 5 and 6):
 
 | Condition (RAM words the meter's key handler reads) | Why | Use instead |
 |---|---|---|
@@ -415,8 +458,9 @@ reach the meter when:
 | key 0x0008 in screen 3 on menu item 5 (0x200011A8 = 5) | starts the calibration, which changes frequency, level, bias, speed and the calibration table before anything can stop it | CALIBRATE |
 | key 0x0008 in screen 3 on menu item 6 while a dialog is open (0x200011AC != 0) | confirms the restore of the defaults | RESTORE_DEFAULTS |
 
-Guard: while the meter's key handler processes an injected event, the settings save and the
-menu's call of the defaults routine return without acting; the job then answers status 6. A dialog
+Guard: while the meter's key handler processes an injected event, and while a direct change runs,
+the settings save and the menu's call of the defaults routine return without acting; the job or
+the direct command then answers status 6 (no direct change reaches either). A dialog
 opened by injected keys and confirmed with a physical key is a user action: the guard does not
 apply to physical keys.
 
@@ -426,8 +470,9 @@ UPDATE_MODE is refused with status 6 when the next slot bootloader would not hon
 
 ### 7.4 Jobs and the screen
 
-SETTINGS_SET, COMPARE_SET and CALIBRATE go to the settings screen and do not switch back. A host
-that wants the measure screen back sends SCREEN 1.
+CALIBRATE goes to the settings screen and does not switch back. A host that wants the measure
+screen back sends SCREEN 1. SETTINGS_SET and COMPARE_SET leave the screen as it is (with bit 21;
+the jobs of older firmware went to the settings screen).
 
 ### 7.5 Power-off
 
@@ -435,8 +480,9 @@ POWER_OFF posts the meter's own power-off event (0xFE with mask 0x0001) after th
 saves, beeps and releases its power latch. When the meter still runs 1000 ms after its power-off
 path ran (powered from USB), it enters powered-off mode: backlight off, event POWERED_OFF, STATE
 flag 10; the meter's key handler no longer runs, every key event is discarded except the power key,
-which restarts the meter (soft restart, section 7.6; it then starts normally and stays on). In powered-off mode KEY and the jobs answer
-status 3. The same mode follows a physical long press of the power key on USB power.
+which restarts the meter (soft restart, section 7.6; it then starts normally and stays on). In powered-off mode KEY, the jobs and the direct commands answer
+status 3; the direct commands answer status 3 already once the power-off path ran. The same mode
+follows a physical long press of the power key on USB power.
 
 ### 7.6 Restart
 
@@ -585,7 +631,7 @@ come then.
 
 | cmd | Name | Payload |
 |---|---|---|
-| 0x90 | KEY | mask u16, code u8 (1 short, 0xFE held, 0xFF released after a hold), source u8 (0 physical, 1 injected): every key event the meter's handler receives |
+| 0x90 | KEY | mask u16, code u8 (1 short, 0xFE held, 0xFF released after a hold), source u8 (0 physical, 1 injected): every key event the meter's handler receives (the direct commands post none) |
 | 0x91 | SCREEN_CHANGED | screen u8, previous screen u8 |
 | 0x93 | SETTING_CHANGED | id u16, value u32 (below) |
 | 0x94 | POWERED_OFF | none (section 7.5) |
@@ -701,12 +747,15 @@ BOOT_STATUS and BOOT_BEGIN (the free slot is erased and written again).
 
 ## 14. Capability bits and versioning
 
-INFO bits (bits 0..19 set in this firmware, 0x000FFFFF): 0 STATE / STREAM, 1 SCREEN, 2 KEY, 3
-LCR_TABLES / LCR_SET, 4 MEASURE / MEASURE_STREAM, 5 COMPARE / COMPARE_SET, 6 HOLD, 7 CALIBRATE,
+INFO bits (bits 0..19 and 21 set in this firmware, 0x002FFFFF): 0 STATE / STREAM, 1 SCREEN, 2 KEY,
+3 LCR_TABLES / LCR_SET, 4 MEASURE / MEASURE_STREAM, 5 COMPARE / COMPARE_SET, 6 HOLD, 7 CALIBRATE,
 8 SETTINGS_TABLES / SET / SAVE, 9 CAL_READ, 10 SCREENSHOT, 11 MEM_READ, 12 events, 13 UPDATE_MODE,
 14 BOOT_*, 15 BATTERY, 16 POWER_OFF, 17 RESTORE_DEFAULTS, 18 settings recovery (SETTINGS_RESTORE_B,
 ACCEPT_A, ACCEPT_B, ACCEPT_DEFAULTS, WRITE_BLOCK), 19 FACTORY_MODE; bit 20 (SETUP_LANGUAGE) is
-clear: English only (section 5.6).
+clear: English only (section 5.6); 21 direct set: SCREEN, LCR_SET, HOLD, SETTINGS_SET and
+COMPARE_SET set the value directly (sections 4.1, 4.3, 5.3.4; requests and answer records are the
+same as without the bit, so the protocol version stays 1). A host waits the answer times of
+section 4.3 by this bit: firmware without it runs these commands as jobs of key presses.
 
 Rules: the protocol version changes only when the frame format or the meaning of an existing field
 changes. Within a version, records and answers grow only at the end, new commands and events get

@@ -5,11 +5,14 @@
 @
 @ Specification: USB_CONTROL_DESIGN.md revision 4 (section 9 decisions first) and
 @ SETTINGS_SAVE_DESIGN.md revision 4; the records of the starter: starter/starter.s.
-@ Frame handling, the job engine and the key injection are in own/ctl.s.
+@ Frame handling, the job engine and the key injection are in own/ctl.s; the direct changes of
+@ SCREEN, LCR_SET, HOLD, SETTINGS_SET and COMPARE_SET in own/dset.s (DIRECT_SET_DESIGN.md
+@ revision 2).
 @
 @ Handlers: r0 = request payload, r1 = its length, r2 = answer data (after the status byte,
 @ room for 511 bytes). They return r0 = status (S_*) and r1 = data length, or r0 = ST_DEFER
-@ when a job was started (ctl.s job_step answers through job_answer). Every handler pushes
+@ when a job was started (ctl.s job_step answers through job_answer) or the answer was made
+@ pending already (dset.s ds_request through job_answer). Every handler pushes
 @ {r4..r8, lr} so that the common exits h_* can pop it.
 @ All numbers are little-endian. Records and answers are byte-packed; their words and
 @ halfwords are stored with str / strh at any address (ARMv7-M allows unaligned word and
@@ -75,27 +78,26 @@
 	.equ	LCR_LISTS,	8
 	.equ	SET_IDS,	6		@ set_tab entries
 	.equ	SET_ENTRY,	28		@ bytes per set_tab entry
-	.equ	SET_SORT_FIRST,	3		@ first id of the sorting dialog rows
 	.equ	DATA_MAX,	511		@ answer data after the status byte
 	.equ	SET_A_IDX,	1		@ slot indices of the records
 	.equ	SET_B_IDX,	2
 
 @ STEP - one program step with constant fields (ctl.s prog_add).
-	.macro	STEP op, kind, max, reader, keya, keyb, arg, target
-	ldr	r0, =(\op) | ((\kind) << 8) | ((\max) << 16) | ((\reader) << 24)
-	ldr	r1, =(\keya) | ((\keyb) << 16)
-	ldr	r2, =\arg
-	ldr	r3, =\target
-	bl	prog_add
+	.macro	STEP op, kind, max, keya, keyb, arg, target
+	ldr	r0, =(\op) | ((\kind) << 8) | ((\max) << 16)	@ op word
+	ldr	r1, =(\keya) | ((\keyb) << 16)			@ keys
+	ldr	r2, =\arg					@ address / hold
+	ldr	r3, =\target					@ target
+	bl	prog_add					@ appended
 	.endm
 
 @ STEPT - the same with the target in a register r4..r11.
-	.macro	STEPT op, kind, max, reader, keya, keyb, arg, treg
-	mov	r3, \treg
-	ldr	r0, =(\op) | ((\kind) << 8) | ((\max) << 16) | ((\reader) << 24)
-	ldr	r1, =(\keya) | ((\keyb) << 16)
-	ldr	r2, =\arg
-	bl	prog_add
+	.macro	STEPT op, kind, max, keya, keyb, arg, treg
+	mov	r3, \treg					@ target
+	ldr	r0, =(\op) | ((\kind) << 8) | ((\max) << 16)	@ op word
+	ldr	r1, =(\keya) | ((\keyb) << 16)			@ keys
+	ldr	r2, =\arg					@ address / hold
+	bl	prog_add					@ appended
 	.endm
 
 	.section .text.own.cmd,"ax",%progbits
@@ -422,26 +424,26 @@ h_stream:
 	str	r0, [r4, #CT_ST_NEXT]
 	b	h_ok0
 
-@ SCREEN - screen u8 (1 measure, 2 compare, 3 settings) through the meter's keys (OP_SCREEN);
-@ answer STATE.
+@ SCREEN - screen u8 (1 measure, 2 compare, 3 settings), built directly by the key path's own
+@ builders without a key press (dset.s ds_screen; an open sorting dialog is closed first).
+@ Answer STATE with every status but 2; the refusals are those of dset.s ds_check.
 	.thumb_func
 	.type	h_screen, %function
 h_screen:
 	push	{r4, r5, r6, r7, r8, lr}
-	cmp	r1, #1
+	cmp	r1, #1			@ the screen byte is required
 	blo	h_bad
-	ldrb	r4, [r0]
-	cmp	r4, #1
+	ldrb	r4, [r0]		@ r4 = screen
+	cmp	r4, #1			@ 1..3 only
 	blo	h_bad
 	cmp	r4, #3
 	bhi	h_bad
-	bl	prog_reset
-	STEPT	OP_SCREEN, 0, 8, 0, 0, 0, 0, r4
-	movs	r0, #C_SCREEN
-	movs	r1, #AN_STATE
-	movw	r2, #JOB_LIMIT_MS
-	bl	job_start
-	b	h_defer
+	ldr	r0, =OWN_CTL		@ control core RAM
+	str	r4, [r0, #CT_DS_A]	@ argument of the change: the screen
+	movs	r0, #C_SCREEN		@ the change
+	movs	r1, #AN_STATE		@ its answer kind
+	bl	ds_request		@ refused or nothing to do: answered now; else a job
+	b	h_ret			@ r0 = ST_DEFER, r1 = 0
 
 @ KEY - key bit u8 (0..13), hold u16 in ms (optional, 0 = short press); answer STATE after
 @ the meter handled it, status 6 when refused before dispatch or when the guard acted.
@@ -568,51 +570,41 @@ lcr_text:
 	mov	r7, r0
 	pop	{r6, pc}
 
-@ LCR_SET - setting id u8 (lcr_set_tab: 0 Func, 1 secondary, 2 frequency, 3 level, 4 bias,
-@ 5 range, 6 speed, 7 circuit mode), value index u8; only in screens 1 and 2 (else 3).
-@ One OP_PRESS step with the setting's key (the meter's handler 0x08009614 steps the value);
-@ a value the meter does not reach (0.6 V with bias, Func in the compare screen) ends with
-@ status 3. Answer MEASURE.
+@ LCR_SET - setting id u8 (0 Func, 1 secondary, 2 frequency, 3 level, 4 bias, 5 range,
+@ 6 speed, 7 circuit mode: the lists of LCR_TABLES, lcr_lists), value index u8 below the list's
+@ count; the value is the list's value word (frequency, level, bias) or the index. Set directly
+@ with the follow-up work of the meter's handler 0x08009614 for the press that lands on it
+@ (dset.s lcr_ds). Screens 1 and 2 only; a value the meter's keys do not reach (0.6 V with the
+@ bias at 0.1 V or more, Func 0 / 4 in the compare screen): status 3, nothing changed (dset.s
+@ ds_check). Answer MEASURE with every status but 2.
 	.thumb_func
 	.type	h_lcr_set, %function
 h_lcr_set:
 	push	{r4, r5, r6, r7, r8, lr}
-	cmp	r1, #2
+	cmp	r1, #2			@ id and index are required
 	blo	h_bad
-	ldrb	r4, [r0, #0]		@ id
-	ldrb	r5, [r0, #1]		@ value index
-	cmp	r4, #LCR_LISTS
+	ldrb	r4, [r0, #0]		@ r4 = id
+	ldrb	r5, [r0, #1]		@ r5 = value index
+	cmp	r4, #LCR_LISTS		@ id 0..7
 	bhs	h_bad
-	ldr	r6, =lcr_set_tab
-	add	r6, r6, r4, lsl #3
-	add	r6, r6, r4, lsl #2	@ r6 = entry (12 bytes)
-	ldrb	r0, [r6, #5]		@ number of values
-	cmp	r5, r0
-	bhs	h_bad
-	ldr	r0, =V_SCREEN
-	ldr	r0, [r0]
-	cmp	r0, #1
-	beq	.Lls_go
-	cmp	r0, #2
-	bne	h_notnow
-.Lls_go:
-	bl	prog_reset
-	ldrb	r0, [r6, #2]		@ kind
-	ldrb	r1, [r6, #3]		@ presses
-	ldrb	r2, [r6, #4]		@ reader
-	lsls	r0, r0, #8
-	orr	r0, r0, r1, lsl #16
-	orr	r0, r0, r2, lsl #24
-	orr	r0, r0, #OP_PRESS
-	ldrh	r1, [r6, #0]		@ key (one key)
-	ldr	r2, [r6, #8]		@ address
-	mov	r3, r5
-	bl	prog_add
-	movs	r0, #C_LCR_SET
-	movs	r1, #AN_MEASURE
-	movw	r2, #JOB_LIMIT_MS
-	bl	job_start
-	b	h_defer
+	ldr	r6, =lcr_lists		@ the lists
+	add	r6, r6, r4, lsl #2	@ + 4 id
+	add	r6, r6, r4, lsl #4	@ + 16 id: r6 = descriptor (20 bytes)
+	ldrb	r0, [r6, #0]		@ number of values
+	cmp	r5, r0			@ index below it
+	bhs	h_bad			@ else status 2
+	ldr	r1, [r6, #12]		@ values of the list, 0: the index is the value
+	mov	r0, r5			@ r0 = the index
+	cmp	r1, #0			@ a value table?
+	it	ne			@ (then)
+	ldrne	r0, [r1, r5, lsl #2]	@ r0 = the value word of the index
+	ldr	r1, =OWN_CTL		@ control core RAM
+	str	r4, [r1, #CT_DS_A]	@ arguments of the change: id
+	str	r0, [r1, #CT_DS_B]	@ and the value word
+	movs	r0, #C_LCR_SET		@ the change
+	movs	r1, #AN_MEASURE		@ its answer kind
+	bl	ds_request		@ refused or nothing to do: answered now; else a job
+	b	h_ret			@ r0 = ST_DEFER, r1 = 0
 
 @ MEASURE - the MEASURE record.
 	.thumb_func
@@ -660,45 +652,37 @@ h_compare:
 	movs	r0, #S_OK
 	b	h_ret
 
-@ HOLD - on u8 (0 / 1): key 0x400 until 0x200011A4 matches; screens 1 / 2 only. Answer STATE.
+@ HOLD - on u8 (0 / 1), set directly as the meter's key 0x400 handler sets it (dset.s ds_hold);
+@ screens 1 / 2 only (else status 3). Answer STATE with every status but 2.
 	.thumb_func
 	.type	h_hold, %function
 h_hold:
 	push	{r4, r5, r6, r7, r8, lr}
-	cmp	r1, #1
+	cmp	r1, #1			@ the byte is required
 	blo	h_bad
-	ldrb	r4, [r0]
+	ldrb	r4, [r0]		@ r4 = 0 off, 1 on
 	cmp	r4, #1
 	bhi	h_bad
-	ldr	r0, =V_SCREEN
-	ldr	r0, [r0]
-	cmp	r0, #1
-	beq	.Lhh_go
-	cmp	r0, #2
-	bne	h_notnow
-.Lhh_go:
-	bl	prog_reset
-	STEPT	OP_PRESS, 0, 3, RD_WORD, KEY_0400, 0, V_HOLD, r4
-	movs	r0, #C_HOLD
-	movs	r1, #AN_STATE
-	movw	r2, #JOB_LIMIT_MS
-	bl	job_start
-	b	h_defer
+	ldr	r0, =OWN_CTL		@ control core RAM
+	str	r4, [r0, #CT_DS_A]	@ argument of the change
+	movs	r0, #C_HOLD		@ the change
+	movs	r1, #AN_STATE		@ its answer kind
+	bl	ds_request		@ refused or nothing to do: answered now; else a job
+	b	h_ret			@ r0 = ST_DEFER, r1 = 0
 
 	.ltorg
 
 @ add_menu - r0 = menu item: step "menu item 0x200011A8 to r0" (screen 3, no dialog: key 0x20
 @   = fn_0800f294(0, +1), key 2 = fn_0800f294(0, -1), 0x080099D2..0x08009A9E; in our build
 @   own_menu, lang.s, which steps through the visible items 0, 2, 3, 4, 5, 6), r1 = kind.
-@   The callers pass only visible items: 0 (add_sort_open), 5 (h_calibrate), 2..4 (h_set_set);
-@   item 1 is never shown, so no command targets it.
+@   The only caller passes item 5 (h_calibrate); item 1 is never shown, so no command targets it.
 	.thumb_func
 	.type	add_menu, %function
 add_menu:
 	push	{r4, lr}
 	mov	r3, r0
 	lsls	r0, r1, #8
-	ldr	r2, =OP_PRESS | (10 << 16) | (RD_WORD << 24)
+	ldr	r2, =OP_PRESS | (10 << 16)	@ op, at most 10 presses
 	orr	r0, r0, r2
 	ldr	r1, =KEY_0020 | (KEY_UP << 16)
 	ldr	r2, =V_DISP_A8
@@ -725,90 +709,45 @@ add_settings:
 	bl	prog_add
 	pop	{r4, pc}
 
-@ add_sort_open - steps: menu item 0, key 8 (0x080099FE: dialog 0x200011AC = 1), check the
-@   dialog is open (else status 3).
-	.thumb_func
-	.type	add_sort_open, %function
-add_sort_open:
-	push	{r4, lr}
-	movs	r0, #0
-	movs	r1, #0
-	bl	add_menu
-	STEP	OP_KEY, 0, 0, 0, KEY_OK, 0, 0, 0
-	STEP	OP_CHECK, 0, 0, RD_WORD, S_NOT_NOW, 0, V_DIALOG, 1
-	pop	{r4, pc}
-
-@ add_sort_row - r0 = row 0..4: steps: row word 0x200011B4 to r0 (keys 4 / 0x10 while the
-@   editing byte 0x2000000C is 0, fn_0800f5e8), key 8 (byte 0x2000000C = 1, 0x08009A3C),
-@   check the byte is 1 (else status 3).
-	.thumb_func
-	.type	add_sort_row, %function
-add_sort_row:
-	push	{r4, lr}
-	mov	r4, r0
-	STEPT	OP_PRESS, 0, 8, RD_WORD, KEY_0004, KEY_0010, V_SEL, r4
-	STEP	OP_KEY, 0, 0, 0, KEY_OK, 0, 0, 0
-	STEP	OP_CHECK, 0, 0, RD_BYTE, S_NOT_NOW, 0, V_EDIT, 1
-	pop	{r4, pc}
-
-@ add_digit_idx - r0 = editor index 0..5: step "word 0x200011B8 to r0" (keys 4 / 0x10 while
-@   editing, fn_0800f5e8).
-	.thumb_func
-	.type	add_digit_idx, %function
-add_digit_idx:
-	push	{r4, lr}
-	mov	r4, r0
-	STEPT	OP_PRESS, 0, 10, RD_WORD, KEY_0004, KEY_0010, V_DIGIT, r4
-	pop	{r4, pc}
-
-@ add_leave - step: long key 8 (0x08009AA2: leaves the editing byte, or closes the dialog).
-	.thumb_func
-	.type	add_leave, %function
-add_leave:
-	push	{r4, lr}
-	STEP	OP_KEY, KB_LONG, 0, 0, KEY_OK, 0, 0, 0
-	pop	{r4, pc}
-
 	.ltorg
 
 @ COMPARE_SET - nominal f32 (0.001 <= nominal < 1e9, the ranges of fn_0800e4f8), tolerance
-@ f32 (0..99.9), warn type u8, warn sound u8, warn LED u8 (0 / 1 each), through the sorting
-@ editor (settings, menu item 0, key 8): row 0 the scale (editor index 5, fn_0800e224 steps
-@ 0x2000119C) then the five digits of round(nominal * 100 / scale) (fn_0800e224: one digit
-@ per index 0..4, 0 the highest); row 1 the tolerance in steps of 10, 1, 0.1 percent
-@ (indices 0, 1, 2); rows 2..4 the alarm words (key 4 = 1, key 0x10 = 0). The count is
-@ limited to 100..99999 (the editor sets the third digit to 1 when the three highest are 0).
-@ Answer COMPARE.
+@ f32 (0..99.9), warn type u8, warn sound u8, warn LED u8 (0 / 1 each), set directly (dset.s
+@ ds_compare) as the sorting editor stores them: the scale index of the nominal's range
+@ (fn_0800e4f8 classes) and the count round(nominal * 100 / scale) (nom_count, the editor's
+@ split) limited to 100..99999 (the editor sets the third digit to 1 when the three highest are
+@ 0), nominal = float(count) / 100.0 * scale (the digit press's formula); the tolerance in
+@ tenths of a percent, round(tolerance * 10) at most 999, stored as float(tenths) / 10.0. In any
+@ screen 1..3, RAM only. Answer COMPARE with every status but 2.
 	.thumb_func
 	.type	h_compare_set, %function
 h_compare_set:
 	push	{r4, r5, r6, r7, r8, lr}
-	sub	sp, #24			@ [sp] digits 0..4 (words), [sp + 20] scale
-	cmp	r1, #11
-	blo	.Lcs_bad
+	cmp	r1, #11			@ all 11 bytes are required
+	blo	h_bad
 	mov	r4, r0			@ r4 = payload
 	ldr	r5, [r4, #0]		@ r5 = nominal bits
 	ldr	r0, =0x3A83126F		@ 0.001
-	cmp	r5, r0
-	blt	.Lcs_bad
+	cmp	r5, r0			@ signed compare of the bits: negative, below 0.001
+	blt	h_bad
 	ldr	r0, =0x4E6E6B28		@ fn_0800e4f8 upper limit (about 1e9)
-	cmp	r5, r0
-	bge	.Lcs_bad
+	cmp	r5, r0			@ at or above it, infinity, NaN
+	bge	h_bad
 	ldr	r6, [r4, #4]		@ r6 = tolerance bits
-	cmp	r6, #0
-	blt	.Lcs_bad
+	cmp	r6, #0			@ negative (-0.0 included)
+	blt	h_bad
 	ldr	r0, =0x42C7CCCD		@ 99.9 (fn_0800e224 limit)
-	cmp	r6, r0
-	bgt	.Lcs_bad
-	ldrb	r0, [r4, #8]
+	cmp	r6, r0			@ above it, infinity, NaN
+	bgt	h_bad
+	ldrb	r0, [r4, #8]		@ warn type 0 / 1
 	cmp	r0, #1
-	bhi	.Lcs_bad
-	ldrb	r0, [r4, #9]
+	bhi	h_bad
+	ldrb	r0, [r4, #9]		@ warn sound 0 / 1
 	cmp	r0, #1
-	bhi	.Lcs_bad
-	ldrb	r0, [r4, #10]
+	bhi	h_bad
+	ldrb	r0, [r4, #10]		@ warn LED 0 / 1
 	cmp	r0, #1
-	bhi	.Lcs_bad
+	bhi	h_bad
 	movs	r7, #0			@ r7 = scale index (fn_0800e4f8 ranges)
 	ldr	r0, =0x3F800000
 	cmp	r5, r0
@@ -823,102 +762,39 @@ h_compare_set:
 	it	ge
 	movge	r7, #3
 .Lcs_scale:
-	str	r7, [sp, #20]
-	mov	r0, r5
-	mov	r1, r7
+	mov	r0, r5			@ nominal
+	mov	r1, r7			@ scale index
 	bl	nom_count		@ r0 = count
-	movs	r1, #100
+	movs	r1, #100		@ at least 100
 	cmp	r0, r1
 	it	lt
 	movlt	r0, r1
-	movw	r1, #0x869F		@ 99999 = 0x1869F
+	movw	r1, #0x869F		@ at most 99999 = 0x1869F
 	movt	r1, #1
 	cmp	r0, r1
 	it	gt
 	movgt	r0, r1
-	ldr	r2, =tab_pow10
-	movs	r3, #0
-.Lcs_split:
-	ldr	r1, [r2, r3, lsl #2]
-	sdiv	r12, r0, r1		@ count / 10^(4 - i)
-	movs	r1, #10
-	sdiv	r8, r12, r1
-	mls	r12, r1, r8, r12	@ % 10
-	str	r12, [sp, r3, lsl #2]
-	adds	r3, r3, #1
-	cmp	r3, #5
-	blo	.Lcs_split
-	mov	r0, r6
-	bl	tenths
-	movw	r1, #999
+	mov	r8, r0			@ r8 = count
+	mov	r0, r6			@ tolerance
+	bl	tenths			@ r0 = round(tolerance * 10)
+	movw	r1, #999		@ at most 999 (99.9 %)
 	cmp	r0, r1
 	it	gt
 	movgt	r0, r1
-	mov	r6, r0			@ r6 = tolerance in tenths
-	bl	prog_reset
-	movs	r0, #0
-	bl	add_settings
-	bl	add_sort_open
-@ row 0: scale, then the digits
-	movs	r0, #0
-	bl	add_sort_row
-	movs	r0, #5
-	bl	add_digit_idx
-	ldr	r8, [sp, #20]
-	STEPT	OP_PRESS, 0, 8, RD_DIGIT, KEY_UP, KEY_0020, 5, r8
-	movs	r7, #0			@ r7 = digit
-.Lcs_digits:
-	mov	r0, r7
-	bl	add_digit_idx
-	ldr	r8, [sp, r7, lsl #2]
-	mov	r3, r8
-	ldr	r0, =OP_PRESS | (14 << 16) | (RD_DIGIT << 24)
-	ldr	r1, =KEY_UP | (KEY_0020 << 16)
-	mov	r2, r7
-	bl	prog_add
-	adds	r7, r7, #1
-	cmp	r7, #5
-	blo	.Lcs_digits
-	bl	add_leave
-@ row 1: tolerance
-	movs	r0, #1
-	bl	add_sort_row
-	movs	r0, #0
-	bl	add_digit_idx
-	STEPT	OP_PRESS, KB_TOL100, 14, RD_TENTHS, KEY_UP, KEY_0020, 0, r6
-	movs	r0, #1
-	bl	add_digit_idx
-	STEPT	OP_PRESS, KB_TOL10, 14, RD_TENTHS, KEY_UP, KEY_0020, 0, r6
-	movs	r0, #2
-	bl	add_digit_idx
-	STEPT	OP_PRESS, 0, 14, RD_TENTHS, KEY_UP, KEY_0020, 0, r6
-	bl	add_leave
-@ rows 2..4: warn type, sound, LED
-	movs	r0, #2
-	bl	add_sort_row
-	ldrb	r8, [r4, #8]
-	STEPT	OP_PRESS, 0, 3, RD_WORD, KEY_0004, KEY_0010, V_WARN_TYPE, r8
-	bl	add_leave
-	movs	r0, #3
-	bl	add_sort_row
-	ldrb	r8, [r4, #9]
-	STEPT	OP_PRESS, 0, 3, RD_WORD, KEY_0004, KEY_0010, V_WARN_SOUND, r8
-	bl	add_leave
-	movs	r0, #4
-	bl	add_sort_row
-	ldrb	r8, [r4, #10]
-	STEPT	OP_PRESS, 0, 3, RD_WORD, KEY_0004, KEY_0010, V_WARN_LED, r8
-	bl	add_leave
-	STEP	OP_NODIALOG, 0, 4, 0, 0, 0, 0, 0
-	movs	r0, #C_COMPARE_SET
-	movs	r1, #AN_COMPARE
-	ldr	r2, =JOB_LIMIT_MS * 3
-	bl	job_start
-	add	sp, #24
-	b	h_defer
-.Lcs_bad:
-	add	sp, #24
-	b	h_bad
+	ldr	r6, =OWN_CTL		@ control core RAM
+	str	r8, [r6, #CT_DS_A]	@ arguments of the change: the count
+	str	r0, [r6, #CT_DS_B]	@ the tolerance in tenths
+	ldrb	r0, [r4, #8]		@ the warn words: type in bits 0..7
+	ldrb	r1, [r4, #9]		@ sound
+	orr	r0, r0, r1, lsl #8	@ in bits 8..15
+	ldrb	r1, [r4, #10]		@ LED
+	orr	r0, r0, r1, lsl #16	@ in bits 16..23
+	str	r0, [r6, #CT_DS_C]	@ the third argument
+	str	r7, [r6, #CT_DS_D]	@ the scale index
+	movs	r0, #C_COMPARE_SET	@ the change
+	movs	r1, #AN_COMPARE		@ its answer kind
+	bl	ds_request		@ refused or nothing to do: answered now; else a job
+	b	h_ret			@ r0 = ST_DEFER, r1 = 0
 
 	.ltorg
 
@@ -965,12 +841,12 @@ h_calibrate:
 	movs	r0, #5
 	movs	r1, #KB_GOFF
 	bl	add_menu
-	STEP	OP_KEY, KB_GOFF, 0, 0, KEY_OK, 0, 0, 0
-	STEP	OP_CHECK, 0, 0, RD_WORD, S_NOT_NOW, 0, V_DIALOG, 1
-	STEPT	OP_PRESS, KB_GOFF, 16, RD_WORD, KEY_0004, KEY_0010, V_CAL_TYPE, r4
-	STEP	OP_KEY, KB_GOFF, 0, 0, KEY_OK, 0, 0, 0
-	STEP	OP_CHECK, 0, 0, RD_WORD, S_NOT_NOW, 0, V_CAL_RUN, 1
-	STEP	OP_WAITCAL, 0, 0, 0, 0, 0, 0, 0
+	STEP	OP_KEY, KB_GOFF, 0, KEY_OK, 0, 0, 0			@ key 8: the dialog
+	STEP	OP_CHECK, 0, 0, S_NOT_NOW, 0, V_DIALOG, 1		@ it opened, else 3
+	STEPT	OP_PRESS, KB_GOFF, 16, KEY_0004, KEY_0010, V_CAL_TYPE, r4	@ the type
+	STEP	OP_KEY, KB_GOFF, 0, KEY_OK, 0, 0, 0			@ key 8: the start
+	STEP	OP_CHECK, 0, 0, S_NOT_NOW, 0, V_CAL_RUN, 1		@ it started, else 3
+	STEP	OP_WAITCAL, 0, 0, 0, 0, 0, 0				@ the sweep's end
 	movs	r0, #C_CALIBRATE
 	movs	r1, #AN_CAL
 	ldr	r2, =CAL_LIMIT_MS
@@ -1045,10 +921,12 @@ h_set_tables:
 	movs	r0, #S_OK
 	b	h_ret
 
-@ SETTINGS_SET - id u8 (set_tab), value u16, inside the setting's min / max / step: through
-@ the menu's keys, RAM only. Ids 0..2 (brightness, volume, off time): settings, menu item
-@ id + 2 (vendor items 2..4; own_menu, lang.s), keys 4 / 0x10 (fn_0800f5e8). Ids 3..5 (warn
-@ type, sound, LED): the sorting dialog, row id - 1 (rows 2..4). Answer STATE.
+@ SETTINGS_SET - id u8 (set_tab), value u16, inside the setting's min / max / step: set
+@ directly in any screen 1..3 (dset.s ds_set: the word, for brightness the backlight
+@ fn_08009e60, in screen 3 the menu's redraws fn_0800f294(0, 0) and fn_0800e6c8 as
+@ fn_0800f5e8 ends), RAM only. Ids 0..2 brightness, volume, off time (vendor items 2..4);
+@ ids 3..5 warn type, sound, LED (sorting dialog rows 2..4). Answer STATE with every status
+@ but 2.
 	.thumb_func
 	.type	h_set_set, %function
 h_set_set:
@@ -1075,37 +953,14 @@ h_set_set:
 	cmp	r0, #0
 	bne	h_bad
 	ldr	r7, [r5, #4]		@ r7 = address of the setting
-	bl	prog_reset
-	movs	r0, #0
-	bl	add_settings
-	cmp	r4, #SET_SORT_FIRST
-	bhs	.Lss_sort
-	adds	r0, r4, #2		@ vendor menu item 2..4
-	movs	r1, #0
-	bl	add_menu
-	mov	r3, r6
-	ldr	r0, =OP_PRESS | (14 << 16) | (RD_WORD << 24)
-	ldr	r1, =KEY_0004 | (KEY_0010 << 16)
-	mov	r2, r7
-	bl	prog_add
-	b	.Lss_start
-.Lss_sort:
-	bl	add_sort_open
-	subs	r0, r4, #1		@ dialog rows 2..4
-	bl	add_sort_row
-	mov	r3, r6
-	ldr	r0, =OP_PRESS | (3 << 16) | (RD_WORD << 24)
-	ldr	r1, =KEY_0004 | (KEY_0010 << 16)
-	mov	r2, r7
-	bl	prog_add
-	bl	add_leave
-	STEP	OP_NODIALOG, 0, 4, 0, 0, 0, 0, 0
-.Lss_start:
-	movs	r0, #C_SET_SET
-	movs	r1, #AN_STATE
-	movw	r2, #JOB_LIMIT_MS
-	bl	job_start
-	b	h_defer
+	ldr	r0, =OWN_CTL		@ control core RAM
+	str	r4, [r0, #CT_DS_A]	@ arguments of the change: id
+	str	r6, [r0, #CT_DS_B]	@ the value
+	str	r7, [r0, #CT_DS_C]	@ the setting's word
+	movs	r0, #C_SET_SET		@ the change
+	movs	r1, #AN_STATE		@ its answer kind
+	bl	ds_request		@ refused or nothing to do: answered now; else a job
+	b	h_ret			@ r0 = ST_DEFER, r1 = 0
 
 	.ltorg
 
@@ -1492,7 +1347,7 @@ h_boot_begin:
 	movs	r0, #BS_ERASING
 	str	r0, [r7, #CT_B_STATE]
 	bl	prog_reset
-	STEP	OP_ERASE, 0, 0, 0, 0, 0, 0, 0
+	STEP	OP_ERASE, 0, 0, 0, 0, 0, 0		@ one page erase per pass
 	movs	r0, #C_BOOT_BEGIN
 	movs	r1, #AN_NONE
 	movw	r2, #ERASE_LIMIT_MS
@@ -2748,48 +2603,11 @@ fmt_units:
 	.byte	1, 0, 0, 0
 	.byte	5, 7, -4, 0
 
-@ LCR_SET settings: {key u16, kind u8, presses u8, reader u8, values u8, 0 u16, address}
-@ (keys of 0x08009614: 0x200 Func, 0x40 secondary, 0x2000 / 0x800 / 0x100 / 0x80 cursor
-@ 0..3 and fn_0800d940(+1), 0x1000 speed, long 0x1000 circuit mode)
-	.p2align 2
-lcr_set_tab:
-	.short	KEY_0200
-	.byte	0, 6, RD_WORD, 5
-	.short	0
-	.word	V_FUNC
-	.short	KEY_0040
-	.byte	0, 6, RD_WORD, 5
-	.short	0
-	.word	V_SECONDARY
-	.short	KEY_2000
-	.byte	0, 6, RD_FREQ, 5
-	.short	0
-	.word	0
-	.short	KEY_0800
-	.byte	0, 4, RD_LEVEL, 3
-	.short	0
-	.word	0
-	.short	KEY_0100
-	.byte	0, 3, RD_BIAS, 2
-	.short	0
-	.word	0
-	.short	KEY_0080
-	.byte	0, 6, RD_WORD, 5
-	.short	0
-	.word	V_RANGE
-	.short	KEY_1000
-	.byte	0, 4, RD_WORD, 3
-	.short	0
-	.word	V_SPEED
-	.short	KEY_1000
-	.byte	KB_LONG, 4, RD_WORD, 3
-	.short	0
-	.word	V_CIRCUIT
-
 @ LCR_TABLES lists, 20 bytes each: {count, value type, name kind (0 own text, 1 table),
 @ entry kind (0 own texts, 1 table)}, name (own text, or the English table entry), entries
 @ (own list, or English pointer table), values (0: the index), unit text. English = row 1
-@ of a per-language table (row 0 holds the same pointers in our build, lang.s).
+@ of a per-language table (row 0 holds the same pointers in our build, lang.s). LCR_SET takes
+@ the count and the values from here too (h_lcr_set).
 	.p2align 2
 lcr_lists:
 	.byte	5, 0, 0, 1		@ 0 Func: names from 0x20000270 (row 1 of 0x20000258)

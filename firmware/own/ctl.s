@@ -20,7 +20,9 @@
 @   USB-powered power-off check, (1) one step of the running job, the automatic power-off step
 @   (pwr_step, own/power.s: Off Time, low-voltage countdown), (2) a pending key injection is
 @   posted, (3) the guard flag is set when the event in the slot is the injected one, 0x08009400
-@   runs, the flag is cleared, (4) events, the screenshot step, the streams, (5) received bytes
+@   runs, the flag is cleared; or, in a pass with no event in the slot and no key down, a
+@   pending direct change runs instead (dset.s ds_run, DIRECT_SET_DESIGN.md revision 2: 0x08009400
+@   returns at once with the slot at 0), (4) events, the screenshot step, the streams, (5) received bytes
 @   are parsed (one request per pass, none while an answer, a job or an action is pending or a
 @   screenshot runs), (6) the pending answer is queued.
 @
@@ -896,6 +898,9 @@ inj_post:
 @   KEY, the power-off path noted (code 0xFE, mask 1, 0x20001190 = 0: 0x08009452), own_save's
 @   count noted, 0x08009400 runs, own_injected = 0; a save refused by the guard during the
 @   call marks the job (status 6). IS_WAIT ends when its code was consumed.
+@   Direct change (CT_DS_OP != 0): when the slot is empty and no key is down (0x20000008 = 0),
+@   both read with PRIMASK set, dset.s ds_run makes the change in place of 0x08009400 (which
+@   returns at once with the slot at 0, app_01.s 85-86); otherwise the change waits.
 @   Powered-off mode: 0x08009400 is not run; a power key event restarts the meter
 @   (soft_restart, REQ_RESTART: the starter drives PA8 high again), any other event is cleared.
 @ ----------------------------------------------------------------------------
@@ -942,9 +947,23 @@ key_step:
 	movs	r1, #IS_IDLE
 	str	r1, [r4, #CT_I_STATE]
 .Lk_read:
-	cpsie	i
-	cmp	r7, #0
-	beq	.Lk_call
+	cmp	r7, #0			@ an event in the slot (PRIMASK still set)?
+	bne	.Lk_event		@ yes: the key path
+	ldr	r0, [r4, #CT_DS_OP]	@ a direct change pending?
+	cmp	r0, #0			@ none:
+	beq	.Lk_quiet		@ 0x08009400 as usual (it returns at once)
+	ldr	r0, =V_KEYS_DOWN	@ a key held down now (the scan's mask, read
+	ldrh	r0, [r0]		@ with PRIMASK set like the slot)?
+	cmp	r0, #0			@ a key down:
+	bne	.Lk_quiet		@ the change waits for a pass without one
+	cpsie	i			@ interrupts on again
+	bl	ds_run			@ the change in place of 0x08009400 (dset.s)
+	b	.Lk_wait		@ the injection state as after a call
+.Lk_quiet:
+	cpsie	i			@ interrupts on again
+	b	.Lk_call		@ 0x08009400 with the empty slot
+.Lk_event:
+	cpsie	i			@ interrupts on again
 	strh	r8, [sp, #0]		@ event KEY: mask, code, source
 	strb	r7, [sp, #2]
 	strb	r6, [sp, #3]
@@ -1076,7 +1095,7 @@ key_refused:
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
-@ prog_reset - empty program. prog_add - r0 = op | kind << 8 | max << 16 | reader << 24,
+@ prog_reset - empty program. prog_add - r0 = op | kind << 8 | max << 16 (bits 24..31 0),
 @   r1 = key a | key b << 16, r2 = arg, r3 = target: one step appended (ignored when
 @   PROG_MAX steps are there; every program of cmd.s has fewer). Use r0..r3, r12.
 @ ----------------------------------------------------------------------------
@@ -1193,17 +1212,22 @@ job_press:
 @     long key 8 (settings); screen 3 -> long key 8 (closes a dialog, then leaves the menu to
 @     the previous screen), on menu item 5 without a dialog first key 2 (item - 1, so that
 @     key 8 is not refused); screen 0 or another: status 3. At most PS_MAX presses.
-@   OP_PRESS: done when |target - read| is below 1 (10, 100 with KB_TOL10 / KB_TOL100);
-@     else key a, or with a key b: key a to raise, key b to lower the value, swapped when a
-@     press left the value unchanged or moved it away. PS_MAX presses, then status 3.
+@   OP_PRESS: done when the word at PS_ARG equals the target; else key a, or with a key b:
+@     key a to raise, key b to lower the value, swapped when a press left the value unchanged
+@     or moved it away. PS_MAX presses, then status 3.
 @   OP_KEY: one press of key a (hold PS_ARG ms, or by the kind), then next.
-@   OP_CHECK: read(arg) = target, else the status in key a.
+@   OP_CHECK: the word at PS_ARG = target, else the status in key a.
 @   OP_NODIALOG: long key 8 until 0x200011AC = 0, PS_MAX presses.
 @   OP_WAITCAL: calibration status 0x200050EC 2 -> next (status 0), 3 -> next (status 3);
 @     0x200050E4 = 0 for 1000 ms without one of them -> next (status 3).
 @   OP_ERASE: one page of the BOOT slot per pass through flash_erase_page with the gate open
 @     for that slot only; a failure: status 5. After the 12th page BS_ERASED, next.
-@   Past the last step: the answer of the job's kind (cmd.s job_answer).
+@   OP_DIRECT (the only step of a direct change, dset.s ds_request): CT_DS_OP = 0 (ds_run made
+@     the change or refused it, its status in CT_J_STATUS) -> the answer; the meter's power-off
+@     path ran (CF_OFF_WAIT) -> status 3; else wait (key_step runs the change in a pass without
+@     a key event).
+@   Past the last step: the answer of the job's kind (cmd.s job_answer). Every end of a job
+@   clears CT_DS_OP, so a change dropped by the time limit never runs later.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	job_step, %function
@@ -1271,14 +1295,24 @@ job_step:
 	beq	.Lj_waitcal
 	cmp	r0, #OP_ERASE
 	beq	.Lj_erase
+	cmp	r0, #OP_DIRECT		@ a direct change
+	beq	.Lj_direct
 	b	.Lj_finish		@ OP_END
+
+@ OP_DIRECT
+.Lj_direct:
+	ldr	r0, [r4, #CT_DS_OP]	@ change still pending?
+	cmp	r0, #0			@ no: made or refused by ds_run (status in CT_J_STATUS):
+	beq	.Lj_finish		@ the answer (the program has this one step)
+	ldr	r0, [r4, #CT_FLAGS]	@ the meter's power-off path ran meanwhile:
+	tst	r0, #CF_OFF_WAIT	@ a change now would be lost after its save
+	bne	.Lj_notnow		@ status 3 (CT_DS_OP cleared at the finish)
+	b	.Lj_out			@ wait for a pass without a key event (key_step)
 
 @ OP_PRESS
 .Lj_press:
-	ldrb	r0, [r5, #PS_READER]
-	ldr	r1, [r5, #PS_ARG]
-	bl	job_read
-	mov	r6, r0			@ r6 = value now
+	ldr	r1, [r5, #PS_ARG]	@ address of the word
+	ldr	r6, [r1]		@ r6 = value now
 	ldr	r7, [r5, #PS_TARGET]	@ r7 = target
 	ldr	r0, [r4, #CT_J_PRESSED]
 	cmp	r0, #0
@@ -1300,20 +1334,7 @@ job_step:
 	str	r0, [r4, #CT_J_SWAP]
 .Lj_eval:
 	subs	r8, r7, r6		@ r8 = target - value
-	ldrb	r0, [r5, #PS_KIND]
-	movs	r1, #1
-	tst	r0, #KB_TOL10
-	it	ne
-	movne	r1, #10
-	tst	r0, #KB_TOL100
-	it	ne
-	movne	r1, #100
-	cmp	r8, #0
-	mov	r2, r8
-	it	lt
-	rsblt	r2, r8, #0		@ r2 = |target - value|
-	cmp	r2, r1
-	blo	.Lj_next
+	beq	.Lj_next		@ reached: next step
 	bl	job_count		@ r0 = 0: no press left
 	cmp	r0, #0
 	beq	.Lj_notnow
@@ -1354,9 +1375,8 @@ job_step:
 
 @ OP_CHECK
 .Lj_check:
-	ldrb	r0, [r5, #PS_READER]
-	ldr	r1, [r5, #PS_ARG]
-	bl	job_read
+	ldr	r1, [r5, #PS_ARG]	@ address of the word
+	ldr	r0, [r1]		@ r0 = its value
 	ldr	r1, [r5, #PS_TARGET]
 	cmp	r0, r1
 	beq	.Lj_next
@@ -1503,6 +1523,7 @@ job_step:
 .Lj_finish:
 	movs	r0, #0
 	str	r0, [r4, #CT_J_ACTIVE]
+	str	r0, [r4, #CT_DS_OP]	@ no direct change survives its job
 	ldr	r1, [r4, #CT_J_STATUS]
 	ldr	r0, [r4, #CT_J_GUARD]
 	cmp	r0, #0
@@ -1539,79 +1560,8 @@ job_count:
 	.ltorg
 
 @ ============================================================================
-@ Readers of the job steps
+@ Number helpers of COMPARE_SET (cmd.s h_compare_set, dset.s cs_diff)
 @ ============================================================================
-
-@ ----------------------------------------------------------------------------
-@ job_read - r0 = RD_* reader, r1 = arg -> r0 = value (see ctl.inc). Uses r0..r3, r12,
-@   s0..s15 (RD_DIGIT calls the vendor's double helpers).
-@ ----------------------------------------------------------------------------
-	.thumb_func
-	.type	job_read, %function
-job_read:
-	cmp	r0, #RD_WORD
-	bne	.Lr_byte
-	ldr	r0, [r1]
-	bx	lr
-.Lr_byte:
-	cmp	r0, #RD_BYTE
-	bne	.Lr_level
-	ldrb	r0, [r1]
-	bx	lr
-.Lr_level:
-	cmp	r0, #RD_LEVEL
-	bne	.Lr_bias
-	ldr	r0, =V_LEVEL
-	ldr	r0, [r0]
-	ldr	r1, =tab_level
-	movs	r2, #3
-	b	tab_index
-.Lr_bias:
-	cmp	r0, #RD_BIAS
-	bne	.Lr_freq
-	ldr	r0, =V_BIAS
-	ldr	r0, [r0]
-	ldr	r1, =tab_bias
-	movs	r2, #2
-	b	tab_index
-.Lr_freq:
-	cmp	r0, #RD_FREQ
-	bne	.Lr_digit
-	ldr	r0, =V_FREQ
-	ldr	r0, [r0]
-	ldr	r1, =tab_freq
-	movs	r2, #5
-	b	tab_index
-.Lr_digit:
-	cmp	r0, #RD_DIGIT
-	bne	.Lr_tenths
-	mov	r0, r1
-	b	nom_digit
-.Lr_tenths:
-	ldr	r0, =V_TOLERANCE
-	ldr	r0, [r0]
-	b	tenths
-
-@ ----------------------------------------------------------------------------
-@ tab_index - r0 = value, r1 = table of words, r2 = count -> r0 = index of the first equal
-@   word, or count when none is equal. Uses r0..r3.
-@ ----------------------------------------------------------------------------
-	.global	tab_index
-	.thumb_func
-	.type	tab_index, %function
-tab_index:
-	movs	r3, #0
-.Lti_loop:
-	cmp	r3, r2
-	bhs	.Lti_out
-	ldr	r12, [r1, r3, lsl #2]
-	cmp	r12, r0
-	beq	.Lti_out
-	adds	r3, r3, #1
-	b	.Lti_loop
-.Lti_out:
-	mov	r0, r3
-	bx	lr
 
 @ ----------------------------------------------------------------------------
 @ tenths - r0 = float bits (tolerance, >= 0) -> r0 = trunc(value * 10 + 0.5). Uses s0, s1.
@@ -1634,8 +1584,6 @@ tenths:
 @   fn_0800e224 edits: round(nominal * 100 / scale) with scale 0.001, 1.0, 1000.0, 1e6 (index
 @   3 and above), computed as 0x0800E2E4..0x0800E2FE does it (vmul, vdiv, float_to_double,
 @   fn_080116a0, double_to_int32). Uses r0..r3, r12, s0..s15, d0.
-@ nom_digit - r0 = digit 0..4 (0 the highest) of nom_count(0x20001184, 0x2000119C), or
-@   r0 = 5: the scale word 0x2000119C.
 @ ----------------------------------------------------------------------------
 	.global	nom_count
 	.thumb_func
@@ -1659,30 +1607,6 @@ nom_count:
 	bl	fn_080116a0		@ rounding as the editor does it
 	vmov	r0, r1, d0
 	bl	double_to_int32
-	pop	{r4, pc}
-
-	.thumb_func
-	.type	nom_digit, %function
-nom_digit:
-	push	{r4, lr}
-	mov	r4, r0
-	cmp	r4, #5
-	blo	.Lnd_digit
-	ldr	r0, =V_SCALE
-	ldr	r0, [r0]
-	pop	{r4, pc}
-.Lnd_digit:
-	ldr	r0, =V_NOMINAL
-	ldr	r0, [r0]
-	ldr	r1, =V_SCALE
-	ldr	r1, [r1]
-	bl	nom_count
-	ldr	r1, =tab_pow10
-	ldr	r1, [r1, r4, lsl #2]
-	sdiv	r0, r0, r1		@ count / 10^(4 - digit)
-	movs	r1, #10
-	sdiv	r2, r0, r1
-	mls	r0, r1, r2, r0		@ % 10
 	pop	{r4, pc}
 
 	.ltorg
@@ -2265,13 +2189,11 @@ tab_bias:
 	.global	tab_freq
 tab_freq:
 	.word	100, 120, 1000, 10000, 100000
-@ sorting scales 0.001, 1.0, 1000.0, 1e6 (fn_0800e224 literals 0x0800E484.., s3)
+@ sorting scales 0.001, 1.0, 1000.0, 1e6 (fn_0800e224 literals 0x0800E484.., s3); also read by
+@ dset.s ds_compare
+	.global	tab_scale
 tab_scale:
 	.word	0x3A83126F, 0x3F800000, 0x447A0000, 0x49742400
-@ divisors of the five digits, highest first (fn_0800e224 split)
-	.global	tab_pow10
-tab_pow10:
-	.word	10000, 1000, 100, 10, 1
 @ RAM-only words compared for SETTING_CHANGED (entry 2 is a byte)
 ram_words:
 	.word	V_HOLD, V_DISP_A8, V_MAIN_ROW, V_SECONDARY

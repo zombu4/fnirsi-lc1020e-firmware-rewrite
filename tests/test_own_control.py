@@ -99,7 +99,8 @@ C = dict(INFO=0x00, PING=0x01, RESET=0x02, BATTERY=0x03, POWER_OFF=0x05, FACTORY
          UPDATE_MODE=0x84, BOOT_BEGIN=0x85, BOOT_DATA=0x86, BOOT_END=0x87, BOOT_INSTALL=0x88, BOOT_STATUS=0x89)
 E_KEY, E_SCREEN, E_SETTING, E_POWERED_OFF, E_MEASURE, E_SAVE, E_CAL = 0x90, 0x91, 0x93, 0x94, 0x95, 0x96, 0x97
 OK2, OFF2 = struct.pack('<H', 0x4F4B), struct.pack('<H', 0x4F46)
-CAPS_ALL, INFO_SIZE, STATE_SIZE, MEASURE_SIZE, COMPARE_SIZE = 0x000FFFFF, 46, 32, 64, 29   # bit 20 clear
+CAPS_ALL, INFO_SIZE, STATE_SIZE, MEASURE_SIZE, COMPARE_SIZE = 0x002FFFFF, 46, 32, 64, 29   # bit 20 clear,
+                                                                                     # bit 21 direct set
 KEY_POWER, KEY_UP, KEY_OK = 0x0001, 0x0002, 0x0008
 LSI = 60000                      # the shortest period, 2501 * 16 / 60000 s, for every watchdog check
 PERIOD_MIN = 0.67                # USB_CONTROL_DESIGN.md requirement 2
@@ -276,11 +277,9 @@ _HOST = _load_host_library()
 
 
 def host_timeout(cmd, payload=b''):
-    """Answer time of a command as the host library computes it (Meter.timeout_for)."""
-    if cmd == _HOST.C['KEY']:
-        hold = struct.unpack_from('<H', payload, 1)[0] if len(payload) >= 3 else 0
-        return 23.0 + hold / 1000.0
-    return _HOST.TIMEOUT.get(cmd, _HOST.T_FAST)
+    """Answer time of a command as the host library computes it for this firmware (timeout_for
+    with the INFO capability word CAPS_ALL: bit 21, the direct commands wait T_DIRECT)."""
+    return _HOST.timeout_for(cmd, payload, CAPS_ALL)
 
 
 # ---------------------------------------------------------------- whole-machine snapshot (k30)

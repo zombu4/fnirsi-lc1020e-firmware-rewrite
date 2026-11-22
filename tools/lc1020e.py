@@ -72,6 +72,7 @@ STATUS_NAME = {0: 'OK', 1: 'unknown command', 2: 'bad length or argument', 3: 'n
 # transfer and the main-loop pass (PROTOCOL.md "Timing").
 T_FAST = 1.5
 T_SAVE = 4.0                    # one save: up to 1.5 s inside one main-loop pass
+T_DIRECT = 4.0                  # a direct change (capability bit 21): at most 2000 ms in the meter
 TIMEOUT = {
     C['SCREEN']: 23.0, C['LCR_SET']: 23.0, C['HOLD']: 23.0, C['SETTINGS_SET']: 23.0,
     C['COMPARE_SET']: 63.0, C['CALIBRATE']: 126.0,
@@ -80,6 +81,21 @@ TIMEOUT = {
     C['SETTINGS_ACCEPT_A']: T_SAVE, C['SETTINGS_ACCEPT_B']: T_SAVE,
     C['SETTINGS_ACCEPT_DEFAULTS']: T_SAVE, C['SETTINGS_WRITE_BLOCK']: T_SAVE,
 }
+# The commands a firmware with capability bit 21 sets directly (PROTOCOL.md 4.1, 14); a firmware
+# without the bit runs them as key jobs with the times of TIMEOUT.
+CAP_DIRECT = 21
+DIRECT = (C['SCREEN'], C['LCR_SET'], C['HOLD'], C['SETTINGS_SET'], C['COMPARE_SET'])
+
+
+def timeout_for(cmd, payload=b'', capabilities=None):
+    """Answer time of a command in seconds: the firmware's limit plus a margin (PROTOCOL.md 4.3).
+    capabilities: the INFO capability word, None while it is not known (the long times then)."""
+    if cmd == C['KEY']:
+        hold = struct.unpack_from('<H', payload, 1)[0] if len(payload) >= 3 else 0
+        return 23.0 + hold / 1000.0
+    if cmd in DIRECT and capabilities is not None and capabilities >> CAP_DIRECT & 1:
+        return T_DIRECT
+    return TIMEOUT.get(cmd, T_FAST)
 
 # Screens, keys, records
 SCREEN_NAME = {1: 'measure', 2: 'compare', 3: 'settings'}      # screen 0 (the vendor's language
@@ -135,7 +151,8 @@ SCR_RESULT = {0: 'done', 1: 'no room', 2: 'no refresh'}
 CAPS = ['STATE / STREAM', 'SCREEN', 'KEY', 'LCR_TABLES / LCR_SET', 'MEASURE / MEASURE_STREAM',
         'COMPARE / COMPARE_SET', 'HOLD', 'CALIBRATE', 'SETTINGS_*', 'CAL_READ', 'SCREENSHOT',
         'MEM_READ', 'events', 'UPDATE_MODE', 'BOOT_*', 'BATTERY', 'POWER_OFF', 'RESTORE_DEFAULTS',
-        'settings recovery', 'FACTORY_MODE']           # bit 20 (SETUP_LANGUAGE) is not used
+        'settings recovery', 'FACTORY_MODE',
+        'SETUP_LANGUAGE (not used, English only)', 'direct set']   # bit 20 clear, bit 21
 
 
 # ----------------------------------------------------------------------------------------------
@@ -721,6 +738,7 @@ class Meter:
         self._parser = FrameParser()
         self._queue = collections.deque(maxlen=65536)
         self.stale_answers = 0
+        self.capabilities = None        # INFO capability word, known after info()
         if connect:
             self.open()
 
@@ -794,10 +812,7 @@ class Meter:
                 self._queue.append(f)
 
     def timeout_for(self, cmd, payload=b''):
-        if cmd == C['KEY']:
-            hold = struct.unpack_from('<H', payload, 1)[0] if len(payload) >= 3 else 0
-            return 23.0 + hold / 1000.0
-        return TIMEOUT.get(cmd, T_FAST)
+        return timeout_for(cmd, payload, self.capabilities)
 
     def request(self, cmd, payload=b'', timeout=None, on_frame=None):
         """Sends one request and returns (status, data) of its answer. Stream and event frames
@@ -869,7 +884,9 @@ class Meter:
 
     # -- 4.1 device ---------------------------------------------------------------------------
     def info(self):
-        return self._ok(C['INFO'], parse=Info.parse)
+        i = self._ok(C['INFO'], parse=Info.parse)
+        self.capabilities = i.capabilities      # answer times of the direct commands (bit 21)
+        return i
 
     def ping(self, data=b''):
         return self._ok(C['PING'], data)

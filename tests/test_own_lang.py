@@ -364,12 +364,13 @@ def l04_menu_six_items():
 @case
 def l05_settings_set_ids_and_jobs():
     """SETTINGS_TABLES: 6 ids with English names; SETTINGS_SET for every id; SETUP_LANGUAGE answers
-    status 1 and INFO has capability bit 20 clear; COMPARE_SET reaches item 0's dialog; CALIBRATE
+    status 1 and INFO has capability bit 20 clear (bit 21, the direct changes, set); COMPARE_SET sets the
+    nominal (directly, no dialog); CALIBRATE
     reaches item 5's dialog and starts the calibration."""
     rig = Ctl().up()
     info = rig.ask_ok('INFO', size=INFO_SIZE)
     caps = struct.unpack_from('<I', info, 1)[0]
-    check(caps == 0x000FFFFF and not caps >> 20 & 1, 'capabilities 0x%X' % caps)
+    check(caps == 0x002FFFFF and not caps >> 20 & 1, 'capabilities 0x%X' % caps)
     for p in (b'', b'\x00', b'\x01'):
         st, d = rig.ask('SETUP_LANGUAGE', p)
         check(st == S_UNKNOWN and not d, 'SETUP_LANGUAGE %r: status %d data %r' % (p, st, d))
