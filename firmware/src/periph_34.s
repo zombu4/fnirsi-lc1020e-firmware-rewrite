@@ -1277,7 +1277,11 @@ fn_080087d4:
 	vldr	s0, [r0, #0x3bc]	@ float at 0x20001138
 	sub.w	r0, r0, #0x800
 	ldr.w	r0, [r0, #0xbc8]	@ word at 0x20001144
+.ifdef OWN
+	bl	own_dac_setup		@ 0x08008808: 150 table entries at 120 Hz (own/meas.s)
+.else
 	bl	fn_08008814
+.endif
 	pop	{r0, r1, r2, r3, r4, pc}
 	.short	0x0000			@ padding
 .L08008810:

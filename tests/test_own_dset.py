@@ -37,7 +37,8 @@ measurement results since the measurement restart (capture()):
     0x200163A8); the tick words TICK_WORDS and the timer records' tick words (each written by a
     timer routine, the writer measured by a write hook, dimpl/exp3); the heap history counters
     HEAP_COUNTERS; the drawing scratch DRAW_BUF, DRAW_AREA, IMAGE_REC (the drawing is compared on
-    the panel); the MASKED handshake byte; and the GUI heap, which is compared by its block walk
+    the panel); the MASKED handshake byte; the unused tail of the DAC sine table (entries from the
+    count the frequency uses, ram_diff); and the GUI heap, which is compared by its block walk
     instead (heap_walk: the same used blocks, and their words equal; free blocks hold stale data
     and free-list links of the allocation history). A word that differs must be on the case's
     list of expected differences (KEY_ONLY: the key path's own words; plus the case's 2.4 entries);
@@ -102,7 +103,11 @@ TICK_WORDS = {0x20000000: 'fn_0802a720 (SysTick) counter', 0x20000004: 'fn_0802a
               0x200059A4: 'its entry 2',
               0x20000010: 'fn_0800bd5c counter: +1 per call (once a second, V_SWEEP_ON) in screen 3 up to 5 '
                           '(app_02.s 722-728); measured 2026-11-21, SCREEN 1 -> 3: 0 after the key path '
-                          '(its 1100 ms press), 1 after the direct change (screen 3 entered earlier)'}
+                          '(its 1100 ms press), 1 after the direct change (screen 3 entered earlier)',
+              0x200011F4: 'own/meas.s: the accepted count of the open window, which closes by time (T_win '
+                          'since the previous close, meas_add), so it depends on when the acquisitions came, '
+                          'not on how many came since the restart; measured 2026-11-22 (Func 1 -> 0): 0x33 '
+                          'after the key path, 0x34 after the direct change'}
 # the GUI heap's counters: fn_08022b50 adds the requested size to 0x200004F4 (maximum in 0x200004F8),
 # fn_08022c68 subtracts the block's size word and stores 0 when that is not smaller (guilib_29.s
 # 1982-1986, guilib_30.s 173-178): a count of the history, not of the live blocks (measured
@@ -226,8 +231,9 @@ class Probe:
         self.mmio = []
         self.at_call = False
         self.f10 = -1.0
-        self.results = 0                # calls of fn_08008ea8 (one per result) since the window's
-                                        # start or the last fn_08009f10
+        self.results = 0                # publishes (stores of 1 to 0x20001200, own/meas.s
+                                        # meas_tail) since the window's start or the last
+                                        # fn_08009f10
         self.timer_words = set()        # every address fn_08027830 + 0x78 stored a tick to
 
 
@@ -252,10 +258,10 @@ def make_rig(**kw):
         p.f10 = m.now()
         p.results = 0
 
-    def result(uc, a, size, u):
-        p.results += 1
-    f = rig.s['fn_08008ea8'] & ~1
-    m.uc.hook_add(UC_HOOK_CODE, result, begin=f, end=f)
+    def result(uc, acc, a, size, value, u):
+        if value == 1:
+            p.results += 1
+    m.uc.hook_add(UC_HOOK_MEM_WRITE, result, begin=0x20001200, end=0x20001203)
     f = rig.s['fn_08009f10'] & ~1
     m.uc.hook_add(UC_HOOK_CODE, f10, begin=f, end=f)
 
@@ -294,14 +300,17 @@ def window(rig):
 
 
 def capture(rig, t0, ref=None):
-    """The capture at the first main-loop pass after a result (fn_08008ea8 call) of the measurement:
+    """The capture at the first main-loop pass after a result of the measurement (a publish: the store
+    of 1 to 0x20001200 in own/meas.s meas_tail; the display changes only there, and the windows close
+    by time, so an alignment by acquisitions left one run before and one after a publish, measured
+    2026-11-22: a GUI object word 1 / 0, d01f):
     ref None (the key path): SETTLE s on, then the next result, then the pass. Else (the direct
     change): the run until as many results have come since the window's start or the last
-    fn_08009f10 (the measurement restart, which clears the averaging indices 0x200011F4 /
-    0x200011F8) as in ref, then the pass: both captures stand at the same point of the measurement
+    fn_08009f10 (the measurement restart, which own_measure sees and resets its window for) as in
+    ref, then the pass: both captures stand at the same point of the measurement
     (a capture at the same time alone left the indices one result apart, measured 2026-11-21:
-    13 / 14, and the restart request byte 0x200011C4 set in one run only). While hold is on the
-    measurement makes no result (measure_33.s 122): when none comes within 0.3 s of the key path's
+    13 / 14, and the restart request byte 0x200011C4 set in one run only). When none comes within
+    1.2 s (a window period at speed 0 and its display update) of the key path's
     SETTLE, both captures are taken at the same time after the window's start instead. Returns
     RAM, panel memory, peripheral writes, frames, the longest watchdog stretch, the alignment and
     the timer records' tick words."""
@@ -311,7 +320,7 @@ def capture(rig, t0, ref=None):
         s0 = rig.rd(OWN_CTL + CT_MEAS_SEQ)      # a whole averaged result after SETTLE (ctl.s
         rig.m.run_for(seconds=1.5, until=lambda m: rig.rd(OWN_CTL + CT_MEAS_SEQ) != s0)   # ev_detect)
         n0 = p.results
-        end = rig.m.run_for(seconds=0.3, until=lambda m: p.results != n0)
+        end = rig.m.run_for(seconds=1.2, until=lambda m: p.results != n0)
         check(end is None, 'key path run ended: %r' % end)
         want = p.results if p.results != n0 else None
     else:
@@ -355,6 +364,15 @@ def ram_diff(a, b, timer_words=()):
     ra, rb = a['ram'], b['ram']
     if ra == rb:
         return out
+    # the DAC sine table 0x20005120 (room for 180 halfwords): own_dac_setup (own/meas.s) writes n
+    # entries (36 from 100 kHz, 150 at 120 Hz, else 180) and DMA2 ch3 plays those n (count n,
+    # circular); the entries from n on are left from an earlier frequency, which the key path and the
+    # direct change pass differently (measured 2026-11-22, 120 -> 100000 Hz: the key path's tail from
+    # the 10 kHz table, the direct change's from the 120 Hz one). Compared up to n only, n from the
+    # frequency word of both captures (equal, else the word itself differs).
+    f = struct.unpack_from('<I', ra, 0x20001144 - VRAM_LO)[0]
+    n_dac = 36 if f >= 100000 else 150 if f == 120 else 180
+    dac_tail = (0x20005120 + 2 * n_dac, 0x20005120 + 2 * 180)
     for o in range(0, VRAM_N, 64):
         if ra[o:o + 64] == rb[o:o + 64]:
             continue
@@ -364,6 +382,7 @@ def ram_diff(a, b, timer_words=()):
                     and ad not in HEAP_COUNTERS and ad not in timer_words and ad != DRAW_AREA
                     and not DRAW_BUF[0] <= ad < DRAW_BUF[1] and not IMAGE_REC[0] <= ad < IMAGE_REC[1]
                     and not GLYPH_CACHE[0] <= ad < GLYPH_CACHE[1]
+                    and not dac_tail[0] <= ad < dac_tail[1]
                     and not HEAP[0] <= ad < HEAP[0] + HEAP[1]):
                 if ad in MASKED:
                     x, y = struct.unpack_from('<I', ra, k)[0], struct.unpack_from('<I', rb, k)[0]

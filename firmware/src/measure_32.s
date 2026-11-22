@@ -50,7 +50,11 @@ fn_08007bdc:
 	bl fn_0800b290
 	ldr.w r9, .L08007dfc		@ r9 = 0x2000057c, base of the module RAM
 	ldr.w r0, [r9, #0xbc8]		@ word at 0x20001144
+.ifdef OWN
+	bl own_tim1_setup		@ 0x08007C00: TIM1 period of whole signal periods (own/meas.s)
+.else
 	bl fn_08007e7c
+.endif
 	ldr.w r10, .L08007e00		@ r10 = 0x40020008, first channel block
 	mov r0, r10
 	bl fn_0800864c
@@ -1309,7 +1313,11 @@ fn_08009f10:
 	sub.w r4, r0, #0x800		@ r4 = 0x2000057c
 	vldr s0, [r0, #0x3bc]		@ float at 0x20001138
 	ldr.w r0, [r4, #0xbc8]		@ word 0x20001144
+.ifdef OWN
+	bl own_dac_setup		@ 0x08009F20: 150 table entries at 120 Hz (own/meas.s)
+.else
 	bl fn_08008814
+.endif
 	bl fn_08007bdc
 	ldr.w r0, [r4, #0xbd4]		@ word 0x20001150
 	mov.w r2, #0x3e8

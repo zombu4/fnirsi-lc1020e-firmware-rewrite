@@ -26,6 +26,8 @@
 	.fpu fpv4-sp-d16
 	.thumb
 
+	.include "own/own.inc"
+
 	.section .text.own.fix,"ax",%progbits
 	.p2align 2
 	.global	own_obj_del
@@ -83,13 +85,26 @@ own_event_obj:
 @   measurement stops (emulator, NOTES "Measurement path in the emulator").
 @   The fix: CHCFG bit 0 (CHEN) cleared first (the acquisition still running is restarted, which is
 @   what the request byte 0x200011C4 asks for), then the count as before; fn_08008770 enables it.
-@   Uses r2; r0, r1 as for fn_080087ce.
+@   The re-arm generation (MEASUREMENT_FIX_DESIGN.md S1.4): for DMA1 channel 1 (r0 = 0x40020008,
+@   the first of the three calls, periph_34.s; one call per re-arm, made only while the request
+@   byte was set) the word OWN_MEAS + MO_G is incremented, so own_measure (meas.s) can tell its
+@   own acquisition from one started by another writer of the request byte. Only this code writes
+@   the word; it runs inside the interrupt, so the main loop never sees a half-done update.
+@   Uses r2, r3 (fn_080085d0 loads r0 and r1 again before each call and keeps its own values in
+@   r4..r6); r0, r1 as for fn_080087ce.
 @ ----------------------------------------------------------------------------
 	.global	own_dma_rearm
 	.thumb_func
 	.type	own_dma_rearm, %function
 own_dma_rearm:
-	ldr	r2, [r0, #0]
+	ldr	r2, =DMA1_CH1
+	cmp	r0, r2
+	bne	1f			@ channels 8 and DMA2 5: no count
+	ldr	r2, =OWN_MEAS
+	ldr	r3, [r2, #MO_G]
+	adds	r3, r3, #1		@ one more re-arm (wraps at 2^32; meas.s compares the
+	str	r3, [r2, #MO_G]		@ signed difference)
+1:	ldr	r2, [r0, #0]
 	bic	r2, r2, #1		@ CHEN off: the count may be written now
 	str	r2, [r0, #0]
 	b.w	fn_080087ce

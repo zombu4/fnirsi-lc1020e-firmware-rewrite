@@ -367,6 +367,14 @@ Sources: main row 1 R 0x200050B8, 2 C 0x200050BC, 3 L 0x200050C0, 4 Z 0x200050C4
 0x200050CC. A main row or secondary outside these values gives a block with value 0, unit 0,
 decimals 0 and an empty text (validity 3 or 2 as above, else 0).
 
+The measured values (firmware/own/meas.s): theta (offset 45) is the phase of the measured
+impedance in degrees from -180 to 180, not folded into -90..90 as the vendor firmware V1.1 did, so
+a part with a negative resistive part keeps its sign in R (0x200050B8 in series mode; the value
+block of R carries the magnitude, as above). A new result comes once per averaging window: 1, 2
+or 4 per second for speed 0, 1 or 2. An overload (ADC saturated with no range step left, or no
+finite value) and the no-reading result (no in-band acquisition for 2 s) carry |Z| 1e10 and theta
+-400, the vendor firmware's values; while hold is on no result is published.
+
 ### 6.3 COMPARE (29 bytes)
 
 | Offset | Type | Field |

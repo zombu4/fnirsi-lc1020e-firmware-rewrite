@@ -469,10 +469,14 @@
         .equ    USB_SIZE,       0x80
         .equ    O_SCREEN,       0x30E0          @ screen.s state, 0x40 bytes
         .equ    SCREEN_SIZE,    0x40
-        .equ    O_CTL,          0x3120          @ ctl.s state, 0x2EC0 bytes (frame and answer
+        .equ    O_CTL,          0x3120          @ ctl.s state, 0x2DC0 bytes (frame and answer
                                                 @ buffers, event queue, the previous copy of the
                                                 @ settings block for SETTING_CHANGED)
-        .equ    CTL_SIZE,       0x2EC0
+        .equ    CTL_SIZE,       0x2DC0
+        .equ    O_MEAS,         0x5EE0          @ meas.s state, 0x100 bytes (the measurement core,
+                                                @ MEASUREMENT_FIX_DESIGN.md section 0 "RAM": taken
+                                                @ from the unused end of the former O_CTL area)
+        .equ    MEAS_SIZE,      0x100
         .equ    O_PWR,          0x5FE0          @ power.s state, the last 0x20 bytes
         .equ    PWR_SIZE,       0x20
 
@@ -483,7 +487,13 @@
         .equ    OWN_USB,        OWN_RAM + O_USB
         .equ    OWN_SCREEN,     OWN_RAM + O_SCREEN
         .equ    OWN_CTL,        OWN_RAM + O_CTL
+        .equ    OWN_MEAS,       OWN_RAM + O_MEAS
         .equ    OWN_PWR,        OWN_RAM + O_PWR
+
+@ meas.s words written by another module (offsets in its area; the others: meas.s header)
+        .equ    MO_G,           0x00            @ re-arm generation: +1 per re-arm of DMA1 channel 1,
+                                                @ written only by own_dma_rearm (fix.s) inside the
+                                                @ DMA2 channel 3 interrupt; meas.s only reads it
 
 @ save.s words (offsets in its area)
         .equ    SVO_FLAGS,      0x00            @ own_save_flags (SF_*)

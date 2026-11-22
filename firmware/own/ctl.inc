@@ -3,7 +3,7 @@
 @ control core, never writes them). Part of the FNIRSI LC1020E firmware rewrite (assembly).
 @
 @ Only .equ lines and one .if check: nothing here emits code, data or a section.
-@ The RAM of the control core is the area O_CTL of own.inc (0x2EC0 bytes from OWN_CTL); the
+@ The RAM of the control core is the area O_CTL of own.inc (0x2DC0 bytes from OWN_CTL); the
 @ offsets below are relative to OWN_CTL and end at CT_END (checked by the .if at the end).
 
 @ ============================================================================

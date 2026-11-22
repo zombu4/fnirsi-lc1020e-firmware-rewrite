@@ -117,7 +117,12 @@ def p1_off_time_5_min_key_at_4_min_resets():
     """Off Time 1 (5 min), no USB host: a physical key (0x0010, 60 ms) at 4 min restarts the idle time
     (PW_IDLE_T = the tick of its event); no power-off at 5 min after the start; the power-off path at 5 min
     after the key: requested on the first second of the grid with an idle time >= 300 s, then the save
-    (about 0.75 s, test_own_control k09) and PA8 low: within 300.0 .. 303.0 s of the key's release."""
+    (about 0.75 s, test_own_control k09) and PA8 low: within 300.0 .. 303.0 s of the key's release.
+    The key scan runs in the SysTick handler (system_40.s 766, fn_080094a0) and posts the event; pwr_step
+    takes it at the next main-loop pass. At the slow core of this file (cpi 30) a measurement publish is
+    followed by a pass of about 0.71 s (the display update; 0.12 s at cpi 5), twice a second, so the
+    case waits up to 2 s for that pass (measured 2026-11-22: main-loop passes of 0.71 s after each of
+    the publishes, 0.74 s apart)."""
     rig = off_rig(1)
     t_start = rig.m.now()
     rig.run(240.0 - (rig.m.now() - t_start))
@@ -125,6 +130,7 @@ def p1_off_time_5_min_key_at_4_min_resets():
     idle0 = rig.rd(PW_IDLE_T)
     rig.press(KEY_0010, 60)                              # run 0.06 s held, then 0.1 s
     t_key = rig.m.now() - 0.1
+    rig.m.run_for(seconds=2.0, until=lambda mm: rig.rd(PW_IDLE_T) != idle0)
     idle1 = rig.rd(PW_IDLE_T)
     check(idle1 > idle0 + 200000, 'the key did not restart the idle time (%d -> %d ms)' % (idle0, idle1))
     saves = rig.rd(SAVE_COUNT)

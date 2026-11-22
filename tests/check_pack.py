@@ -94,6 +94,12 @@ PATCHES = [
     # VENDOR_FIXES_DESIGN.md F8 / F9: the battery icon tail call, the logo entry
     (0x0800C862, 4, 'b.w own_batt_icon for the tail b.w fn_0800c724 of fn_0800c848'),
     (0x0800CE54, 4, 'b.w own_logo at the entry of fn_0800ce54'),
+    # MEASUREMENT_FIX_DESIGN.md stage 1: S1.1 timer / DAC set-up calls, the measurement core call,
+    # S1.6 the I-channel upper limit, S1.9 the factory-table protection
+    (0x08007C00, 4, 'bl own_tim1_setup for bl fn_08007e7c'), (0x08008808, 4, 'bl own_dac_setup for bl fn_08008814'),
+    (0x08009F20, 4, 'bl own_dac_setup for bl fn_08008814'), (0x080281D4, 4, 'bl own_measure for bl fn_0800a068'),
+    (0x0800B072, 4, 'movw r1, #0xe10 for movw r1, #0xbb8'), (0x0800BD0A, 2, 'b.n for bne.n .L0800bd1a'),
+    (0x08009A64, 2, 'nop.n for beq.n .L08009a82'),
     # LANGUAGE_DESIGN.md: the factory suffix, the menu toggle, the font counts
     (0x08009B08, 12, 'factory suffix "(FACT)"'), (0x0800D844, 12, 'factory suffix "(FACT)"'),
     (0x0800F78E, 4, 'nop.w for str.w r0, [r4, #0xbe0]'), (0x0800F796, 4, 'nop.w for str.w r5, [r4, #0xbe0]'),
@@ -108,7 +114,10 @@ POOL_RETARGET = {0x08009954: 0x08040F10, 0x0800995C: 0x08041184, 0x08009964: 0x0
 # the expected bytes of the patched fields whose value is fixed (checked as they are)
 PATCH_BYTES = {0x08009B08: b'(FACT)' + bytes(6), 0x0800D844: b'(FACT)' + bytes(6),
                0x0800F78E: bytes.fromhex('aff30080'), 0x0800F796: bytes.fromhex('aff30080'),
-               0x0802C788: struct.pack('<H', 1), 0x0802EBD4: struct.pack('<H', 1)}
+               0x0802C788: struct.pack('<H', 1), 0x0802EBD4: struct.pack('<H', 1),
+               # MEASUREMENT_FIX_DESIGN.md S1.6 (movw T3, imm16 0x0E10), S1.9 (b.n T2 offset 12, nop.n)
+               0x0800B072: bytes.fromhex('40f61061'), 0x0800BD0A: struct.pack('<H', 0xE006),
+               0x08009A64: struct.pack('<H', 0xBF00)}
 
 # 4-aligned V1.1 words with a value in 0x0802B703..0x08051757 that are data, not addresses
 # (RESOURCE_FACTS.md 1b, 2f): V1.1 address -> what

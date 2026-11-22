@@ -1974,14 +1974,29 @@ def k35_setting_events_of_the_block_compare():
     ID_CAL_TABLES event with the number 4), 0xB44 (the first word after them), 0xC00 / 0xC04 (two
     in one group), 0xC10 (the last word, the 773rd, outside every group of 4). Expected: one
     SETTING_CHANGED per non-table word with its new value, in the order of the offsets, and the
-    ID_CAL_TABLES event with 4; the same again when the words are put back."""
+    ID_CAL_TABLES event with 4; the same again when the words are put back. The words are written with
+    the rig stopped at the main loop's bl ctl_loop (0x080281D0, meter_model stop_req: the slice ends at
+    the next block), so ev_detect sees all of them in one pass: a stop anywhere else can fall inside its
+    block compare (2026-11-22, after the measurement core changed the instruction stream: 1 + 3 table
+    words in two passes)."""
     rig = Ctl().up()
     words = (0x000, 0x004, 0x008, 0x00C, 0xB40, 0xB44, 0xC00, 0xC04, 0xC10)
     single = [o for o in words if not 0x04 <= o < 0xB44]
     rig.run(0.2)
     rig.drain(0.05)
+    at = dict(arm=False, hit=False)
+
+    def loop_call(uc, a, size, u):
+        if at['arm']:
+            at['hit'] = True
+            rig.m.tm['stop_req'] = True
+    rig.m.uc.hook_add(UC_HOOK_CODE, loop_call, begin=0x080281D0, end=0x080281D0)
     old = {o: rig.rd(V_BLOCK + o) for o in words}
     for step, vals in (('changed', {o: old[o] ^ 0x00010000 for o in words}), ('put back', old)):
+        at.update(arm=True, hit=False)
+        end = rig.m.run_for(seconds=2.0, until=lambda m: at['hit'])
+        at['arm'] = False
+        check(end is None and at['hit'], '%s: main loop not reached (%r)' % (step, end))
         for o, v in vals.items():
             rig.wr(V_BLOCK + o, v)
         ev = [f for f in rig.drain(0.3) if f['type'] == FR_EVENT and f['cmd'] == E_SETTING]

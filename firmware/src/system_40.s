@@ -609,7 +609,11 @@ fn_08027ff4:
 .else
 	bl	fn_08009400
 .endif
+.ifdef OWN
+	bl	own_measure		@ 0x080281D4: our measurement core (own/meas.s)
+.else
 	bl	fn_0800a068
+.endif
 	ldr.w	r0, [r4, #0xb94]	@ word 0x20005110
 	cbz	r0, .L080281e6
 	str.w	r5, [r4, #0xb94]	@ clear it

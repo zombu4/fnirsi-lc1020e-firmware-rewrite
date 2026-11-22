@@ -522,8 +522,8 @@ fn_0800d8f0:
 @ fn_0800d940 - steps a setting: r0 = step (negative, 0 or positive).
 @ The word 0x200011a8 selects the mode:
 @ 0: steps the word 0x20001144 through the cycle 100 -> 0x78 -> 1000 -> 10000 ->
-@    100000 -> 100 (step above 0) and 100000 -> 10000 -> 1000 -> 0x78 -> 100
-@    (step below 0).
+@    100000 -> 100 (step above 0) and 100000 -> 10000 -> 1000 -> 0x78 -> 100 ->
+@    100000 (step below 0: from 100 it wraps to 100000 at .L0800d9b4).
 @ 1: switches the float 0x20001138 between 0x3f19999a, 0x3dcccccd and
 @    0x3e99999a depending on its range and on the float 0x2000113c (compared
 @    with 0x3dcccccd).

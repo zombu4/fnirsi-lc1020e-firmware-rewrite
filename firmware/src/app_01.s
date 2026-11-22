@@ -984,7 +984,11 @@ fn_08009974:
 .L08009a5e:
 	ldr.w r0, [r4, #0xc44]          @ word 0x200011c0
 	cmp r0, #2
+.ifdef OWN
+	nop.n                           @ 0x08009A64: restore with mode 0 also in factory mode (S1.9)
+.else
 	beq.n .L08009a82
+.endif
 	movs r0, #0
 .L08009a68:
 .ifdef OWN

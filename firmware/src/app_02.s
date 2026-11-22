@@ -81,7 +81,11 @@ fn_0800b000:
 	bl	fn_080093b8
 	b.n	.L0800b0a6
 .L0800b072:
+.ifdef OWN
+	movw	r1, #0xe10	@ 0x0800B072: upper limit 3600, the V channel's (own build, S1.6)
+.else
 	movw	r1, #0xbb8
+.endif
 	cmp	r5, r1
 	ble.n	.L0800b0b2
 	ldrb.w	r1, [r4, #0xc4a]
@@ -680,7 +684,11 @@ fn_0800bcd8:
 	bl	fn_08009f10
 	ldr.w	r0, [r4, #0xc44]
 	cmp	r0, #2
+.ifdef OWN
+	b.n	.L0800bd1a		@ 0x0800BD0A: the factory table is never overwritten (S1.9)
+.else
 	bne.n	.L0800bd1a
+.endif
 	mov.w	r2, #0x5a0
 	addw	r1, r4, #0x5a4
 	adds	r0, r4, #4
