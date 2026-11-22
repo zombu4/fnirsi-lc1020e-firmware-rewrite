@@ -373,6 +373,7 @@ class TableWatch:
         self.b4c8 = r['fn_0800b4c8']
         self.bb64 = r['fn_0800bb64']
         self.bcd8 = r['fn_0800bcd8']
+        self.snap = r.get('cal_snap')               # own/cal.s: the 30 entries written back (stage 3)
         self.load_str = None
         if 'own_load' in s:
             lo, hi = r['own_load']
@@ -403,18 +404,21 @@ class TableWatch:
             return 'b4c8-store'
         if inr(pc, self.bb64):
             return 'bb64'
+        if self.snap is not None and inr(pc, self.snap):
+            return 'cal-restore'
         if (inr(pc, self.fill) or inr(pc, self.copy)) and inr(lr, self.bcd8):
             return 'bcd8-copy'
         return 'other'
 
     def check(self, restore=False, what=''):
         """The writers of the factory table: the start-up fill and own_load (and fn_0800b4c8's copies when
-        restore); of the user table also fn_0800bb64; the factory table equal to the loaded copy."""
+        restore); of the user table also fn_0800bb64 and own/cal.s cal_snap (the sweep writes back the
+        entries it kept when a store fails, stage 3); the factory table equal to the loaded copy."""
         ok_f = {'scatter-zero', 'startup-fill', 'own_load'} | ({'b4c8'} if restore else set())
         bad = [(t, hex(pc), hex(lr), hex(a), n) for t, pc, lr, a, n in self.fac if self.kind(pc, lr) not in ok_f]
         check(not bad, '%s m15: unexpected writers of the factory table %r' % (what, bad[:5]))
         bad = [(t, hex(pc), hex(lr), hex(a), n) for t, pc, lr, a, n in self.usr
-               if self.kind(pc, lr) not in ok_f | {'bb64'}]
+               if self.kind(pc, lr) not in ok_f | {'bb64', 'cal-restore'}]
         check(not bad, '%s m15: unexpected writers of the user table %r' % (what, bad[:5]))
         now = self.rig.rd(FAC_LO, FAC_HI - FAC_LO)
         check(now == self.rig.block[4:0x5A4], '%s m15: the factory table differs from the loaded copy' % what)
@@ -1223,9 +1227,10 @@ def m11_contract():
 
 # ---------------------------------------------------------------- m12 factory table
 
-def sweep(rig, seconds=60.0):
+def sweep(rig, seconds=360.0):
     """Settings item 5 (calibration), key 8 (dialog), key 8 (start; the type 0x200050E0 is 0, the short),
-    then the run until 0x200050E4 is 0 again (fn_0800bd5c, 45 steps of 1 s) and 1 s for its save."""
+    then the run until 0x200050E4 is 0 again (own/cal.s, stage 3: 15 points of 3 windows, at most
+    20 s each, plus at most 30 s of the S4.4 bias wait after the start) and 1 s for its save."""
     settings_item(rig, 5)
     tap(rig, KEY_OK)
     check(rig.rd(V_DIALOG) != 0, 'calibration dialog not open')

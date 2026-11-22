@@ -31,12 +31,14 @@
 @   number 0, 2..6, never 1, lang.s own_menu), language u8 (0x2000115C, 1 in our build,
 @   save.s set_english), dropped frames u16, save status u8 (low byte of own_save_status), time u32
 @   (tick 0x20000480).
-@ MEASURE (65 bytes): result number u32, time u32; main row u8 (1 R, 2 C, 3 L, 4 Z) and its
+@ MEASURE (66 bytes): result number u32, time u32; main row u8 (1 R, 2 C, 3 L, 4 Z) and its
 @   value block; secondary u8 (0 R, 1 X, 2 D, 3 Q, 4 theta) and its value block; series /
 @   parallel u8 (0x200011EC: 0 series, 1 parallel); |Z| f32 (0x200050C4); theta f32
 @   (0x200050CC); frequency u32, level f32, bias f32, range u8, speed u8, circuit mode u8;
 @   markers u8 (bit 0 main, bit 1 secondary: the value lies outside the manual's accuracy
-@   table, fmt.s MF_MARK; MEASUREMENT_FIX_DESIGN.md S2.1).
+@   table, fmt.s MF_MARK; MEASUREMENT_FIX_DESIGN.md S2.1); OCAL flags u8 (bit 0 the gain
+@   correction applied, bit 1 GAIN present for the frequency but not at this cell, bit 2
+@   OCAL_LOCK active, bit 3 OF_RETAKE; ocal.s ocal_meas_flags, OWN_CAL_DESIGN.md 2.8).
 @   Value block (15 bytes): value f32 as the display formats it (R ohm, C nF, L uH, Z / X
 @   ohm, D / Q none, theta degree), unit code u8 of the display text (0 none, 1 ohm, 2 kohm,
 @   3 Mohm, 4 pF, 5 nF, 6 uF, 7 mF, 8 uH, 9 mH, 10 H, 11 degree), decimals u8 (digits after
@@ -57,7 +59,8 @@
 @ Never-brick: no access to the flash controller here. Settings are written only by the
 @ save.s functions; the BOOT_* writer writes the free slot and the record pages only through
 @ flash_word / flash_erase_page (save.s), with flash_boot_gate opened for that slot around
-@ each command and closed after it.
+@ each command and closed after it. The own calibration area is written only by ocal.s (OCAL_WRITE,
+@ OCAL_ROLLBACK, its handlers h_ocal_*), through the same primitives and flash_ocal_gate.
 
 	.syntax unified
 	.arch armv7e-m
@@ -78,7 +81,8 @@
 						@ 0x0800D294 formats X: the sign is kept)
 	.equ	VB_SIZE,	15		@ value block of MEASURE
 	.equ	STATE_SIZE,	32
-	.equ	MEASURE_SIZE,	65		@ 64 + the marker byte (S2.1)
+	.equ	MEASURE_SIZE,	66		@ 64 + the marker byte (S2.1) + the OCAL flags byte
+					@ (OWN_CAL_DESIGN.md 2.8)
 	.equ	COMPARE_SIZE,	50		@ 29 + the S2.8 / S2.9 tail
 	.equ	INFO_SIZE,	46
 	.equ	LCR_LISTS,	8
@@ -604,6 +608,12 @@ h_lcr_set:
 	ldrb	r0, [r6, #0]		@ number of values
 	cmp	r5, r0			@ index below it
 	bhs	h_bad			@ else status 2
+	cmp	r4, #5			@ range (0x2000114C) while OCAL_LOCK holds the codes:
+	bne	.Llr_go			@ status 3, nothing changed (OWN_CAL_DESIGN.md 2.2)
+	bl	ocal_locked
+	cmp	r0, #0
+	bne	h_notnow
+.Llr_go:
 	ldr	r1, [r6, #12]		@ values of the list, 0: the index is the value
 	mov	r0, r5			@ r0 = the index
 	cmp	r1, #0			@ a value table?
@@ -616,6 +626,109 @@ h_lcr_set:
 	movs	r1, #AN_MEASURE		@ its answer kind
 	bl	ds_request		@ refused or nothing to do: answered now; else a job
 	b	h_ret			@ r0 = ST_DEFER, r1 = 0
+
+@ MONITOR - the DUT level (OWN_CAL_DESIGN.md section 5), 25 bytes: V rms f32, I rms f32,
+@   A_V,ref f32, A_I,ref f32, flags u8 (bit 0 kV calibrated at the window's frequency, bit 1
+@   gain applied, bit 2 no reading or overload, bit 3 OCAL_LOCK), DC midpoint ADC1 u16, ADC2 u16
+@   (0x200011D0 / 0x200011D8, counts), window u32. From the window MEASURE published last
+@   (ocal_mon_get): A_V,ref = A_V |nu| / G[c5], A_I,ref = A_I / (G[c6] R[c8] |zeta|) with G from
+@   d_0802aee4 (bytes 1..128) and R from d_0802aeec (words, ohm), |nu| = |zeta| = 1 where the gain
+@   was not applied; V = kV A_V,ref, I = kV A_I,ref (ocal_kv). NaN (0x7FC00000) for V and I
+@   without kV or outside the six frequencies; NaN for all four when no window was published
+@   or the published |Z| 0x200050C4 is 1e10 (the overload and no-reading sets).
+	.thumb_func
+	.type	h_monitor, %function
+h_monitor:
+	push	{r4, r5, r6, r7, r8, lr}
+	mov	r6, r2			@ r6 = answer
+	bl	ocal_mon_get		@ r0 codes, r1 fi, r2 window, r3 bits; s0 A_V, s1 A_I, s2 |nu|,
+	str	r2, [r6, #21]		@ s3 |zeta|
+	mov	r4, r0			@ r4 = codes
+	mov	r5, r1			@ r5 = fi
+	movs	r7, #0			@ r7 = flags
+	tst	r3, #1
+	it	ne
+	orrne	r7, r7, #2		@ gain applied
+	ldr	r0, =V_Z
+	ldr	r0, [r0]
+	ldr	r1, =0x501502F9		@ 1e10: the overload / no-reading set
+	cmp	r0, r1
+	it	eq
+	biceq	r3, r3, #2
+	tst	r3, #2
+	bne	.Lmon_ref
+	orr	r7, r7, #4		@ no reading or overload: all NaN
+	ldr	r0, =0x7FC00000
+	str	r0, [r6, #0]
+	str	r0, [r6, #4]
+	str	r0, [r6, #8]
+	str	r0, [r6, #12]
+	b	.Lmon_tail
+.Lmon_ref:
+	ldr	r1, =d_0802aee4		@ gains 1, 2 .. 128 (bytes)
+	uxtb	r0, r4			@ c5
+	cmp	r0, #8
+	bhs	.Lmon_nan4
+	ldrb	r0, [r1, r0]
+	vmov	s4, r0
+	vcvt.f32.u32	s4, s4		@ G[c5]
+	vmul.f32	s5, s0, s2	@ A_V |nu|
+	vdiv.f32	s5, s5, s4	@ A_V,ref
+	ubfx	r0, r4, #8, #8		@ c6
+	cmp	r0, #8
+	bhs	.Lmon_nan4
+	ldrb	r0, [r1, r0]
+	vmov	s4, r0
+	vcvt.f32.u32	s4, s4		@ G[c6]
+	ubfx	r0, r4, #16, #8		@ c8
+	cmp	r0, #4
+	bhs	.Lmon_nan4
+	ldr	r1, =d_0802aeec		@ range resistors 100, 1k, 10k, 100k (words)
+	ldr	r0, [r1, r0, lsl #2]
+	vmov	s6, r0
+	vcvt.f32.u32	s6, s6		@ R[c8]
+	vmul.f32	s4, s4, s6
+	vmul.f32	s4, s4, s3	@ G[c6] R[c8] |zeta|
+	vdiv.f32	s6, s1, s4	@ A_I,ref
+	vmov	r0, s5
+	str	r0, [r6, #8]
+	vmov	r0, s6
+	str	r0, [r6, #12]
+	mov	r0, r5
+	bl	ocal_kv			@ r0 = 1 and s0 = kV (changes r1, r2 only; s5, s6 kept)
+	cmp	r0, #0
+	beq	.Lmon_nan2
+	orr	r7, r7, #1
+	vmul.f32	s1, s0, s5	@ V
+	vmul.f32	s2, s0, s6	@ I
+	vmov	r0, s1
+	str	r0, [r6, #0]
+	vmov	r0, s2
+	str	r0, [r6, #4]
+	b	.Lmon_tail
+.Lmon_nan4:
+	orr	r7, r7, #4
+	ldr	r0, =0x7FC00000
+	str	r0, [r6, #8]
+	str	r0, [r6, #12]
+.Lmon_nan2:
+	ldr	r0, =0x7FC00000
+	str	r0, [r6, #0]
+	str	r0, [r6, #4]
+.Lmon_tail:
+	bl	ocal_locked
+	cmp	r0, #0
+	it	ne
+	orrne	r7, r7, #8
+	strb	r7, [r6, #16]
+	ldr	r1, =0x200011D0		@ ADC1 midpoint (fn_08007fd4)
+	ldrh	r0, [r1]
+	strh	r0, [r6, #17]
+	ldrh	r0, [r1, #8]		@ 0x200011D8 ADC2 midpoint (fn_08007f38)
+	strh	r0, [r6, #19]
+	movs	r0, #S_OK
+	movs	r1, #25
+	b	h_ret
 
 @ MEASURE - the MEASURE record.
 	.thumb_func
@@ -829,9 +942,10 @@ h_compare_set:
 @ confirmation u16 0x4F4B. Refused while saves are held (3: the result could not be saved)
 @ and while a calibration runs (4). The meter's procedure with the guard off: settings, menu
 @ item 5, key 8 (dialog), keys 4 / 0x10 to the type (0x200050E0), key 8 (start: 0x200050E4
-@ = 1); then the sweep 0x0800BD5C runs from the main loop until status 0x200050EC is 2
-@ (finish, saved by 0x0800BCD8) or 3. Progress as events 0x97. Answer: status u8, type u8,
-@ own_save_status u32.
+@ = 1); then the sweep (cal_step, cal.s; MEASUREMENT_FIX_DESIGN stage 3) runs from the main
+@ loop until status 0x200050EC is 2 (finish, saved by cal_finish) or 3. Progress as events
+@ 0x97. Answer: status u8, type u8, own_save_status u32, failed point u8 (0xFF none), reason u8
+@ (CAL_R_*; capability bit 25).
 	.thumb_func
 	.type	h_calibrate, %function
 h_calibrate:
@@ -1581,7 +1695,8 @@ h_boot_status:
 @ ----------------------------------------------------------------------------
 @ job_answer - r0 = AN_* kind, r1 = status: the answer data of the kind built at
 @   CT_ANSB + 1 and made pending (ans_set). AN_CAL: status u8 0x200050EC, type u8
-@   0x200050E0, own_save_status u32. AN_SAVE: own_save_status u32, own_save_flags u32, STATE.
+@   0x200050E0, own_save_status u32, failed point u8 and reason u8 (OWN_CAL CAO_FAILP / CAO_WHY,
+@   cal.s). AN_SAVE: own_save_status u32, own_save_flags u32, STATE.
 @ ----------------------------------------------------------------------------
 	.global	job_answer
 	.thumb_func
@@ -1619,7 +1734,12 @@ job_answer:
 	ldr	r0, =own_save_status
 	ldr	r0, [r0]
 	str	r0, [r4, #2]
-	movs	r0, #6
+	ldr	r1, =OWN_CAL
+	ldr	r0, [r1, #CAO_FAILP]
+	strb	r0, [r4, #6]		@ the point that failed, 0xFF none (cal.s)
+	ldr	r0, [r1, #CAO_WHY]
+	strb	r0, [r4, #7]		@ its reason CAL_R_*
+	movs	r0, #8
 	b	.Lja_set
 .Lja_save:
 	cmp	r0, #AN_SAVE
@@ -1881,6 +2001,8 @@ rec_measure:
 	ldr	r0, =V_CIRCUIT
 	ldr	r0, [r0]
 	strb	r0, [r4, #63]
+	bl	ocal_meas_flags		@ OCAL flags: gain applied, GAIN not at this cell, lock,
+	strb	r0, [r4, #65]		@ OF_RETAKE (ocal.s)
 	movs	r0, #MEASURE_SIZE
 	pop	{r4, r5, r6, pc}
 
@@ -2594,6 +2716,22 @@ cmd_table:
 	.word	h_calibrate
 	.short	C_TOL_SET, 0
 	.word	h_tol_set
+	.short	C_OCAL_INFO, 0
+	.word	h_ocal_info
+	.short	C_OCAL_READ, 0
+	.word	h_ocal_read
+	.short	C_OCAL_WRITE, 0
+	.word	h_ocal_write
+	.short	C_OCAL_ROLLBACK, 0
+	.word	h_ocal_rollback
+	.short	C_OCAL_LOCK, 0
+	.word	h_ocal_lock
+	.short	C_OCAL_RAW, 0
+	.word	h_ocal_raw
+	.short	C_OCAL_TRACE, 0
+	.word	h_ocal_trace
+	.short	C_MONITOR, 0
+	.word	h_monitor
 	.short	C_SET_TABLES, 0
 	.word	h_set_tables
 	.short	C_SET_SET, 0

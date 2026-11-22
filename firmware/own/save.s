@@ -18,8 +18,9 @@
 @ refuse every address outside the gate: the four settings pages 0x08066000, 0x08066800,
 @ 0x0807F000, 0x0807F800, and, only while ctl.s has opened it with flash_boot_gate, slot A
 @ 0x0806F000..0x08074FFF or slot B 0x08075000..0x0807AFFF and the record pages
-@ 0x08068000..0x08068FFF. Page 0, the application area, slot F and the option bytes are never
-@ reachable. FLASH_CTRL is written as a whole value (SMPSEL 0: SMP1 refuses a word that is not
+@ 0x08068000..0x08068FFF, and, only while ocal.s has opened it with flash_ocal_gate (SVO_OCAL =
+@ OCAL_BASE exactly), the own calibration area 0x08062000..0x08065FFF (OWN_CAL_DESIGN.md 1.4).
+@ Page 0, the application area, slot F and the option bytes are never reachable. FLASH_CTRL is written as a whole value (SMPSEL 0: SMP1 refuses a word that is not
 @ erased; no interrupt enable: the vendor code sets none, it only ORs PG / PER / START / LOCK
 @ and ANDs them away, periph_34.s fn_08008d30 / fn_08008dc0 / fn_08008db0). Each primitive
 @ leaves the controller locked.
@@ -41,6 +42,9 @@
 @ loaded block in RAM only (S2.11, load_fix; the calibration tables are not examined); every block
 @ our firmware stages for a write from RAM or from the host holds 100, never 60, as its frequency
 @ (S2.12 D60-a, stage_freq_fix in own_save, save_accept_defaults and save_write_block).
+@ Stage 3 (revision 7): while the calibration sweep of cal.s runs, own_save and
+@ save_accept_defaults stage the frequency, level, bias, speed and 0x200010C0 words of before the
+@ sweep (stage_cal_fix, from cal.s's recording), so no saved copy holds the sweep's settings.
 @
 @ Calling convention of every exported function: AAPCS; r0..r3, r12 and the flags clobbered,
 @ r4..r11 kept, no FPU register used. Stack: at most 72 bytes below the caller's SP.
@@ -145,8 +149,9 @@ own_crc32:
 @ gate_ok - r0 = start address, r1 = length in bytes (> 0).
 @   Returns r0 = FL_OK when [start, start + length) lies inside one settings
 @   copy, or, while own_gate_slot holds SLOT_A or SLOT_B, inside that slot or
-@   inside the record pages; otherwise FL_GATE. Any other value of
-@   own_gate_slot counts as closed. Uses r1..r3.
+@   inside the record pages; or, while own_ocal_gate holds OCAL_BASE, inside
+@   [OCAL_BASE, OCAL_END); otherwise FL_GATE. Any other value of
+@   own_gate_slot / own_ocal_gate counts as closed. Uses r1..r3.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	gate_ok, %function
@@ -163,10 +168,21 @@ gate_ok:
 .Lg_set_a:
 	ldr	r3, [r2, #8]
 	cmp	r0, r3
-	blo	.Lg_boot
+	blo	.Lg_ocal
 	ldr	r3, [r2, #12]
 	cmp	r1, r3
 	bls	.Lg_yes
+.Lg_ocal:
+	ldr	r2, =own_ocal_gate
+	ldr	r2, [r2]		@ r2 = OCAL_BASE while ocal.s may write the area
+	ldr	r3, =OCAL_BASE
+	cmp	r2, r3
+	bne	.Lg_boot		@ any other value counts as closed
+	cmp	r0, r3
+	blo	.Lg_boot
+	ldr	r3, =OCAL_END
+	cmp	r1, r3
+	bls	.Lg_yes			@ [start, end) inside 0x08062000..0x08065FFF
 .Lg_boot:
 	ldr	r2, =own_gate_slot
 	ldr	r2, [r2]		@ r2 = slot the BOOT writer may write
@@ -224,6 +240,35 @@ flash_boot_gate:
 	movs	r0, #FL_GATE
 	bx	lr
 .Lbg_open:
+	str	r0, [r1]
+	movs	r0, #FL_OK
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ flash_ocal_gate - open or close the own calibration area (OWN_CAL_DESIGN.md 1.4 step 3).
+@   r0 = OCAL_BASE: 0x08062000..0x08065FFF becomes writable; r0 = 0: closed.
+@   Returns r0 = FL_OK; any other r0 closes the gate and returns FL_GATE. Only
+@   ocal.s calls it (ocal_commit, ocal_revoke), each closing it before it
+@   returns. Uses r1, r2.
+@ ----------------------------------------------------------------------------
+	.global	flash_ocal_gate
+	.thumb_func
+	.type	flash_ocal_gate, %function
+flash_ocal_gate:
+	ldr	r1, =own_ocal_gate
+	ldr	r2, =OCAL_BASE
+	cmp	r0, r2
+	beq	.Log_open
+	movs	r2, #0
+	str	r2, [r1]
+	cmp	r0, #0
+	bne	.Log_bad
+	movs	r0, #FL_OK
+	bx	lr
+.Log_bad:
+	movs	r0, #FL_GATE
+	bx	lr
+.Log_open:
 	str	r0, [r1]
 	movs	r0, #FL_OK
 	bx	lr
@@ -541,6 +586,46 @@ stage_freq_fix:
 	movs	r2, #100
 	str	r2, [r1]
 .Lff_out:
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ stage_cal_fix - MEASUREMENT_FIX_DESIGN stage 3 (CAL_SETTLE critique item 4): while a sweep of
+@   cal.s runs (OWN_CAL CAO_ON != 0, with a recording CAO_REC != 0) the staged block gets back the
+@   words the calibration start changed: frequency, level, bias and speed (block offsets 0xBC8,
+@   0xBBC, 0xBC0, 0xBD4) and the 0x78 bytes at block offset 0xB44 (0x200010C0) from the recording
+@   (CAO_SFREQ .. CAO_SSPEED, CAO_REL). A save during the sweep (power key, low voltage, host)
+@   then writes the settings of before the sweep; the calibration tables are not touched (cal.s
+@   stores them only at the end). Called before stage_freq_fix, so a recorded 60 Hz is saved as
+@   100. OWN_CAL is only read. Uses r0..r3.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	stage_cal_fix, %function
+stage_cal_fix:
+	ldr	r2, =OWN_CAL
+	ldr	r0, [r2, #CAO_ON]
+	cmp	r0, #0
+	beq	.Lcf_out
+	ldr	r0, [r2, #CAO_REC]
+	cmp	r0, #0
+	beq	.Lcf_out
+	ldr	r1, =OWN_STAGE
+	ldr	r0, [r2, #CAO_SFREQ]
+	str	r0, [r1, #V_FREQ - V_BLOCK]
+	ldr	r0, [r2, #CAO_SLEVEL]
+	str	r0, [r1, #V_LEVEL - V_BLOCK]
+	ldr	r0, [r2, #CAO_SBIAS]
+	str	r0, [r1, #V_BIAS - V_BLOCK]
+	ldr	r0, [r2, #CAO_SSPEED]
+	str	r0, [r1, #V_SPEED - V_BLOCK]
+	add	r1, r1, #V_CAL_WORK - V_BLOCK
+	add	r2, r2, #CAO_REL
+	movs	r3, #30
+.Lcf_copy:
+	ldr	r0, [r2], #4
+	str	r0, [r1], #4
+	subs	r3, r3, #1
+	bne	.Lcf_copy
+.Lcf_out:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
@@ -1084,7 +1169,8 @@ own_load:
 @   start-up chooser 0x080281F8 and the Chinese rows are never reached).
 @   Writes nothing and returns SV_REFUSED while own_injected is set (guard,
 @   USB_CONTROL_DESIGN.md 4.3) and SV_HELD while SF_HELD or SF_RESTART is
-@   set. Otherwise: snapshot of the RAM block 0x2000057C into OWN_STAGE, its
+@   set. Otherwise: snapshot of the RAM block 0x2000057C into OWN_STAGE, the
+@   settings of before a running calibration sweep (stage_cal_fix, stage 3), its
 @   frequency 60 -> 100 (stage_freq_fix, S2.12); when both copies already
 @   hold exactly that block (stage_same, S2.10): SV_SAME, nothing erased or
 @   programmed; else save_stage(MODE_ORDER, highest valid sequence + 1).
@@ -1108,6 +1194,7 @@ own_save:
 	bne	.Lsv_held
 	ldr	r0, =V_BLOCK		@ design step 1: snapshot
 	bl	stage_copy
+	bl	stage_cal_fix		@ stage 3: a sweep in progress saves the settings of before it
 	bl	stage_freq_fix		@ S2.12: 60 Hz is saved as 100 Hz
 	bl	stage_same		@ S2.10: both copies hold it already?
 	cmp	r0, #0
@@ -1233,6 +1320,7 @@ save_accept_defaults:
 	beq	.Lad_refused
 	ldr	r0, =V_BLOCK
 	bl	stage_copy
+	bl	stage_cal_fix		@ stage 3: a sweep in progress saves the settings of before it
 	bl	stage_freq_fix		@ S2.12: 60 Hz is saved as 100 Hz
 	bl	stage_markers
 	cmp	r0, #0

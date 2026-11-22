@@ -1,9 +1,9 @@
 @ ctl.inc - private constants of the control core (own/ctl.s, own/cmd.s and own/dset.s),
-@ included after own/own.inc by those three files and by own/power.s (which reads words of the
+@ included after own/own.inc by those three files, by own/power.s and own/ocal.s (which read words of the
 @ control core, never writes them). Part of the FNIRSI LC1020E firmware rewrite (assembly).
 @
 @ Only .equ lines and one .if check: nothing here emits code, data or a section.
-@ The RAM of the control core is the area O_CTL of own.inc (0x2DC0 bytes from OWN_CTL); the
+@ The RAM of the control core is the area O_CTL of own.inc (CTL_SIZE bytes from OWN_CTL, 0x1DE0); the
 @ offsets below are relative to OWN_CTL and end at CT_END (checked by the .if at the end).
 
 @ ============================================================================
@@ -175,7 +175,11 @@
         .equ    AN_SAVE,        4               @ save status and flags, then STATE
         .equ    AN_NONE,        5               @ status only
         .equ    JOB_LIMIT_MS,   20000           @ time limit of a key job
-        .equ    CAL_LIMIT_MS,   120000          @ time limit of CALIBRATE
+        .equ    CAL_LIMIT_MS,   360000          @ time limit of CALIBRATE: 15 points of at most
+                                                @ CA_POINT_MS (cal.s, 20 s), 30 s for the S4.4
+                                                @ bias wait after the start (meas.s BIAS_MAX_MS,
+                                                @ not counted as a point's time) and 30 s for the
+                                                @ menu steps before OP_WAITCAL
         .equ    ERASE_LIMIT_MS, 10000           @ time limit of BOOT_BEGIN
         .equ    DS_LIMIT_MS,    2000            @ time limit of a direct change (a key held)
 @ results of ds_check (dset.s); the refusals are the status codes S_* (2..6)
@@ -197,12 +201,14 @@
                                                 @ except POWER_OFF (USB_CONTROL_DESIGN.md 9)
         .equ    ST_DEFER,       0xFF            @ handler result: the answer comes from the job
                                                 @ (or was made pending by job_answer already)
-        .equ    CAPS_ALL,       0x01EFFFFF      @ capability bits 0..19 (4.8; bit 20, SETUP_LANGUAGE,
+        .equ    CAPS_ALL,       0x07EFFFFF      @ capability bits 0..19 (4.8; bit 20, SETUP_LANGUAGE,
                                                 @ clear: English only), bit 21: SCREEN, LCR_SET,
                                                 @ HOLD, SETTINGS_SET, COMPARE_SET set directly
                                                 @ (DIRECT_SET_DESIGN.md revision 2), bits 22..24:
                                                 @ CAP_F60, CAP_TOL, CAP_DISP2 (own.inc;
-                                                @ MEASUREMENT_FIX_DESIGN.md stage 2, revision 6)
+                                                @ MEASUREMENT_FIX_DESIGN.md stage 2, revision 6),
+                                                @ bit 25: CAP_CAL3 (the sweep of cal.s, stage 3,
+                                                @ revision 7); bit 26: CAP_OCAL (ocal.s)
         .equ    ID_CAL_TABLES,  0xFFFE          @ SETTING_CHANGED id: words changed in the
                                                 @ calibration tables (value = their number)
         .equ    V_SCALE,        0x2000119C      @ sorting nominal unit / scale index 0..3

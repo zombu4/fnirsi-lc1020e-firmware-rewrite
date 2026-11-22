@@ -178,12 +178,15 @@ def p2_off_time_0_never_then_1_at_once():
 def p3_dtr_holds_the_idle_time():
     """Off Time 1 with a host that enumerated and set DTR (UsbHost.enumerate): 5 min + 10 s without a
     request and without a power-off request, the idle tick taken every pass (tick - PW_IDLE_T below
-    0.2 s); after SET_CONTROL_LINE_STATE with DTR 0 the idle time counts (3 s later at least 2.5 s)."""
+    0.8 s, one long pass of the slow core); after SET_CONTROL_LINE_STATE with DTR 0 the idle time counts (3 s later at least 2.5 s)."""
     rig = off_rig(1, usb=True)
     rig.run(OFF5 + 10.0)
     lag = (tick(rig) - rig.rd(PW_IDLE_T)) / 1000.0
     check(powered(rig) and not rig.rd(PW_FLAGS) & PF_REQ, 'DTR set: power-off requested')
-    check(lag < 0.2, 'DTR set: idle tick %.3f s old' % lag)
+    # at the slow core of this file a publish is followed by a pass of about 0.71 s (the display
+    # update, p1's docstring), and the tick is taken once per pass, so the instant read here can lie
+    # inside such a pass (2026-11-22: 0.550 s); the bound is one long pass
+    check(lag < 0.8, 'DTR set: idle tick %.3f s old' % lag)
     rig.host.set_control_line_state(dtr=False)
     rig.run(3.0)
     lag = (tick(rig) - rig.rd(PW_IDLE_T)) / 1000.0

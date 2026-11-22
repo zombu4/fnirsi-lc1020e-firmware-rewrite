@@ -306,6 +306,11 @@
         .equ    HDR_MAGIC,      0x544F4C53      @ slot header +0 "SLOT"; +4 length, +8 image
                                                 @ CRC-32, +12 version, +16 link address
                                                 @ (slot + 0x200), +28 CRC-32 of bytes 0..27
+@ Own calibration area (OWN_CAL_DESIGN.md 1.1 / 1.2): written by nothing but ocal.s through the
+@ save.s gate (SVO_OCAL); two slots of 4 pages.
+        .equ    OCAL_BASE,      0x08062000      @ slot 0; also the only value that opens the gate
+        .equ    OCAL_SLOT,      0x2000          @ slot size; slot 1 at OCAL_BASE + OCAL_SLOT
+        .equ    OCAL_END,       0x08066000      @ end of the area (exclusive) = copy B (SET_B)
 
 @ ============================================================================
 @ Save and flash results (save.s)
@@ -418,6 +423,14 @@
         .equ    C_BOOT_END,     0x87
         .equ    C_BOOT_INSTALL, 0x88
         .equ    C_BOOT_STATUS,  0x89
+        .equ    C_OCAL_INFO,    0x30            @ own calibration area (OWN_CAL_DESIGN.md 4.1)
+        .equ    C_OCAL_READ,    0x31
+        .equ    C_OCAL_WRITE,   0x32
+        .equ    C_OCAL_ROLLBACK, 0x33
+        .equ    C_OCAL_LOCK,    0x34
+        .equ    C_OCAL_RAW,     0x35
+        .equ    C_OCAL_TRACE,   0x36
+        .equ    C_MONITOR,      0x37
         .equ    E_KEY,          0x90            @ events (type 4, while DTR is set)
         .equ    E_SCREEN,       0x91
         .equ    E_SETTING,      0x93
@@ -425,6 +438,7 @@
         .equ    E_MEASURE_DONE, 0x95
         .equ    E_SAVE_RESULT,  0x96
         .equ    E_CALIBRATION,  0x97
+        .equ    E_OCAL,         0x98            @ OCAL_CHANGED: slot u8, sequence u32, flags u32
         .equ    CONFIRM_POWER_OFF, 0x4F46       @ confirmation of POWER_OFF
 
 @ Capability bits (4.8)
@@ -454,6 +468,14 @@
                                                 @ of S2.8 / S2.9
         .equ    CAP_DISP2,      1 << 24         @ MEASURE byte 64 (S2.1 markers), signed values,
                                                 @ save result SV_SAME (S2.1, S2.2, S2.10)
+        .equ    CAP_CAL3,       1 << 25         @ the calibration sweep of cal.s (stage 3): the
+                                                @ results kept in RAM and stored at the end, the
+                                                @ settings restored, CALIBRATE answer 8 bytes with
+                                                @ the failed point and its reason, CAL_LIMIT_MS
+                                                @ 330 s, step 0x200050E8 = 3 x points done + windows
+        .equ    CAP_OCAL,       1 << 26         @ the own calibration area (ocal.s, OWN_CAL_DESIGN.md
+                                                @ revision 3): OCAL_INFO .. OCAL_TRACE, MONITOR,
+                                                @ event OCAL_CHANGED, MEASURE byte 65
 
 @ ============================================================================
 @ Our RAM: 0x20018000..0x2001DFFF (24 KiB above the vendor stack top 0x200163A8, below the
@@ -477,10 +499,20 @@
         .equ    USB_SIZE,       0x80
         .equ    O_SCREEN,       0x30E0          @ screen.s state, 0x40 bytes
         .equ    SCREEN_SIZE,    0x40
-        .equ    O_CTL,          0x3120          @ ctl.s state, 0x2CC0 bytes (frame and answer
+        .equ    O_CTL,          0x3120          @ ctl.s state, 0x1DE0 bytes (frame and answer
                                                 @ buffers, event queue, the previous copy of the
                                                 @ settings block for SETTING_CHANGED)
-        .equ    CTL_SIZE,       0x2CC0
+        .equ    CTL_SIZE,       0x1DE0          @ O_OCAL - O_CTL (CT_END 0x16B4, ctl.inc check)
+        .equ    O_OCAL,         0x4F00          @ ocal.s state, 0xCE0 bytes (OWN_CAL_DESIGN.md
+                                                @ revision 3, section 8 RAM: state 0xA0 = the
+                                                @ design's 0x80 + the level-monitor snapshot,
+                                                @ raw record 0x40, trace 0x200, staging 0xA00):
+                                                @ below O_CAL, from the unused end of O_CTL
+        .equ    OCAL_SIZE,      0xCE0
+        .equ    O_CAL,          0x5BE0          @ cal.s state, 0x200 bytes (the calibration sweep,
+                                                @ MEASUREMENT_FIX_DESIGN.md stage 3, revision 7):
+                                                @ from the unused end of O_CTL (CT_END 0x16B4)
+        .equ    CAL_SIZE,       0x200
         .equ    O_FUNC,         0x5DE0          @ the instrument functions (fmt.s, cmp.s and the
                                                 @ stage-2 words of meas.s), 0x100 bytes
                                                 @ (MEASUREMENT_FIX_DESIGN.md stages 2 / 2F / 2G,
@@ -502,6 +534,14 @@
         .equ    OWN_CTL,        OWN_RAM + O_CTL
         .equ    OWN_MEAS,       OWN_RAM + O_MEAS
         .equ    OWN_FUNC,       OWN_RAM + O_FUNC
+        .equ    OWN_CAL,        OWN_RAM + O_CAL
+        .equ    OWN_OCAL,       OWN_RAM + O_OCAL
+        .if     O_OCAL + OCAL_SIZE > O_CAL
+        .error  "own.inc: O_OCAL overlaps O_CAL"
+        .endif
+        .if     O_CTL + CTL_SIZE > O_OCAL
+        .error  "own.inc: O_CTL overlaps O_OCAL"
+        .endif
         .equ    OWN_PWR,        OWN_RAM + O_PWR
 
 @ OWN_FUNC words, each written only by the module named (cleared to 0 by own_start at every
@@ -538,10 +578,61 @@
         .equ    MF_BEEPN,       0x74            @ cmp.s: beeps still to sound
         .equ    MF_BEEPT,       0x78            @ cmp.s: tick of the next beeper step
         .equ    MF_BEEPS,       0x7C            @ cmp.s: 0 idle, 1 beeper on, 2 gap
-        .equ    MF_END,         0x80
+        .equ    MF_BIASP,       0x80            @ meas.s S4.4: 0 no bias transient, 1 a bias change
+                                                @ seen (no midpoints yet), 2 midpoints in MF_BMID
+        .equ    MF_BMID,        0x84            @ meas.s S4.4: halfword 0x200011D0 | halfword
+                                                @ 0x200011D8 << 16 at the previous window close
+        .equ    MF_BT0,         0x88            @ meas.s S4.4: tick word 0x20000480 at the change
+        .equ    MF_END,         0x8C
         .if     MF_END > FUNC_SIZE
         .error  "own.inc: the OWN_FUNC words do not fit O_FUNC"
         .endif
+
+@ OWN_CAL words (cal.s, the calibration sweep; MEASUREMENT_FIX_DESIGN.md stage 3). Written only by
+@ cal.s; save.s reads the recorded settings (stage_cal_fix), cmd.s the failed point and reason.
+        .equ    CAO_ON,         0x00            @ 0 idle, 1 a sweep runs (its points in progress)
+        .equ    CAO_PT,         0x04            @ point 0..14 in progress (frequency index
+                                                @ point / 3, level index point mod 3)
+        .equ    CAO_NW,         0x08            @ windows of the point held in CAO_WIN, 0..3
+        .equ    CAO_NT,         0x0C            @ windows taken at this point in all
+        .equ    CAO_PSEQ,       0x10            @ MF_PSEQ (publishes of meas.s) as last seen
+        .equ    CAO_TPT,        0x14            @ tick at the start of the point
+        .equ    CAO_G,          0x18            @ the re-arm generation MO_G as last seen
+        .equ    CAO_TG,         0x1C            @ tick when MO_G last changed (the stall test)
+        .equ    CAO_FAILP,      0x20            @ point that failed, 0xFF none (CALIBRATE byte 6)
+        .equ    CAO_WHY,        0x24            @ its reason CAL_R_* (CALIBRATE byte 7)
+        .equ    CAO_REC,        0x28            @ 1 once CAO_SFREQ .. CAO_REL hold a recording
+        .equ    CAO_SFREQ,      0x2C            @ frequency 0x20001144 before the sweep
+        .equ    CAO_SLEVEL,     0x30            @ level 0x20001138
+        .equ    CAO_SBIAS,      0x34            @ bias 0x2000113C
+        .equ    CAO_SSPEED,     0x38            @ speed 0x20001150
+        .equ    CAO_STYPE,      0x3C            @ calibration type 0x200050E0
+        .equ    CAO_WIN,        0x40            @ 3 windows of the point: |Z| bits, theta bits
+        .equ    CAO_RES,        0x58            @ 15 results (|Z|, theta) by point
+        .equ    CAO_SNAP,       0xD0            @ 30 words: the type's 15 |Z| and 15 theta entries
+                                                @ before the store (restored when one fails)
+        .equ    CAO_REL,        0x148           @ 0x78 bytes: 0x200010C0..0x20001137 before the
+                                                @ sweep (the vendor start clears them)
+        .equ    CAO_END,        0x1C0
+        .if     CAO_END > CAL_SIZE
+        .error  "own.inc: the OWN_CAL words do not fit O_CAL"
+        .endif
+@ reasons of a failed or ended sweep (CAO_WHY)
+        .equ    CAL_R_NONE,     0               @ not failed
+        .equ    CAL_R_STALL,    1               @ no acquisition for 1.5 s
+        .equ    CAL_R_TIME,     2               @ the point's time limit, fewer than 3 windows
+        .equ    CAL_R_OPEN,     3               @ an open point below 100 kohm
+        .equ    CAL_R_CHECK,    4               @ the vendor's check of fn_0800bb64 at the store
+        .equ    CAL_R_SPREAD,   5               @ the point's time limit, 3 windows not agreeing
+        .equ    CAL_R_ABORT,    6               @ ended by a key, the dialog closed or the screen
+                                                @ left
+        .equ    V_CAL_WORK,     0x200010C0      @ 0x78 bytes zeroed by the calibration start
+                                                @ (ui_44.s 0x0800F740, zero_bytes), block 0xB44
+
+@ OWN_OCAL words read by meas.s (the other offsets: ocal.s header). Written only by ocal.s, except
+@ OCS_KIND, which meas.s meas_change stores (OWN_CAL_DESIGN.md 2.3, G7).
+        .equ    OCS_TMAX,       0x3C            @ T_max: the largest settle value in use (>= 26)
+        .equ    OCS_KIND,       0x7C            @ byte: kind 0..6 of the last meas_change
 
 @ compare results (MF_RES; COMPARE record offset 39)
         .equ    CR_NONE,        0               @ no part present: "---"
@@ -566,11 +657,14 @@
         .equ    SVO_GATE,       0x10            @ own_gate_slot: 0 closed, SLOT_A or SLOT_B
         .equ    SVO_SEQ,        0x14            @ sequence of the copy being written
         .equ    SVO_CRC,        0x18            @ CRC-32 of the staged block and SVO_SEQ
+        .equ    SVO_OCAL,       0x1C            @ own_ocal_gate: OCAL_BASE while ocal.s may write
+                                                @ the own calibration area; any other value closed
         .equ    own_save_flags,  OWN_SAVE + SVO_FLAGS
         .equ    own_save_status, OWN_SAVE + SVO_STATUS
         .equ    own_save_count,  OWN_SAVE + SVO_COUNT
         .equ    own_save_loaded, OWN_SAVE + SVO_LOADED
         .equ    own_gate_slot,   OWN_SAVE + SVO_GATE
+        .equ    own_ocal_gate,   OWN_SAVE + SVO_OCAL
 
 @ ctl.s words read by other modules (offsets in its area)
         .equ    CTO_INJECTED,   0x00            @ own_injected: != 0 while 0x08009400 handles an

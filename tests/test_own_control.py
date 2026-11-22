@@ -55,7 +55,7 @@ from unicorn import UC_HOOK_MEM_WRITE, UC_HOOK_CODE
 from unicorn.arm_const import UC_ARM_REG_SP, UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_R0, UC_ARM_REG_R1
 
 from meter_model import (Meter, cell, SET_A, SET_B, PAGE, SLOTS, SLOT_SIZE, SLOT_DIR, REC0, REC1, REC_END,
-                         ST_INSTALL, ST_TRIAL, ST_OK, ERASE_CUTS, WORD_CUTS, APP, RET)
+                         ST_INSTALL, ST_TRIAL, ST_OK, ERASE_CUTS, WORD_CUTS, APP, RET, OWN_ELF, nm)
 from measure_model import MeasurePath, DutSource
 from usb_host import UsbDevice, UsbHost, UsbError, FR_STREAM, FR_EVENT, FR_ANSWER, make_frame, crc16
 
@@ -93,23 +93,29 @@ S_OK, S_UNKNOWN, S_BAD_ARG, S_NOT_NOW, S_BUSY, S_STORAGE, S_SAFETY, S_XFER_CRC =
 SF_HELD, SF_RESTART = 0x01, 0x80
 C = dict(INFO=0x00, PING=0x01, RESET=0x02, BATTERY=0x03, POWER_OFF=0x05, FACTORY_MODE=0x06, STATE=0x10,
          STREAM=0x11, SCREEN=0x12, KEY=0x13, LCR_TABLES=0x20, LCR_SET=0x21, MEASURE=0x22, MEASURE_STREAM=0x23,
-         COMPARE=0x24, COMPARE_SET=0x25, HOLD=0x26, CALIBRATE=0x27, TOL_SET=0x28, SET_TABLES=0x50, SET_SET=0x51,
+         COMPARE=0x24, COMPARE_SET=0x25, HOLD=0x26, CALIBRATE=0x27, TOL_SET=0x28,
+         OCAL_INFO=0x30, OCAL_READ=0x31, OCAL_WRITE=0x32, OCAL_ROLLBACK=0x33, OCAL_LOCK=0x34, OCAL_RAW=0x35,
+         OCAL_TRACE=0x36, MONITOR=0x37, SET_TABLES=0x50, SET_SET=0x51,
          SET_SAVE=0x52, CAL_READ=0x53, RESTORE_DEF=0x54, RESTORE_B=0x55, ACCEPT_A=0x56, WRITE_BLOCK=0x57,
          SETUP_LANGUAGE=0x58, ACCEPT_B=0x59, ACCEPT_DEF=0x5A, SCREENSHOT=0x60, MEM_READ=0xF0,
          UPDATE_MODE=0x84, BOOT_BEGIN=0x85, BOOT_DATA=0x86, BOOT_END=0x87, BOOT_INSTALL=0x88, BOOT_STATUS=0x89)
 E_KEY, E_SCREEN, E_SETTING, E_POWERED_OFF, E_MEASURE, E_SAVE, E_CAL = 0x90, 0x91, 0x93, 0x94, 0x95, 0x96, 0x97
 OK2, OFF2 = struct.pack('<H', 0x4F4B), struct.pack('<H', 0x4F46)
-CAPS_ALL, INFO_SIZE, STATE_SIZE, MEASURE_SIZE, COMPARE_SIZE = 0x01EFFFFF, 46, 32, 65, 50   # bit 20 clear,
+CAPS_ALL, INFO_SIZE, STATE_SIZE, MEASURE_SIZE, COMPARE_SIZE = 0x07EFFFFF, 46, 32, 66, 50   # bit 20 clear,
                                      # bit 21 direct set, bits 22..24 MEASUREMENT_FIX_DESIGN.md stage 2
-                                     # (60 Hz, tolerance modes, MEASURE marker byte 64 / SV_SAME);
-                                     # MEASURE 64 + 1, COMPARE 29 + 21
+                                     # (60 Hz, tolerance modes, MEASURE marker byte 64 / SV_SAME), bit 25
+                                     # the stage-3 sweep (own/cal.s), bit 26 the own calibration area
+                                     # (own/ocal.s); MEASURE 64 + 2, COMPARE 29 + 21
 KEY_POWER, KEY_UP, KEY_OK = 0x0001, 0x0002, 0x0008
 LSI = 60000                      # the shortest period, 2501 * 16 / 60000 s, for every watchdog check
 PERIOD_MIN = 0.67                # USB_CONTROL_DESIGN.md requirement 2
 SYSMEM = 0x1FFF0000
 UID = bytes(range(0x10, 0x1C))
 POWER_OFF_LR = 0x08009479        # return address of the bl own_save at 0x08009474 (app_01.s; a same-size
-CAL_FINISH_LR = 0x0800BD1F       # hook keeps the address); bl at 0x0800BD1A (app_02.s, calibration finish)
+                                 # hook keeps the address)
+# return address of the bl own_save of the calibration finish: own/cal.s cal_finish (the label cal_save_ret
+# after the bl; the vendor's bl at 0x0800BD1A is no longer reached in our build, stage 3)
+CAL_FINISH_LR = (nm(OWN_ELF)['cal_save_ret'] & ~1) | 1
 
 # GPIO of fn_080094a0 (app_01.s header): key bit -> (port base, pin mask)
 KEY_PINS = {0x0001: (0x40011000, 0x40), 0x0002: (0x40011000, 0x80), 0x0004: (0x40011000, 0x100),
@@ -1658,6 +1664,25 @@ def block_diff(a, b):
     return [o for o in range(0, BLK, 4) if a[o:o + 4] != b[o:o + 4]]
 
 
+# own.inc OWN_CAL (cal.s): CAO_ON, CAO_REC, the recorded words and the 0x78 bytes of 0x200010C0
+OWN_CAL = OWN_RAM + 0x5BE0
+CAO_ON, CAO_REC, CAO_SFREQ, CAO_SLEVEL, CAO_SBIAS, CAO_SSPEED, CAO_REL = 0x00, 0x28, 0x2C, 0x30, 0x34, 0x38, 0x148
+V_CAL_WORK = 0x200010C0
+
+
+def cal_staged(rig, blk):
+    """The block own_save stages while a sweep of own/cal.s runs (save.s stage_cal_fix): blk with the
+    recorded frequency, level, bias and speed and the recorded 0x78 bytes at 0x200010C0; blk itself
+    when no sweep runs or nothing is recorded."""
+    if not rig.rd(OWN_CAL + CAO_ON) or not rig.rd(OWN_CAL + CAO_REC):
+        return blk
+    b = bytearray(blk)
+    for addr, off in ((V_FREQ, CAO_SFREQ), (V_LEVEL, CAO_SLEVEL), (V_BIAS, CAO_SBIAS), (V_SPEED, CAO_SSPEED)):
+        struct.pack_into('<I', b, addr - V_BLOCK, rig.rd(OWN_CAL + off))
+    b[V_CAL_WORK - V_BLOCK:V_CAL_WORK - V_BLOCK + 0x78] = rig.rd(OWN_CAL + CAO_REL, 0x78)
+    return bytes(b)
+
+
 @case
 def k30_guard_every_key_every_state():
     """Every key bit x (short, hold 1100 ms) x every state of STATES, each from a fresh start: the
@@ -1733,6 +1758,10 @@ def k30_guard_every_key_every_state():
                 check(m.st['pa8'] == 0, '%s: no power-off' % what)
                 check(not m.st['viol'], '%s: %r' % (what, m.st['viol']))
                 blk_off = rig.rd(V_BLOCK, BLK)
+                if name == 'calibration running':
+                    # a save during the sweep stages the settings of before it (own/save.s stage_cal_fix
+                    # from the recording of own/cal.s): frequency, level, bias, speed, 0x200010C0..
+                    blk_off = cal_staged(rig, blk_off)
                 for base in (SET_A, SET_B):
                     got = m.get(base, BLK)
                     check(got == blk_off or got == blk, '%s: copy 0x%08X holds neither block' % (what, base))

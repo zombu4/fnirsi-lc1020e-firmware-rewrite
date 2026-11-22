@@ -117,9 +117,10 @@ is 1 ms.
 | SETTINGS_SAVE, RESTORE_DEFAULTS, SETTINGS_RESTORE_B / ACCEPT_A / ACCEPT_B / ACCEPT_DEFAULTS, the last SETTINGS_WRITE_BLOCK chunk | one save inside the pass: up to 1.5 s (four page erases and the programming of two copies, one retry each; the watchdog is fed inside) | 4 s |
 | SCREEN, LCR_SET, HOLD, SETTINGS_SET, COMPARE_SET | direct (bit 21): the next pass without a key event or a held key, at most 2000 ms (status 4 when a key stays held that long; nothing is changed then) | 4 s with bit 21 set; without it (older firmware: jobs of key presses) 23 s, COMPARE_SET 63 s |
 | KEY | job, 20 000 ms + the hold time | 23 s + hold |
-| CALIBRATE | job, 120 000 ms | 126 s |
+| CALIBRATE | job, 360 000 ms with capability bit 25 (15 points of at most 20 s each, 30 s for the bias wait after the start, which is not counted as a point's time, plus 30 s for the menu steps); 120 000 ms without it | 366 s with bit 25, 126 s without it |
 | BOOT_BEGIN | job, 10 000 ms (12 pages, one erase per pass) | 13 s |
 | BOOT_INSTALL | one record write (with a page erase when the record page is full) | 4 s |
+| the last OCAL_WRITE chunk, OCAL_ROLLBACK | one commit inside the pass: up to 1.0 s (two page erases and up to 0x2000 bytes programmed, one retry; or two revoke words), the watchdog fed inside | 4 s |
 
 Actions after an answer (RESET, UPDATE_MODE, POWER_OFF, BOOT_INSTALL, a restart after a settings
 recovery): the action runs once the answer has left and the send buffer is empty, or 200 ms after
@@ -130,7 +131,7 @@ the answer left, or at the latest 1000 ms after the request (when the host stops
 Request = the request payload; Answer = the answer data after the status byte. "Confirmation" is
 the u16 `0x4F4B` (bytes `4B 4F`, "OK") at the place given; POWER_OFF takes `0x4F46` (bytes `46 4F`).
 A missing or wrong confirmation gives status 2. A payload longer than a command needs is accepted
-and the extra bytes are ignored, except for PING, SETTINGS_WRITE_BLOCK and BOOT_DATA, whose length
+and the extra bytes are ignored, except for PING, SETTINGS_WRITE_BLOCK, OCAL_WRITE and BOOT_DATA, whose length
 is their data length. RESET, UPDATE_MODE and the BOOT_* commands take no confirmation.
 
 ### 5.1 Device
@@ -159,12 +160,12 @@ is their data length. RESET, UPDATE_MODE and the BOOT_* commands take no confirm
 |---|---|---|---|
 | 0x20 | LCR_TABLES | list id u8 (0..7), or nothing | with an id: the list (section 8.1); without: the number of lists u8 (8) |
 | 0x21 | LCR_SET | setting u8 (0 Func, 1 secondary, 2 frequency, 3 level, 4 bias, 5 range, 6 speed, 7 circuit mode), value index u8 (below the list's count) | MEASURE (section 6.2). Screens 1 and 2 only (else status 3). Direct (table below, section 5.3.4); a value the meter's keys do not reach is refused with status 3 and nothing changed: level 0.6 V while the bias is 0.1 V or more (the bias float's bits 0x3DCCCCCD or above), Func AUTO or Z in the compare screen |
-| 0x22 | MEASURE | - | MEASURE record, 65 bytes (64 before capability bit 24) |
+| 0x22 | MEASURE | - | MEASURE record, 66 bytes (65 before capability bit 26, 64 before capability bit 24) |
 | 0x23 | MEASURE_STREAM | u16: 0 = a frame for every new result, 0xFFFF = stop, else period in ms | none; MEASURE records follow as stream frames cmd 0x22 |
 | 0x24 | COMPARE | - | COMPARE record (section 6.3), 50 bytes (29 before capability bit 23) |
 | 0x25 | COMPARE_SET | nominal f32, tolerance f32 (percent), warn type u8, warn sound u8, warn LED u8 (11 bytes, all required) | COMPARE. Direct, in screens 1..3 (section 5.3.1): the values as the sorting editor stores them; the screen stays; RAM only. A changed tolerance returns the tolerance mode of TOLERANCE_SET to 0 |
 | 0x26 | HOLD | u8: 0 off, 1 on | STATE. Screens 1 and 2 only (else status 3). Direct: the hold word 0x200011A4 and the HOLD mark, as key 0x400 sets them. A change of frequency, level, bias, range, speed or circuit mode ends hold (Func and secondary do not) |
-| 0x27 | CALIBRATE | type u8, confirmation u16 at byte 1 (3 bytes) | calibration status u8 (0x200050EC: 0 start, 1 busy, 2 finish, 3 fail), type u8 (0x200050E0), save status u32 (section 9.1); 6 bytes, with every status (section 5.3.3) |
+| 0x27 | CALIBRATE | type u8, confirmation u16 at byte 1 (3 bytes) | calibration status u8 (0x200050EC: 0 start, 1 busy, 2 finish, 3 fail), type u8 (0x200050E0), save status u32 (section 9.1), failed point u8 (0..14, 0xFF none), reason u8 (section 5.3.3); 8 bytes (6 before capability bit 25), with every status (section 5.3.3) |
 | 0x28 | TOLERANCE_SET | mode u8, lower i32, upper i32, letter u8, secondary kind u8, secondary value f32 (15 bytes; section 5.3.5) | COMPARE, with every status. Capability bit 23. RAM only, answered at once; status 2 for a bad argument, 3 for the pF mode with a quantity other than C |
 
 Settings of LCR_SET (the work of the meter's measure-screen handler 0x08009614 for the press of
@@ -213,9 +214,26 @@ its key that lands on the value; the key is named for reference, it is not press
   calibration-running word 0x200050E4 must be 1, else status 3). Then the meter's sweep runs from
   the main loop; the job waits for status 2 (finish; the meter saves the result itself) -> answer
   status 0, or 3 (fail) -> status 3. When the running word goes to 0 for 1000 ms without one of
-  them: status 3 (measured from the start of the waiting step). Progress comes as CALIBRATION
+  them: status 3 (counted from the start of the waiting step). Progress comes as CALIBRATION
   events (section 10). The answer's save status is the save status word at the end of the job
   (after a finished calibration: the result of the meter's own save of it).
+- The sweep of firmware with capability bit 25 (firmware/own/cal.s): 15 points in the vendor's
+  order (100, 120, 1000, 10000, 100000 Hz, each at 0.1, 0.3, 0.6 V). Each point takes complete
+  measurement windows only; the result is the median of its last 3 windows when all 3 lie within
+  a factor 2 of it (an open that never agrees within 9 windows is stored as "not resolved", its
+  phase entry +400). The results stay in RAM and are written to the user table only after all 15
+  points (a save during the sweep, by the power key or a host command, holds the old table and the
+  settings of before the sweep). The finish restores the frequency, level, bias, speed and type of
+  before the sweep, then saves once. The factory table is never written.
+- Answer bytes 6 and 7 (capability bit 25): the point 0..14 at which the sweep ended without a
+  result (0xFF when it finished or never started) and the reason: 0 none, 1 no acquisition for
+  1.5 s, 2 the point's 20-s limit with fewer than 3 windows (the limit does not run while the
+  measurement's bias wait holds publication after the start moved the bias to 0: a window is
+  published once the DC midpoints are steady, at the latest 30 s after the bias change), 3 an open point below 100 kohm, 4 the
+  vendor's store check (the table is written back as it was), 5 the point's limit with 3 windows
+  that do not agree, 6 ended by a key, the dialog closed or the screen left. With status 3 the
+  meter shows "Fail n/15" and the reason in the dialog; during the sweep "n/15" with the point's
+  frequency and level.
 - While CALIBRATE runs, every other request waits (section 4.1) and every injected key is refused.
 
 #### 5.3.4 Direct changes: checks and differences from the jobs
@@ -293,6 +311,19 @@ resets both counters (once per press).
 | 0x59 | SETTINGS_ACCEPT_B | confirmation | as 0x55; section 9.3 |
 | 0x5A | SETTINGS_ACCEPT_DEFAULTS | confirmation | as 0x55; section 9.3 |
 
+### 5.7 Own calibration area (capability bit 26)
+
+| cmd | Name | Request | Answer |
+|---|---|---|---|
+| 0x30 | OCAL_INFO | - | OCAL_INFO record (section 16.2), 64 bytes |
+| 0x31 | OCAL_READ | slot u8 (0 at 0x08062000, 1 at 0x08064000), offset u16, length u16 (1..256), offset + length <= 0x2000 (5 bytes) | the bytes of that slot as they are in flash |
+| 0x32 | OCAL_WRITE | confirmation u16, offset u16, total u16 (body length 8..0x9C0, a multiple of 4), CRC-32 u32 of the whole body (the same in every chunk), chunk bytes (1..502); at least 11 bytes; the chunk is every byte after byte 10 | a chunk that does not complete the body: the next expected offset u16. The last chunk: commit result u8 (0 OK, else the flash result of section 9.1), active slot u8, sequence u32. Section 16.4 |
+| 0x33 | OCAL_ROLLBACK | confirmation u16, mode u8 (0 the active record, 1 every own format-1 record in force, the older first); 3 bytes | active slot u8 (0xFF none), sequence u32, flags u32 (section 16.2). Status 3 when no record qualifies, 5 when a revoke word failed; the refusals of section 16.4 |
+| 0x34 | OCAL_LOCK | c5 u8 (0..7), c6 u8 (0..7), c8 u8 (0..3), or FF FF FF to release; 3 bytes | the OCAL_RAW record of the last window. Status 2 for a code out of range, 6 while a calibration runs, 3 powered off, after the power-off path ran or off screen 1. Section 16.3 |
+| 0x35 | OCAL_RAW | - | the raw record of the last closed window, 64 bytes (section 16.3) |
+| 0x36 | OCAL_TRACE | op u8 (0 disarm, 1 arm, 2 read), start u8 (read only, 0..31) | state u8 (0 idle, 1 armed, 2 recording, 3 full), kind u8, change tick u32, count u8, n u8, then n entries {tick u32, Zm re f32, Zm im f32, flags u8 (bit 0 discarded by the settle rule, bit 1 saturated), c5 u8, c6 u8, c8 u8}; n at most 31 from start, so a full trace takes two reads (start 0, start 31) |
+| 0x37 | MONITOR | - | V rms f32 (V), I rms f32 (A), A_V,ref f32, A_I,ref f32, flags u8 (bit 0 V calibrated at this frequency, bit 1 gain applied, bit 2 no reading or overload, bit 3 lock), DC midpoint ADC1 u16, ADC2 u16 (counts, no scale), window u32; 25 bytes. Section 16.5 |
+
 ### 5.6 English only
 
 The firmware shows English only. The first-start flag (0x20001140, block 0x0BC4) and the language
@@ -357,7 +388,7 @@ or done, 4 last save failed, 5 backup differs, 6 calibration running (0x200050E4
 mode (0x200011C0 = 2), 8 saves held, 9 restart pending (flash differs from RAM), 10 powered-off
 mode (section 7.5).
 
-### 6.2 MEASURE (65 bytes; 64 before capability bit 24)
+### 6.2 MEASURE (66 bytes; 65 before capability bit 26, 64 before capability bit 24)
 
 | Offset | Type | Field |
 |---|---|---|
@@ -377,6 +408,7 @@ mode (section 7.5).
 | 62 | u8 | speed |
 | 63 | u8 | circuit mode |
 | 64 | u8 | markers (capability bit 24): bit 0 the main value, bit 1 the secondary value lies outside the manual's accuracy table for the frequency (the meter shows the digits in amber); 60 Hz has no table column (always marked); theta, D and Q are never marked |
+| 65 | u8 | OCAL flags (capability bit 26): bit 0 the gain correction of the own calibration area applied to this result, bit 1 a GAIN section calibrates this frequency but not this range / gain cell, bit 2 OCAL_LOCK holds the codes, bit 3 OF_RETAKE (section 16.2) |
 
 Value block (15 bytes):
 
@@ -404,6 +436,11 @@ changes R -> C below -11 degrees, R -> L above 11 degrees and back to R above -9
 R shows theta as its secondary. An overload (ADC saturated with no range step left, or no
 finite value) and the no-reading result (no in-band acquisition for 2 s) carry |Z| 1e10 and theta
 -400, the vendor firmware's values; while hold is on no result is published.
+
+With capability bit 26 the result can carry the gain correction of the own calibration area
+(section 16): where a GAIN section calibrates the frequency and the range / gain cell (all four
+mask bits), |Z| and theta are K zeta nu sum V' / sum I' and the vendor decade interpolation is not
+applied; everywhere else the result is the one without the area.
 
 ### 6.3 COMPARE (50 bytes; 29 before capability bit 23)
 
@@ -500,9 +537,9 @@ with the same status 6 while a calibration runs and for SCREEN from the dialogs 
 | Condition (RAM words the meter's key handler reads) | Why | Use instead |
 |---|---|---|
 | screen 0 (0x20001168 = 0): every key (never occurs, section 5.6) | the language chooser's keys store the first-start flag and save | - |
-| a calibration runs (0x200050E4 != 0) or CALIBRATE is active: every key | keys of item 5 abort a calibration after its start already changed the calibration table | wait for its end |
+| a calibration runs (0x200050E4 != 0) or CALIBRATE is active: every key | keys of item 5 abort a calibration (with bit 25 nothing is stored and the settings are put back; without it the start has already changed the calibration table) | wait for its end |
 | a hold of the power key (bit 0) | the meter's power-off path switches the meter off | POWER_OFF |
-| key 0x0008 in screen 3 on menu item 5 (0x200011A8 = 5) | starts the calibration, which changes frequency, level, bias, speed and the calibration table before anything can stop it | CALIBRATE |
+| key 0x0008 in screen 3 on menu item 5 (0x200011A8 = 5) | starts the calibration, which changes frequency, level, bias and speed at once (and, without bit 25, the calibration table before anything can stop it) | CALIBRATE |
 | key 0x0008 in screen 3 on menu item 6 while a dialog is open (0x200011AC != 0) | confirms the restore of the defaults | RESTORE_DEFAULTS |
 
 Guard: while the meter's key handler processes an injected event, and while a direct change runs,
@@ -685,7 +722,8 @@ come then.
 | 0x94 | POWERED_OFF | none (section 7.5) |
 | 0x95 | MEASURE_DONE | result number u32 (as MEASURE offset 0) |
 | 0x96 | SAVE_RESULT | save status u32, save flags u32 (section 9.1): when the meter's save counter changed (saves and recovery commands) |
-| 0x97 | CALIBRATION | status u8 (0x200050EC), step u8 (0x200050E8), type u8 (0x200050E0): when status or step changed |
+| 0x97 | CALIBRATION | status u8 (0x200050EC), step u8 (0x200050E8), type u8 (0x200050E0): when status or step changed. Step with capability bit 25: 3 x the points done + the windows held for the point in progress (0..2), 45 at the store; without it the vendor's seconds 0..45 |
+| 0x98 | OCAL_CHANGED | active slot u8 (0xFF none), sequence u32, flags u32 (section 16.2): after every OCAL_WRITE commit and OCAL_ROLLBACK (not at the start) |
 
 SETTING_CHANGED ids: for every changed 32-bit word of the settings block, its byte offset in the
 block (address - 0x2000057C) with the new word; for the calibration tables (offsets 0x04..0xB43)
@@ -795,7 +833,7 @@ BOOT_STATUS and BOOT_BEGIN (the free slot is erased and written again).
 
 ## 14. Capability bits and versioning
 
-INFO bits (bits 0..19 and 21..24 set in this firmware, 0x01EFFFFF): 0 STATE / STREAM, 1 SCREEN, 2 KEY,
+INFO bits (bits 0..19 and 21..26 set in this firmware, 0x07EFFFFF): 0 STATE / STREAM, 1 SCREEN, 2 KEY,
 3 LCR_TABLES / LCR_SET, 4 MEASURE / MEASURE_STREAM, 5 COMPARE / COMPARE_SET, 6 HOLD, 7 CALIBRATE,
 8 SETTINGS_TABLES / SET / SAVE, 9 CAL_READ, 10 SCREENSHOT, 11 MEM_READ, 12 events, 13 UPDATE_MODE,
 14 BOOT_*, 15 BATTERY, 16 POWER_OFF, 17 RESTORE_DEFAULTS, 18 settings recovery (SETTINGS_RESTORE_B,
@@ -808,6 +846,9 @@ section 4.3 by this bit: firmware without it runs these commands as jobs of key 
 1k -> 10k -> 100k -> 60; 60 Hz is never saved: the copies hold 100 and the meter starts at 100 Hz).
 23 TOLERANCE_SET and the COMPARE tail (offsets 29..49, section 5.3.5). 24 the MEASURE marker byte
 64, the display rules of its value texts (section 6.2) and the save result 9 (section 9.1).
+25 the calibration sweep of section 5.3.3: CALIBRATE answers 8 bytes (failed point and reason),
+waits up to 360 000 ms in the meter, and the CALIBRATION step counts windows and points.
+26 the own calibration area: OCAL_INFO .. OCAL_TRACE and MONITOR (section 5.7), event OCAL_CHANGED, the MEASURE OCAL flags byte 65 (section 16).
 
 Rules: the protocol version changes only when the frame format or the meaning of an existing field
 changes. Within a version, records and answers grow only at the end, new commands and events get
@@ -838,3 +879,111 @@ Frames in hex, as on the wire (CRC last, low byte first).
 
 Reading the first one: `a5` sync, `03 00` length 3 (seq, type, cmd, no payload), `01` seq, `01`
 request, `00` INFO, `df fb` CRC-16 0xFBDF over `03 00 01 01 00`.
+
+## 16. Own calibration area (capability bit 26)
+
+OWN_CAL_DESIGN.md revision 3. Flash 0x08062000..0x08065FFF, two slots of 0x2000 bytes (slot 0 at
+0x08062000, slot 1 at 0x08064000), written by nothing but the application's ocal.s through the
+settings gate; neither bootloader, the starter nor V1.1 reach it. With both slots erased or
+invalid every reading is the one without the area.
+
+### 16.1 Record
+
+Header (0x40 bytes): magic u32 0x4C41434F ("OCAL"), format u16 = 1, header size u16 = 0x40,
+length u32 (header + body, 0x40..0x2000, a multiple of 4), sequence u32 (1..0xFFFFFFFE), chip UID
+3 x u32 (the serial, 0x1FFFF7F0), short / open CRC u32 (CRC-32 of the user table's short and open
+entries at the write: for each of the 15 points the magnitude of type 0, of type 11, the phase of
+type 0, of type 11), reserved 0x20..0x37 = 0, revoke word u32 at 0x38 (0xFFFFFFFF in force, any
+other value revoked; not in the CRC), CRC-32 u32 at 0x3C over bytes 0x00..0x37 and 0x40..length-1
+(written last). The meter fills the whole header; the host sends the body only.
+
+Body: sections {id u16, length u16, body}, ids strictly ascending, each length a multiple of 4:
+
+| Id | Section | Body | Without it |
+|---|---|---|---|
+| 0 | META | host time u32 (Unix seconds), note 28 bytes ASCII, zero-padded (32) | - |
+| 1 | GAIN | per frequency index fi 0..5 (100, 120, 1000, 10000, 100000, 60 Hz): zeta magnitude mask u32 (bit 8 c8 + c6), zeta phase mask u32, nu magnitude mask u8 (bit c5), nu phase mask u8, pad u16 = 0, zeta[c8][c6] 32 x (re f32, im f32), nu[c5] 8 x (re, im): 332 bytes, 1992 in all | no correction |
+| 2 | CLIP | [channel 0 V, 1 I][gain code 0..7] {lo u16, hi u16} (64) | lo 0, hi 4095 |
+| 3 | SETTLE | [kind 0 restart, 1 frequency, 2 level, 3 bias, 4 speed, 5 screen, 6 range or gain code][fi] u16 ms (84) | 26 ms for kinds 0..4, 5 ms for 5, 6 |
+| 4 | MONITOR | mask u32 (bit fi), kV[6] f32 (V rms per count of peak amplitude at V gain 1) (28) | uncalibrated |
+| 5 | BIAS | DC-midpoint limit u16 counts, pad u16 = 0 (4) | 4 counts |
+
+Other ids are skipped by this firmware (format stays 1). Value rules (the meter checks them at
+the write, status 2 with the section and entry, and at every start, where a failing section keeps
+its default): GAIN pad 0; every factor with a mask bit: re and im finite, 0.25 <= re^2 + im^2 <= 4,
+re > 0, 4 re^2 >= re^2 + im^2 (entry index 41 fi + k: k 0..31 zeta, 32..39 nu, 40 the pad);
+CLIP hi <= 4095, lo < hi, hi - lo > 3600 (index 8 channel + code); SETTLE 1..500 (index 6 kind +
+fi); MONITOR mask bits 0..5 only (index 6), each kV with its bit finite and 1e-6..1 (index fi);
+BIAS 1..4095, pad 0 (index 0 / 1). A structure fault (a header crossing the end: id 0xFF, a
+length past the end, ids not ascending, a known id with another length) gives index 0xFFFF.
+
+The gain is applied to a reading only when the cell (c8, c6, c5) of the window has all four mask
+bits: Z = K zeta[fi][c8][c6] nu[fi][c5] sum V' / sum I'; the vendor decade interpolation and the
+S4.2 (K) references are then skipped, the short subtraction and the open / short compensation stay.
+
+### 16.2 OCAL_INFO (64 bytes)
+
+flags u32 (bit 0 a record active, 1 slot 0 CRC-valid, 2 slot 1 CRC-valid, 3 a newer own record of
+another format in force (none applied), 4 a CRC-valid record of another meter (UID), 5 a section
+rejected or the section walk stopped, 6 OF_RETAKE: the active GAIN was written with the short /
+open entries still the same (take them again), 7 OCAL_LOCK, 8 an OCAL_WRITE transfer open, 9 the
+trace not idle), active slot u8 (0xFF none), format u8, active length u16, active sequence u32,
+other slot's sequence u32 (0 when CRC-invalid; with no active record the higher CRC-valid
+sequence of both slots), active CRC u32, sections present u8 (bit = id), gain frequencies u8 (bit
+fi: some cell with all four bits), monitor frequencies u8, sections rejected u8, T_max u16 (the
+longest settle in use, at least 26 ms), pad u16, META time u32, META note 28 bytes, pad 4.
+
+Choice of the active record at every start and after every write: the own records (this chip's
+UID) in force; the higher sequence wins (slot 0 on equal ones); of format 1 it is active, of
+another format none is (flag 3).
+
+### 16.3 OCAL_LOCK, OCAL_RAW
+
+OCAL_LOCK fixes the codes c5 (V gain), c6 (I gain), c8 (range): the ranging calls stop and the
+codes are set at the next acquisition (a settle of kind 6 follows). Released by FF FF FF, any key
+event that reaches the meter's key handler (physical or injected), a screen change, DTR clear or
+a USB reset, a calibration start, the power-off path, and 30 s without OCAL_LOCK or OCAL_RAW.
+LCR_SET keeps the lock (frequency, level, bias and speed are set, the settle of their kind runs);
+LCR_SET of the range (id 5) answers status 3 while locked.
+
+OCAL_RAW (64 bytes), taken at every window close, also under hold: window u32, c5 u8, c6 u8, c8
+u8, lock u8, frequency u32, level f32, bias f32, N u16, class u8 (0 noise-limited, 1 resolved),
+flags u8 (bit 0 a saturated acquisition since the previous close, bit 1 the overload set
+published since then), Z_nom re f32, im f32 (K sum V' / sum I', no gain, no compensation; NaN for
+sum I' = 0), A_V f32, A_I f32 (|sum V'| / (64 N), |sum I'| / (64 N): peak amplitude in counts),
+sigma^2 V f32, sigma^2 I f32 (noise power of the last acquisition), ADC1 max / min / midpoint u16,
+ADC2 max / min / midpoint u16 (of the last acquisition), pad 4.
+
+### 16.4 OCAL_WRITE, OCAL_ROLLBACK
+
+A chunk at offset 0 starts a new transfer; another chunk must start at the offset the previous
+answer named and carry the same total and CRC-32, else status 2 (no data) and the transfer stays
+as it was; a chunk ending beyond the total: status 2. With the last chunk: CRC-32 of the body
+(status 7), the structure and value rules (status 2 with data: section id u8 and entry index u16,
+the only status-2 answer with data), then the refusals, then the commit. Refusals of the last
+chunk and of OCAL_ROLLBACK, in this order, nothing written: 3 powered-off mode or the power-off
+path ran; 6 a calibration runs (0x200050E4 != 0) or the CALIBRATE job is active; 4 another job
+runs (BOOT_BEGIN's erase included) or a rewrite of copy A is pending (flag 6 of section 9.1). A
+refused last chunk leaves the transfer open at its offset.
+
+Commit: the target slot is the one not active (with no active record: an empty or invalid slot,
+else one of another meter, else a revoked one, else the lower sequence); sequence = the highest
+CRC-valid one + 1 (status 3 when that cannot win: the other slot holds this meter's in-force
+record with 0xFFFFFFFE). The target's pages are erased, the record programmed with the CRC word
+last, read back, once more on a failure, then status 5 with the flash result (the previous record
+still active). After a success the new record is the active one (else status 5, result 1), the
+measurement restarts, and event OCAL_CHANGED follows. A power cut before the CRC word leaves the
+previous record active; the record that a write replaces is never erased by that write.
+
+Rollback: mode 0 programs the revoke word of the active record (the other slot's record becomes
+active if it qualifies); mode 1 revokes every own format-1 record in force, the older first.
+Revoked records are never brought back; a backup body is written again instead.
+
+### 16.5 MONITOR
+
+From the window MEASURE published last: A_V,ref = A_V |nu| / G[c5], A_I,ref = A_I / (G[c6] R[c8]
+|zeta|) (G = 1, 2, .. 128 by code, R = 100 ohm .. 100 kohm by range; |nu| = |zeta| = 1 where the
+gain was not applied); V rms = kV A_V,ref, I rms = kV A_I,ref = V / |Z| (Z before the open / short
+compensation). V and I are NaN (0x7FC00000) without kV at the frequency or at a frequency outside
+the six; all four are NaN with no reading or the overload set (flag bit 2). The midpoints are
+counts only (no DC scale is claimed).

@@ -100,6 +100,7 @@ PATCHES = [
     (0x08009F20, 4, 'bl own_dac_setup for bl fn_08008814'), (0x080281D4, 4, 'bl own_measure for bl fn_0800a068'),
     (0x0800B072, 4, 'movw r1, #0xe10 for movw r1, #0xbb8'), (0x0800BD0A, 2, 'b.n for bne.n .L0800bd1a'),
     (0x08009A64, 2, 'nop.n for beq.n .L08009a82'),
+    (0x0800860C, 28, 'the enables of fn_080085d0 as b.w own_dma_enable, 7 nop.n (V / I together)'),
     # MEASUREMENT_FIX_DESIGN.md stages 2 / 2F / 2G (revision 6): the formatter calls and row draws
     # (S2.1, S2.2, S2.4), the AUTO block and the compare block of fn_0800f854 (S2.5, S2.8, S2.9),
     # the frequency key, the 60 Hz OL group (S2.12), the vendor compare call (S2.8)
@@ -112,6 +113,8 @@ PATCHES = [
     (0x0800F8FC, 0x108, 'bl own_cmp_show, b.n, nop.n, the kept .L0800f94a b.n (compare block)'),
     (0x0800D97A, 4, 'b.w own_freq_step for ldr r1 / movs r5'), (0x0800A03A, 2, 'bls.n for beq.n .L0800a050'),
     (0x080281E2, 4, 'nop.w for bl fn_0800a7ec'),
+    # MEASUREMENT_FIX_DESIGN.md stage 3 (revision 7): the vendor sweep's running test (own/cal.s runs it)
+    (0x0800BDBA, 4, 'movs.n r0, #0 / nop.n for ldr.w r0, [r1, #0xb68]'),
     # LANGUAGE_DESIGN.md: the factory suffix, the menu toggle, the font counts
     (0x08009B08, 12, 'factory suffix "(FACT)"'), (0x0800D844, 12, 'factory suffix "(FACT)"'),
     (0x0800F78E, 4, 'nop.w for str.w r0, [r4, #0xbe0]'), (0x0800F796, 4, 'nop.w for str.w r5, [r4, #0xbe0]'),
@@ -131,7 +134,9 @@ PATCH_BYTES = {0x08009B08: b'(FACT)' + bytes(6), 0x0800D844: b'(FACT)' + bytes(6
                0x0800B072: bytes.fromhex('40f61061'), 0x0800BD0A: struct.pack('<H', 0xE006),
                0x08009A64: struct.pack('<H', 0xBF00),
                # stage 2F / 2G: bls.n T1 (cond 9, the offset 9 of the beq.n it replaces), nop.w
-               0x0800A03A: struct.pack('<H', 0xD909), 0x080281E2: bytes.fromhex('aff30080')}
+               0x0800A03A: struct.pack('<H', 0xD909), 0x080281E2: bytes.fromhex('aff30080'),
+               # stage 3: movs T1 r0, #0 (0x2000), nop T1 (0xBF00)
+               0x0800BDBA: struct.pack('<HH', 0x2000, 0xBF00)}
 
 # 4-aligned V1.1 words with a value in 0x0802B703..0x08051757 that are data, not addresses
 # (RESOURCE_FACTS.md 1b, 2f): V1.1 address -> what

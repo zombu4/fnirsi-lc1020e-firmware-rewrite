@@ -17,7 +17,8 @@
 @
 @ One pass of ctl_loop (design section 3; every step bounded, none waits):
 @   on the first pass only usb_start, then ev_prime (sets CF_PRIMED); every pass save_resume (save.s), the pending action (restart / power-off after an answer), the
-@   USB-powered power-off check, (1) one step of the running job, the automatic power-off step
+@   USB-powered power-off check, one step of the calibration sweep (cal_step, own/cal.s; before
+@   the job, so OP_WAITCAL sees its finish in the same pass), (1) one step of the running job, the automatic power-off step
 @   (pwr_step, own/power.s: Off Time, low-voltage countdown), (2) a pending key injection is
 @   posted, (3) the guard flag is set when the event in the slot is the injected one, 0x08009400
 @   runs, the flag is cleared; or, in a pass with no event in the slot and no key down, a
@@ -135,7 +136,7 @@ own_pa8_level:
 @   watchdog runs, started by the slot for a trial or left running by soft_restart: then the
 @   IWDG is fed here, before the application's own start 0x08010178; bit 9 = soft restart,
 @   read by own_pa8_level); the result word 0x2001FFFC read and cleared (tag 0x5552, result byte and its
-@   complement); the request word 0x2001FFF4 cleared. USB is started by ctl_loop's first
+@   complement); the request word 0x2001FFF4 cleared; ocal_load (ocal.s). USB is started by ctl_loop's first
 @   pass, not here: the vendor start-up after this call took 2 s on a meter, and a port
 @   present before requests are served leaves a host's first request unanswered. Last: when
 @   the system clock is not the PLL (the crystal did not start), xtal_fault (xtal.s, F4), which
@@ -176,6 +177,8 @@ own_start:
 	bl	own_feed		@ trial start: the slot's watchdog runs (uses r0, r1)
 .Lst_slot:
 	str	r2, [r4, #CT_HAND_SLOT]
+	bl	ocal_load		@ the own calibration record (OWN_CAL_DESIGN.md 1.3): flash reads
+					@ only, writes OWN_OCAL only; before the first own_measure call
 	ldr	r0, =RESULT_WORD
 	ldr	r1, [r0]
 	movs	r2, #0
@@ -246,6 +249,8 @@ ctl_loop:
 	bl	save_resume		@ rewrite of an interrupted copy A (save.s)
 	bl	act_step
 	bl	off_step
+	bl	cal_step		@ the calibration sweep (cal.s, MEASUREMENT_FIX_DESIGN stage 3)
+	bl	ocal_step		@ the OCAL_LOCK release rules (ocal.s, OWN_CAL_DESIGN.md 2.2)
 	bl	job_step		@ (1)
 	bl	pwr_step		@ Off Time and low-voltage power-off (power.s); here, before
 					@ inj_post, the event slot holds only events of the key scan
@@ -896,7 +901,7 @@ inj_post:
 @ key_step - step (3). With PRIMASK set the slot is read: when it holds the posted code with
 @   the injected mask, the event is the injected one and own_injected = 1 (unless the guard is
 @   off for it); a different event in its place ends the injection (result 1). Then event
-@   KEY, the power-off path noted (code 0xFE, mask 1, 0x20001190 = 0: 0x08009452), own_save's
+@   KEY, the OCAL_LOCK released (ocal_unlock), the power-off path noted (code 0xFE, mask 1, 0x20001190 = 0: 0x08009452), own_save's
 @   count noted, 0x08009400 runs, own_injected = 0; a save refused by the guard during the
 @   call marks the job (status 6). IS_WAIT ends when its code was consumed.
 @   Direct change (CT_DS_OP != 0): when the slot is empty and no key is down (0x20000008 = 0),
@@ -965,6 +970,7 @@ key_step:
 	b	.Lk_call		@ 0x08009400 with the empty slot
 .Lk_event:
 	cpsie	i			@ interrupts on again
+	bl	ocal_unlock		@ any key event that reaches the key handler ends OCAL_LOCK (2.2)
 	strh	r8, [sp, #0]		@ event KEY: mask, code, source
 	strb	r7, [sp, #2]
 	strb	r6, [sp, #3]
@@ -1793,7 +1799,9 @@ ram_word:
 @   SCREEN_CHANGED (0x20001168); SAVE_RESULT (own_save_count changed); CALIBRATION
 @   (0x200050EC or 0x200050E8 changed); MEASURE_DONE: 0x20001200 was set in the previous
 @   pass and is 0 now (0x0800A068 consumed it at 0x080090F8.. or fn_08009f10 cleared it), or
-@   the words |Z| 0x200050C4 / theta 0x200050CC changed (only 0x0800A068 writes them);
+@   the words |Z| 0x200050C4 / theta 0x200050CC changed (in our build own_measure writes them,
+@   meas.s; cal_commit, cal.s, writes the calibration results there for fn_0800bb64 and puts
+@   the published words back within its call, earlier in the same pass, so they are not seen);
 @   SETTING_CHANGED for 0x200011A4, 0x200011A8, byte 0x200011E4, 0x200011E8 and for every
 @   changed word of the 0xC14-byte block (one compare of the block per pass; words of the
 @   calibration tables 0x04..0xB43 as one event with their number).

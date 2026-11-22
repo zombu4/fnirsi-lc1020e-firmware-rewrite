@@ -57,12 +57,14 @@ C = dict(
     RESTORE_DEFAULTS=0x54, SETTINGS_RESTORE_B=0x55, SETTINGS_ACCEPT_A=0x56,
     SETTINGS_WRITE_BLOCK=0x57, SETTINGS_ACCEPT_B=0x59,
     SETTINGS_ACCEPT_DEFAULTS=0x5A, SCREENSHOT=0x60, MEM_READ=0xF0,
+    OCAL_INFO=0x30, OCAL_READ=0x31, OCAL_WRITE=0x32, OCAL_ROLLBACK=0x33, OCAL_LOCK=0x34,
+    OCAL_RAW=0x35, OCAL_TRACE=0x36, MONITOR=0x37,
     UPDATE_MODE=0x84, BOOT_BEGIN=0x85, BOOT_DATA=0x86, BOOT_END=0x87, BOOT_INSTALL=0x88,
     BOOT_STATUS=0x89)
 CMD_NAME = {v: k for k, v in C.items()}
 
 E = dict(KEY=0x90, SCREEN_CHANGED=0x91, SETTING_CHANGED=0x93, POWERED_OFF=0x94,
-         MEASURE_DONE=0x95, SAVE_RESULT=0x96, CALIBRATION=0x97)
+         MEASURE_DONE=0x95, SAVE_RESULT=0x96, CALIBRATION=0x97, OCAL_CHANGED=0x98)
 EVENT_NAME = {v: k for k, v in E.items()}
 
 STATUS_NAME = {0: 'OK', 1: 'unknown command', 2: 'bad length or argument', 3: 'not allowed now',
@@ -76,16 +78,26 @@ T_SAVE = 4.0                    # one save: up to 1.5 s inside one main-loop pas
 T_DIRECT = 4.0                  # a direct change (capability bit 21): at most 2000 ms in the meter
 TIMEOUT = {
     C['SCREEN']: 23.0, C['LCR_SET']: 23.0, C['HOLD']: 23.0, C['SETTINGS_SET']: 23.0,
-    C['COMPARE_SET']: 63.0, C['CALIBRATE']: 126.0,
+    C['COMPARE_SET']: 63.0, C['CALIBRATE']: 366.0,
     C['BOOT_BEGIN']: 13.0, C['BOOT_INSTALL']: 4.0,
     C['SETTINGS_SAVE']: T_SAVE, C['RESTORE_DEFAULTS']: T_SAVE, C['SETTINGS_RESTORE_B']: T_SAVE,
     C['SETTINGS_ACCEPT_A']: T_SAVE, C['SETTINGS_ACCEPT_B']: T_SAVE,
     C['SETTINGS_ACCEPT_DEFAULTS']: T_SAVE, C['SETTINGS_WRITE_BLOCK']: T_SAVE,
+    C['OCAL_WRITE']: T_SAVE, C['OCAL_ROLLBACK']: T_SAVE,      # one commit in the pass: up to 1.0 s
 }
 # The commands a firmware with capability bit 21 sets directly (PROTOCOL.md 4.1, 14); a firmware
 # without the bit runs them as key jobs with the times of TIMEOUT.
 CAP_DIRECT = 21
 DIRECT = (C['SCREEN'], C['LCR_SET'], C['HOLD'], C['SETTINGS_SET'], C['COMPARE_SET'])
+# Capability bit 25: the calibration sweep of firmware/own/cal.s (limit 360 s, so 366 s); a firmware
+# without it runs the vendor's 45-s sweep (limit 120 s, so 126 s).
+CAP_CAL3 = 25
+T_CAL_OLD = 126.0
+# Capability bit 26: the own calibration area (firmware/own/ocal.s, OWN_CAL_DESIGN.md revision 3):
+# OCAL_* and MONITOR, event OCAL_CHANGED, MEASURE byte 65.
+CAP_OCAL = 26
+OCAL_FLAGS = ['active', 'slot 0 valid', 'slot 1 valid', 'newer format', 'foreign UID',
+              'section rejected', 'retake short/open', 'lock', 'transfer open', 'trace']
 
 
 def timeout_for(cmd, payload=b'', capabilities=None):
@@ -96,6 +108,8 @@ def timeout_for(cmd, payload=b'', capabilities=None):
         return 23.0 + hold / 1000.0
     if cmd in DIRECT and capabilities is not None and capabilities >> CAP_DIRECT & 1:
         return T_DIRECT
+    if cmd == C['CALIBRATE'] and capabilities is not None and not capabilities >> CAP_CAL3 & 1:
+        return T_CAL_OLD
     return TIMEOUT.get(cmd, T_FAST)
 
 # Screens, keys, records
@@ -131,6 +145,10 @@ FLASH_RESULT = {0: 'OK', 1: 'outside the gate', 2: 'word not erased', 3: 'contro
                 4: 'flash error flag', 5: 'read-back differs', 6: 'page not blank'}
 UPDATE_RESULT = {0: 'none', 1: 'OK', 2: 'image check failed', 3: 'programming failed'}
 CAL_STATUS = {0: 'start', 1: 'busy', 2: 'finish', 3: 'fail'}
+# CALIBRATE answer byte 7 (capability bit 25, firmware/own/cal.s CAL_R_*)
+CAL_REASON = {0: 'none', 1: 'no acquisition for 1.5 s', 2: 'point time limit, fewer than 3 windows',
+              3: 'open below 100 kohm', 4: 'the store check of the table', 5: 'point time limit, 3 windows not agreeing',
+              6: 'ended by a key, the dialog closed or the screen left'}
 RECORD_STATE = {0: 'none', 1: 'INSTALL', 2: 'TRIAL', 3: 'OK'}
 
 BLOCK_SIZE = 0xC14
@@ -161,7 +179,9 @@ CAPS = ['STATE / STREAM', 'SCREEN', 'KEY', 'LCR_TABLES / LCR_SET', 'MEASURE / ME
         'settings recovery', 'FACTORY_MODE',
         'SETUP_LANGUAGE (not used, English only)', 'direct set',   # bit 20 clear, bit 21
         '60 Hz (frequency index 5)', 'TOLERANCE_SET / COMPARE tail',
-        'MEASURE markers / save result unchanged']                 # bits 22..24
+        'MEASURE markers / save result unchanged',                 # bits 22..24
+        'calibration sweep of cal.s',                              # bit 25
+        'own calibration area (OCAL_*, MONITOR)']                  # bit 26
 
 
 # ----------------------------------------------------------------------------------------------
@@ -389,6 +409,8 @@ class Measure:
     raw: bytes = field(repr=False, default=b'')
     markers: int = 0     # byte 64 (capability bit 24): bit 0 main, bit 1 secondary outside the
                          # accuracy table; 0 for a 64-byte record of older firmware
+    ocal: int = 0        # byte 65 (capability bit 26): bit 0 gain applied, bit 1 GAIN for the
+                         # frequency but not this cell, bit 2 lock, bit 3 retake short / open
     SIZE = 64
 
     @classmethod
@@ -401,8 +423,9 @@ class Measure:
         sec = Value.parse(d, 25)
         par, z, th, fq, lv, bs, rg, sp, ci = struct.unpack_from('<BffIffBBB', d, 40)
         mk = d[64] if len(d) > 64 else 0
+        oc = d[65] if len(d) > 65 else 0
         return cls(res, t, mrow, main, skind, sec, par, z, th, fq, lv, bs, rg, sp, ci,
-                   bytes(d[:65 if len(d) > 64 else cls.SIZE]), mk)
+                   bytes(d[:min(len(d), 66)]), mk, oc)
 
 
 @dataclass
@@ -472,6 +495,84 @@ class CalResult:
     cal_status: int
     cal_type: int
     save_status: int
+    fail_point: int = 0xFF          # capability bit 25: the point 0..14 that failed, 0xFF none
+    fail_reason: int = 0            # CAL_REASON
+
+
+@dataclass
+class OcalInfo:
+    """OCAL_INFO (64 bytes, PROTOCOL.md 16.2)."""
+    flags: int
+    slot: int
+    format: int
+    length: int
+    sequence: int
+    other_sequence: int
+    crc: int
+    present: int
+    gain_freqs: int
+    monitor_freqs: int
+    rejected: int
+    t_max: int
+    meta_time: int
+    meta_note: str
+
+    @classmethod
+    def parse(cls, d):
+        if len(d) < 64:
+            raise MeterError('OCAL_INFO of %d bytes, expected 64' % len(d))
+        fl, sl, fm, ln, sq, oq, cr, pr, gf, mf, rj, tm, _, mt = struct.unpack_from('<IBBHIIIBBBBHHI', d, 0)
+        return cls(fl, sl, fm, ln, sq, oq, cr, pr, gf, mf, rj, tm, mt, _text(d[32:60]))
+
+
+@dataclass
+class OcalRaw:
+    """OCAL_RAW / OCAL_LOCK answer (64 bytes, PROTOCOL.md 16.3)."""
+    window: int
+    c5: int
+    c6: int
+    c8: int
+    lock: int
+    frequency: int
+    level: float
+    bias: float
+    n: int
+    cls_: int
+    flags: int
+    z_re: float
+    z_im: float
+    a_v: float
+    a_i: float
+    sig2_v: float
+    sig2_i: float
+    adc1: tuple
+    adc2: tuple
+
+    @classmethod
+    def parse(cls, d):
+        if len(d) < 64:
+            raise MeterError('OCAL_RAW of %d bytes, expected 64' % len(d))
+        v = struct.unpack_from('<IBBBBIffHBBffffffHHHHHH', d, 0)
+        return cls(*v[:17], tuple(v[17:20]), tuple(v[20:23]))
+
+
+@dataclass
+class Monitor:
+    """MONITOR (25 bytes, PROTOCOL.md 16.5)."""
+    v: float
+    i: float
+    a_v_ref: float
+    a_i_ref: float
+    flags: int
+    mid1: int
+    mid2: int
+    window: int
+
+    @classmethod
+    def parse(cls, d):
+        if len(d) < 25:
+            raise MeterError('MONITOR of %d bytes, expected 25' % len(d))
+        return cls(*struct.unpack_from('<ffffBHHI', d, 0))
 
 
 @dataclass
@@ -972,6 +1073,8 @@ class Meter:
     def calibrate(self, cal_type, on_frame=None):
         def parse(d):
             st, ty, sv = struct.unpack_from('<BBI', d)
+            if len(d) >= 8:                 # capability bit 25: the failed point and its reason
+                return CalResult(0, st, ty, sv, d[6], d[7])
             return CalResult(0, st, ty, sv)
         status, data = self.request(C['CALIBRATE'], struct.pack('<BH', cal_type, CONFIRM_OK),
                                     on_frame=on_frame)
@@ -1045,6 +1148,56 @@ class Meter:
                 off = got
             else:
                 return self._save(C['SETTINGS_WRITE_BLOCK'], head + part, True)
+
+    def ocal_info(self):
+        return OcalInfo.parse(self._ok(C['OCAL_INFO']))
+
+    def ocal_read(self, slot, offset, length):
+        return self._ok(C['OCAL_READ'], struct.pack('<BHH', slot, offset, length))
+
+    def ocal_slots(self):
+        """Both slots of the area, 2 x 0x2000 bytes (64 reads of 256 each)."""
+        return b''.join(self.ocal_read(s, o, 256) for s in (0, 1) for o in range(0, 0x2000, 256))
+
+    def ocal_write(self, body, chunk=500):
+        """OCAL_WRITE of a body (sections of PROTOCOL.md 16.1); returns (result, slot, sequence).
+        Status 2 with 3 data bytes raises StatusError with the section id and entry index."""
+        if len(body) % 4 or not 8 <= len(body) <= 0x9C0:
+            raise MeterError('body of %d bytes: 8..0x9C0, a multiple of 4' % len(body))
+        crc = crc32(body)
+        off = 0
+        while True:
+            part = body[off:off + chunk]
+            st, d = self.request(C['OCAL_WRITE'], struct.pack('<HHHI', CONFIRM_OK, off, len(body), crc) + part)
+            if st != 0:
+                raise StatusError(C['OCAL_WRITE'], st, d)
+            off += len(part)
+            if off == len(body):
+                return struct.unpack_from('<BBI', d, 0)
+            if struct.unpack_from('<H', d, 0)[0] != off:
+                raise MeterError('OCAL_WRITE: meter expects offset %d, sent up to %d' % (d[0] | d[1] << 8, off))
+
+    def ocal_rollback(self, mode):
+        d = self._ok(C['OCAL_ROLLBACK'], struct.pack('<HB', CONFIRM_OK, mode))
+        return struct.unpack_from('<BII', d, 0)
+
+    def ocal_lock(self, c5, c6, c8):
+        return OcalRaw.parse(self._ok(C['OCAL_LOCK'], bytes((c5, c6, c8))))
+
+    def ocal_release(self):
+        return OcalRaw.parse(self._ok(C['OCAL_LOCK'], b'\xff\xff\xff'))
+
+    def ocal_raw(self):
+        return OcalRaw.parse(self._ok(C['OCAL_RAW']))
+
+    def ocal_trace(self, op, start=0):
+        d = self._ok(C['OCAL_TRACE'], bytes((op, start)))
+        st, kind, tick, count, n = struct.unpack_from('<BBIBB', d, 0)
+        ent = [struct.unpack_from('<IffBBBB', d, 8 + 16 * k) for k in range(n)]
+        return st, kind, tick, count, ent
+
+    def monitor(self):
+        return Monitor.parse(self._ok(C['MONITOR']))
 
     def cal_read(self, copy, offset, length):
         return self._ok(C['CAL_READ'], struct.pack('<BHH', copy, offset, length))
@@ -1424,6 +1577,8 @@ def cmd_main(a, m):
                         if f.type == T_EVENT else None)
         print('calibration %s, type %d; %s' % (CAL_STATUS.get(r.cal_status, r.cal_status),
                                                r.cal_type, SaveResult(0, r.save_status, 0, False).describe()))
+        if r.fail_point != 0xFF:
+            print('ended at point %d of 15: %s' % (r.fail_point + 1, CAL_REASON.get(r.fail_reason, r.fail_reason)))
     elif c == 'settings':
         settings_cmd(a, m)
     elif c == 'cal-read':
@@ -1440,6 +1595,39 @@ def cmd_main(a, m):
         for n, cp in zip('AB', copies):
             print('copy %s (0x%08X): %s' % (n, COPY_BASE['AB'.index(n)], check_copy(cp)[1]))
         print('%s: %d bytes (copy A then copy B, 0x1000 each)' % (a.file, 2 * COPY_SIZE))
+    elif c == 'ocal-info':
+        print(m.ocal_info())
+    elif c == 'ocal-backup':
+        data = m.ocal_slots()
+        uid = m.info().uid.hex().upper()
+        path = os.path.join(a.dir, 'LC1020E-%s-%s.ocal' % (uid, time.strftime('%Y%m%d-%H%M%S')))
+        with open(path, 'wb') as f:
+            f.write(data)
+        print('%s: %d bytes' % (path, len(data)))
+    elif c == 'ocal-write':
+        need_yes(a, 'write the own calibration area')
+        with open(a.file, 'rb') as f:
+            body = f.read()
+        print('result %d slot %d sequence %d' % m.ocal_write(body))
+    elif c == 'ocal-rollback':
+        need_yes(a, 'revoke calibration records')
+        print('slot %d sequence %d flags 0x%X' % m.ocal_rollback(a.mode))
+    elif c == 'lock':
+        print(m.ocal_release() if a.codes == ['release'] else m.ocal_lock(*(int(x) for x in a.codes)))
+    elif c == 'raw':
+        print(m.ocal_raw())
+    elif c == 'trace':
+        op = {'disarm': 0, 'arm': 1, 'read': 2}[a.op]
+        if op != 2:
+            print(m.ocal_trace(op)[:4])
+        else:
+            st, kind, tick, count, ent = m.ocal_trace(2, 0)
+            ent += m.ocal_trace(2, 31)[4] if count > 31 else []
+            print('state %d kind %d tick %d count %d' % (st, kind, tick, count))
+            for e in ent:
+                print('  %10d  %.6g %+.6g j  flags %d  codes %d %d %d' % e)
+    elif c == 'monitor':
+        print(m.monitor())
     elif c == 'restore-block':
         need_yes(a, 'restore-block')
         with open(a.file, 'rb') as f:
@@ -1600,6 +1788,21 @@ def build_parser():
     x.add_argument('-o', '--output')
     x = sp.add_parser('backup', help='both settings copies (CAL_READ) into one file')
     x.add_argument('file')
+    sp.add_parser('ocal-info', help='OCAL_INFO')
+    x = sp.add_parser('ocal-backup', help='both slots of the own calibration area into DIR/LC1020E-<UID>-<date>.ocal')
+    x.add_argument('dir')
+    x = sp.add_parser('ocal-write', help='OCAL_WRITE of a body file (typed yes)')
+    x.add_argument('file')
+    x.add_argument('--yes', action='store_true')
+    x = sp.add_parser('ocal-rollback', help='OCAL_ROLLBACK: 0 the active record, 1 every own record')
+    x.add_argument('mode', type=int, choices=(0, 1))
+    x.add_argument('--yes', action='store_true')
+    x = sp.add_parser('lock', help='OCAL_LOCK C5 C6 C8, or "release"')
+    x.add_argument('codes', nargs='+')
+    sp.add_parser('raw', help='OCAL_RAW')
+    x = sp.add_parser('trace', help='OCAL_TRACE arm | read | disarm')
+    x.add_argument('op', choices=('arm', 'read', 'disarm'))
+    sp.add_parser('monitor', help='MONITOR')
     x = sp.add_parser('restore-block', help='SETTINGS_WRITE_BLOCK from a backup or block file')
     x.add_argument('file')
     x.add_argument('--copy', choices=('A', 'B'), default='A', help='copy of a backup file')

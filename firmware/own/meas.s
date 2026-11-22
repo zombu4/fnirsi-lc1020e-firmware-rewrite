@@ -31,8 +31,14 @@
 @ A window always holds at least 3 accepted acquisitions: it closes at the first addition with
 @ N >= 3 and T_win passed (meas_add), so a window that would hold fewer in T_win is extended
 @ until the third (the A6 D bound of the design's fix 4 needs N >= 3; revision 6).
-@ The words of OWN_FUNC this file writes: MF_SP, MF_HOLDP, MF_HL, MF_PSEQ, and MF_AUTO = 0 at a
-@ setting change (own.inc).
+@ Stage 4 (revision 7, design 8.1): S4.1 the complex open / short compensation with S4.2 option
+@ (K), the references kept as magnitude breakpoints through the compensation, on screens 1 and 2
+@ only (meas_comp; never on screen 3, so fn_0800bb64 stores the V1.1 format); S4.4 the bias
+@ transient: after a bias change a window is published only once the DC midpoints are steady
+@ (meas_bias_wait). S4.7 needs no code: ADC1 IN3 / ADC2 IN4 are fast channels (user manual
+@ figure 9-3), so the 1.5-cycle sample time stays.
+@ The words of OWN_FUNC this file writes: MF_SP, MF_HOLDP, MF_HL, MF_PSEQ, MF_BIASP, MF_BMID,
+@ MF_BT0, and MF_AUTO = 0 at a setting change (own.inc).
 @
 @ Vendor RAM words written here (each also written by fn_0800a068 in V1.1, same meaning unless
 @ the design's section 2 table says otherwise): 0x20005090 / 94 (|Zm| / theta of the last
@@ -44,7 +50,16 @@
 @ every publish), 0x20001208 / 0x2000120C (no reading), bytes 0x2000000A (consecutive
 @ rejected acquisitions) and 0x2000000B (presence, with word 0x2000511C), byte 0x200011C4 (the
 @ re-arm request of the DMA interrupt fn_080085d0). The gain and range bytes 0x200011C5 / C6 /
-@ C8 change only through the vendor ranging calls fn_0800b20c / fn_0800b000.
+@ C8 change only through the vendor ranging calls fn_0800b20c / fn_0800b000 and, while OCAL_LOCK
+@ holds them (ocal.s), through meas_lockset (the vendor setters fn_0800b164 / fn_0800af58 /
+@ fn_080093b8).
+@ OWN_CAL_DESIGN.md revision 3: S4.3 the gain correction zeta nu at meas_publish (ocal_gain; where
+@ it is applied the decade interpolation and the S4.2 (K) references are skipped), S4.5 the clip
+@ limits (ocal_clip), S4.6 the settle times per kind and frequency (ocal_settle, the maximum rule
+@ of meas_watch, the kind in r1 of meas_change, the bound T_max + 10), S4.4's limit from the BIAS
+@ section (ocal_bias_limit), the lock, the raw record at every close (ocal_raw, before the hold
+@ test) and the settle trace (meas_ocal_acq). The only word of OWN_OCAL meas.s writes is the byte
+@ OCS_KIND.
 @
 @ The state (OWN_MEAS, 0x100 bytes; own_start clears it to 0 at every start). Offsets:
 @   0x00 MO_G       re-arm generation (own.inc; written only by own_dma_rearm)
@@ -148,6 +163,8 @@
 	.equ	VB_MIN1,	0xC50		@ halfword 0x200011CC ADC1 minimum
 	.equ	VB_MAX2,	0xC56		@ halfword 0x200011D2 ADC2 maximum (fn_08007f38)
 	.equ	VB_MIN2,	0xC58		@ halfword 0x200011D4 ADC2 minimum
+	.equ	VB_MIDV,	0xC54		@ halfword 0x200011D0 ADC1 (min + max) / 2 (fn_08007fd4)
+	.equ	VB_MIDI,	0xC5C		@ halfword 0x200011D8 ADC2 (min + max) / 2 (fn_08007f38)
 	.equ	VB_SERPAR,	0xC70		@ 0x200011EC 0 series, 1 parallel values in use
 	.equ	VB_RING,	0xC78		@ 0x200011F4 accepted count of the open window
 	.equ	VB_MARK,	0xC80		@ 0x200011FC restart marker (fn_08009f10 clears it)
@@ -191,6 +208,15 @@
 	.equ	F_1E10,		0x501502F9	@ 1e10, the vendor's "0L" value (measure_33.s .L0800a7e4)
 	.equ	F_M400,		0xC3C80000	@ -400.0, its theta (.L0800a7e0)
 	.equ	F_OPEN,		0x4CD1CEF0	@ 1.1e8: the vendor's open exemption (fn_08008ea8)
+	.equ	F_OPENDEF,	0x5368D4A5	@ 1e12: the default open entry (app_02.s .L0800b630)
+	.equ	PH_OFF,		0x2D0		@ phase entries: + 0x2D0 from the |Z| entries (0x20000DF0)
+	.equ	BIAS_LIM,	4		@ S4.4: midpoint counts for "steady" [J], marked for M6
+	.equ	BIAS_MAX_MS,	30000		@ S4.4: publication resumes at the latest after this [J]
+@ ---- offsets in the float table meas_ck (stage 4) ----
+	.equ	CK_180,		0		@ 180.0
+	.equ	CK_D2R,		4		@ pi / 180
+	.equ	CK_1E5,		8		@ 1e5: the smallest usable open, ohm ([S10] p.5)
+	.equ	CK_1EM12,	12		@ 1e-12 = (1e-6)^2: the guard of S4.1
 @ ---- offsets in the float table meas_k ----
 	.equ	K_Q12,		0		@ 1/12
 	.equ	K_T12,		4		@ 64 * 12^2
@@ -284,83 +310,123 @@ own_measure:
 	pop	{r3, r4, r5, r6, r7, r8, r9, r10, r11, pc}
 
 @ ----------------------------------------------------------------------------
-@ meas_watch - change detection (S1.4 "Watched settings", "Restart detection", "On a change").
-@   Compares frequency, level, bias, speed (settle 26 ms), screen and the codes c5 / c6 / c8
-@   (settle 5 ms) with the values seen last and stores the new ones; the restart marker
-@   0x200011FC = 0 counts as a frequency change. Any change: meas_change with the longest settle
-@   of the changes found (window reset, new settle deadline).
-@   Returns r0 = 1 when the restart marker was 0. Changes r0..r3.
+@ meas_watch - change detection (S1.4 "Watched settings", "Restart detection", "On a change";
+@   OWN_CAL_DESIGN.md 2.3). Compares frequency, level, bias, speed, screen and the codes c5 / c6
+@   / c8 with the values seen last and stores the new ones; the restart marker 0x200011FC = 0,
+@   and a calibration record loaded by a commit or rollback (ocal_restart_take), count as a
+@   restart. Each change kind k (0 restart, 1 frequency, 2 level, 3 bias, 4 speed, 5 screen,
+@   6 codes) takes SETTLE[k][fi] (ocal_settle; defaults 26 / 5 ms) and the longest wins
+@   (meas_wkind: r7 = the time, r8 = its kind, the first found on a tie). Any change:
+@   meas_change with r0 = the time, r1 = the kind (window reset, new settle deadline); a change
+@   of kinds 0..4 also lets the AUTO class and series / parallel decide anew. A bias change
+@   also starts the S4.4 wait (MF_BIASP = 1, MF_BT0 = the tick; meas_bias_wait).
+@   Returns r0 = 1 when the restart marker was 0. Changes r0..r3, r12.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	meas_watch, %function
 meas_watch:
-	push	{r6, r7, r8, lr}
+	push	{r6, r7, r8, r9, r10, lr}	@ r10 only keeps the stack 8-byte aligned
 	movs	r7, #0			@ r7 = settle time of the changes found, ms
+	movs	r8, #0			@ r8 = the kind of r7
+	movs	r9, #0			@ r9 = 1: a change of kinds 0..4
 	ldr	r0, [r5, #VB_MARK]
 	clz	r6, r0
 	lsrs	r6, r6, #5		@ r6 = 1 when the marker is 0 (a restart)
-	cbz	r6, .Lmw_freq
-	movs	r7, #26
+	bl	ocal_restart_take	@ r0 = 1 once after a new calibration record
+	orrs	r0, r0, r6
+	beq	.Lmw_freq
+	movs	r0, #0
+	bl	meas_wkind		@ kind 0: restart
 .Lmw_freq:
 	ldr	r0, [r5, #VB_FREQ]
 	ldr	r1, [r4, #MO_FREQ]
 	cmp	r0, r1
 	beq	.Lmw_level
 	str	r0, [r4, #MO_FREQ]
-	movs	r7, #26
+	movs	r0, #1
+	bl	meas_wkind		@ kind 1: frequency (SETTLE of the new one)
 .Lmw_level:
 	ldr	r0, [r5, #VB_LEVEL]
 	ldr	r1, [r4, #MO_LEVEL]
 	cmp	r0, r1
 	beq	.Lmw_bias
 	str	r0, [r4, #MO_LEVEL]
-	movs	r7, #26
+	movs	r0, #2
+	bl	meas_wkind		@ kind 2: level
 .Lmw_bias:
 	ldr	r0, [r5, #VB_BIAS]
 	ldr	r1, [r4, #MO_BIAS]
 	cmp	r0, r1
 	beq	.Lmw_speed
 	str	r0, [r4, #MO_BIAS]
-	movs	r7, #26
+	movs	r0, #3
+	bl	meas_wkind		@ kind 3: bias
+	ldr	r1, =OWN_FUNC		@ S4.4: publication waits for steady DC midpoints
+	movs	r0, #1
+	str	r0, [r1, #MF_BIASP]
+	ldr	r0, =MS_TICK
+	ldr	r0, [r0]
+	str	r0, [r1, #MF_BT0]
 .Lmw_speed:
 	ldr	r0, [r5, #VB_SPEED]
 	ldr	r1, [r4, #MO_SPEED]
 	cmp	r0, r1
 	beq	.Lmw_screen
 	str	r0, [r4, #MO_SPEED]
-	movs	r7, #26
+	movs	r0, #4
+	bl	meas_wkind		@ kind 4: speed
 .Lmw_screen:
 	ldr	r0, [r5, #VB_SCREEN]
 	ldr	r1, [r4, #MO_SCREEN]
 	cmp	r0, r1
 	beq	.Lmw_codes
 	str	r0, [r4, #MO_SCREEN]
-	cmp	r7, #5
-	it	lo
-	movlo	r7, #5			@ the analog path is unchanged: the short settle
+	movs	r0, #5
+	bl	meas_wkind		@ kind 5: screen (the analog path is unchanged)
 .Lmw_codes:
 	bl	meas_codes
 	ldr	r1, [r4, #MO_CODES]
 	cmp	r0, r1
 	beq	.Lmw_done
 	str	r0, [r4, #MO_CODES]
-	cmp	r7, #5
-	it	lo
-	movlo	r7, #5			@ range or gain: 5 ms ([S12] p.35)
+	movs	r0, #6
+	bl	meas_wkind		@ kind 6: range or gain ([S12] p.35)
 .Lmw_done:
 	cbz	r7, .Lmw_ret
-	cmp	r7, #26
-	bne	.Lmw_change
+	cmp	r9, #0
+	beq	.Lmw_change
 	ldr	r0, =OWN_FUNC		@ a setting change or a restart (S2.5, S2.6): AUTO class
 	movs	r1, #0			@ and series / parallel decide anew
 	str	r1, [r0, #MF_SP]
 	str	r1, [r0, #MF_AUTO]
 .Lmw_change:
 	mov	r0, r7
+	mov	r1, r8			@ the kind (meas_change stores it for the trace)
 	bl	meas_change
 .Lmw_ret:
 	mov	r0, r6
-	pop	{r6, r7, r8, pc}
+	pop	{r6, r7, r8, r9, r10, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_wkind - the maximum rule of meas_watch (OWN_CAL_DESIGN.md 2.3): r0 = change kind 0..6.
+@   r7 = SETTLE[kind][fi] and r8 = the kind when that value is larger than r7 (so the first kind
+@   found wins a tie); kinds 0..4 set r9 = 1. Works on meas_watch's r7..r9 and is called only
+@   from it. Changes r0..r2, r12.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_wkind, %function
+meas_wkind:
+	push	{r6, lr}
+	mov	r6, r0
+	cmp	r6, #5
+	it	lo
+	movlo	r9, #1
+	bl	ocal_settle		@ r0 = ms (1..500; 26 / 5 for a frequency outside the list)
+	cmp	r0, r7
+	itt	hi
+	movhi	r7, r0
+	movhi	r8, r6
+	pop	{r6, pc}
 
 @ ----------------------------------------------------------------------------
 @ meas_hold - S2.7 (design D1 / D2). Hold 0x200011A4 = 0: MF_HOLDP = 0. Hold set and MF_HOLDP 0
@@ -426,15 +492,22 @@ meas_codes:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ meas_change - a change: r0 = its settle time T in ms. The deadline is now + T + 10 (the tick
-@   moves in steps of 10 once per 10 ms, so t_arm >= deadline means more than T ms really
-@   passed, S1.4). A deadline still pending (1..36 ms ahead of now, the longest a deadline can
-@   be ahead) that lies later is kept. Then the window is reset (meas_reset, tail call).
-@   Changes r0..r3.
+@ meas_change - a change: r0 = its settle time T in ms, r1 = its kind 0..6 (stored first in
+@   the byte OCS_KIND of OWN_OCAL for the settle trace; an armed trace starts here,
+@   ocal_trace_change). The deadline is now + T + 10 (the tick moves in steps of 10 once per
+@   10 ms, so t_arm >= deadline means more than T ms really passed, S1.4). A deadline still
+@   pending (1..T_max + 10 ms ahead of now, the longest a deadline can be ahead; T_max from
+@   ocal_load, 26 with the defaults) that lies later is kept. Then the window is reset
+@   (meas_reset, tail call). Changes r0..r3, r12.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	meas_change, %function
 meas_change:
+	ldr	r2, =OWN_OCAL + OCS_KIND
+	strb	r1, [r2]		@ the kind of this change (OWN_CAL_DESIGN.md 2.3, G7)
+	push	{r0, lr}
+	bl	ocal_trace_change	@ changes r0..r3
+	pop	{r0, lr}
 	ldr	r1, =MS_TICK
 	ldr	r1, [r1]		@ r1 = now
 	adds	r0, r0, #10		@ r0 = T + 10
@@ -443,8 +516,11 @@ meas_change:
 	ldr	r2, [r4, #MO_TSET]
 	subs	r2, r2, r1		@ r2 = old deadline - now
 	subs	r3, r2, #1
-	cmp	r3, #36
-	bhs	.Lmc_new		@ not 1..36 ahead: the old one has passed
+	ldr	r12, =OWN_OCAL + OCS_TMAX
+	ldr	r12, [r12]
+	add	r12, r12, #10		@ T_max + 10
+	cmp	r3, r12
+	bhs	.Lmc_new		@ not 1..T_max + 10 ahead: the old one has passed
 	cmp	r2, r0
 	bgt	.Lmc_reset		@ the old deadline is later: kept
 .Lmc_new:
@@ -511,14 +587,14 @@ meas_arm:
 @ ----------------------------------------------------------------------------
 @ meas_acq - steps 2 and 3 for an acquisition that passed step 1; r6 = G as read in step 1.
 @   The peak scans fn_08007f84 (ADC3), fn_08007fd4 (ADC1, r0 = p-p), fn_08007f38 (ADC2), then
-@   saturation (a sample at 4095 or 0: maximum >= 4095 or minimum = 0, S1.5) with p-p 4095 for
-@   the saturated channel, the ranging calls fn_0800b20c (V) and, when it made no change,
+@   saturation (ocal_clip: maximum >= CLIP hi or minimum <= CLIP lo, defaults 4095 / 0, S1.5, S4.5) with p-p 4095 for
+@   the saturated channel, while OCAL_LOCK holds the codes meas_lockset, else the ranging calls fn_0800b20c (V) and, when it made no change,
 @   fn_0800b000 (I and range).
-@   Codes changed: a change with the 5 ms settle (the overload count ends).
+@   Codes changed: a change of kind 6 with SETTLE[6][fi] (default 5 ms; the overload count ends).
 @   Codes unchanged (in band, or no step left): 0x2000120C = 0, then
 @   - saturated: one more overload acquisition; at the third in a row the window is reset and
 @     the overload set published;
-@   - not saturated after three or more overload acquisitions: a change (5 ms settle);
+@   - not saturated after three or more overload acquisitions: a change (kind 6);
 @   - a pending settle not yet over (t_arm before the deadline): discarded;
 @   - else the two DFT bins (meas_dft), step 3 (G read again: a re-arm during the reads
 @     discards it) and the window (meas_win).
@@ -533,24 +609,9 @@ meas_acq:
 	mov	r7, r0
 	bl	fn_08007f38		@ ADC2: 0x200011D2..D8, r0 = p-p
 	mov	r8, r0
-	movs	r9, #0			@ bit 0: ADC1 saturated, bit 1: ADC2 saturated
+	bl	ocal_clip		@ S4.5: r0 = bit 0 ADC1, bit 1 ADC2 saturated (CLIP limits;
+	mov	r9, r0			@ the defaults 0 / 4095 are the stage-1 test)
 	movw	r2, #4095
-	ldrh	r0, [r5, #VB_MAX1]
-	ldrh	r1, [r5, #VB_MIN1]
-	cmp	r0, r2
-	it	hs
-	orrhs	r9, r9, #1
-	cmp	r1, #0
-	it	eq
-	orreq	r9, r9, #1
-	ldrh	r0, [r5, #VB_MAX2]
-	ldrh	r1, [r5, #VB_MIN2]
-	cmp	r0, r2
-	it	hs
-	orrhs	r9, r9, #2
-	cmp	r1, #0
-	it	eq
-	orreq	r9, r9, #2
 	tst	r9, #1
 	it	ne
 	movne	r7, r2			@ saturated V: "too big" for the ranging
@@ -559,6 +620,11 @@ meas_acq:
 	movne	r8, r2			@ saturated I
 	bl	meas_codes
 	mov	r10, r0			@ r10 = codes before the ranging
+	bl	ocal_locked		@ r0 = the OCAL_LOCK word, 0 when not locked
+	cbz	r0, .Lac_auto
+	bl	meas_lockset		@ the locked codes; no ranging call (OWN_CAL_DESIGN.md 2.2)
+	b	.Lac_ranged
+.Lac_auto:
 	mov	r0, r7
 	bl	fn_0800b20c		@ V gain; 0 = it changed c5
 	cbz	r0, .Lac_ranged
@@ -568,13 +634,17 @@ meas_acq:
 	bl	meas_codes
 	cmp	r0, r10
 	beq	.Lac_same
-	str	r0, [r4, #MO_CODES]	@ our own ranging: a change
+	str	r0, [r4, #MO_CODES]	@ our own ranging (or the lock): a change
 	movs	r0, #0
 	str	r0, [r4, #MO_OVL]
-	movs	r0, #5
+	movs	r0, #6
+	bl	ocal_settle		@ S4.6: SETTLE[6][fi]
+	movs	r1, #6			@ kind 6
 	bl	meas_change
 	b	.Lac_ret
 .Lac_same:
+	mov	r0, r9
+	bl	meas_ocal_acq		@ the saturation note and the settle trace (2.2)
 	movs	r0, #0
 	str	r0, [r5, #VB_NRCNT]	@ an in-band acquisition: 0x2000120C = 0
 	cmp	r9, #0
@@ -589,6 +659,7 @@ meas_acq:
 	bne	.Lac_ret
 	bl	meas_reset
 	bl	meas_pub_ovl		@ the overload set, once
+	bl	ocal_ovl_note		@ the next OCAL_RAW record: flags bit 1
 	b	.Lac_ret
 .Lac_unsat:
 	ldr	r0, [r4, #MO_OVL]
@@ -597,7 +668,9 @@ meas_acq:
 	str	r1, [r4, #MO_OVL]
 	cmp	r0, #3
 	blo	.Lac_settle		@ a short run of saturated ones: no change
-	movs	r0, #5
+	movs	r0, #6
+	bl	ocal_settle		@ S4.6: SETTLE[6][fi]
+	movs	r1, #6			@ kind 6
 	bl	meas_change		@ the overload ends: a change
 	b	.Lac_ret
 .Lac_settle:
@@ -617,6 +690,100 @@ meas_acq:
 	bl	meas_win
 .Lac_ret:
 	pop	{r7, r8, r9, r10, r11, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_lockset - OCAL_LOCK (OWN_CAL_DESIGN.md 2.2): r0 = the lock word (c5 | c6 << 8 | c8 << 16 |
+@   1 << 24). Each code that differs from its byte is stored and its vendor setter called:
+@   fn_0800b164 (c5 from 0x200011C5, src/app_02.s 221-224), fn_0800af58 (c6 from 0x200011C6,
+@   src/app_01.s 1096-1099), fn_080093b8 (r0 = c8 after 0x200011C8 is stored, src/app_01.s
+@   23-31). Changes r0..r3, r12.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_lockset, %function
+meas_lockset:
+	push	{r6, lr}
+	mov	r6, r0
+	uxtb	r0, r6
+	ldrb	r1, [r5, #VB_C5]
+	cmp	r0, r1
+	beq	.Lls_c6
+	strb	r0, [r5, #VB_C5]
+	bl	fn_0800b164		@ V gain from the byte
+.Lls_c6:
+	ubfx	r0, r6, #8, #8
+	ldrb	r1, [r5, #VB_C6]
+	cmp	r0, r1
+	beq	.Lls_c8
+	strb	r0, [r5, #VB_C6]
+	bl	fn_0800af58		@ I gain from the byte
+.Lls_c8:
+	ubfx	r0, r6, #16, #8
+	ldrb	r1, [r5, #VB_C8]
+	cmp	r0, r1
+	beq	.Lls_out
+	strb	r0, [r5, #VB_C8]
+	bl	fn_080093b8		@ the range, r0 = c8
+.Lls_out:
+	pop	{r6, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_kval - s0 = K = R[c8] G[c6] / G[c5] of the codes now (the tables of meas_win). Changes
+@   r0, r1, s1.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_kval, %function
+meas_kval:
+	ldrb	r0, [r5, #VB_C8]
+	ldr	r1, =d_0802aeec		@ range resistors 100, 1k, 10k, 100k (words)
+	ldr	r0, [r1, r0, lsl #2]
+	vmov	s0, r0
+	vcvt.f32.u32	s0, s0
+	ldr	r1, =d_0802aee4		@ gains 1, 2, 4 .. 128 (bytes)
+	ldrb	r0, [r5, #VB_C6]
+	ldrb	r0, [r1, r0]
+	vmov	s1, r0
+	vcvt.f32.u32	s1, s1
+	vmul.f32	s0, s0, s1
+	ldrb	r0, [r5, #VB_C5]
+	ldrb	r0, [r1, r0]
+	vmov	s1, r0
+	vcvt.f32.u32	s1, s1
+	vdiv.f32	s0, s0, s1
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ meas_ocal_acq - an acquisition whose codes did not change (meas_acq .Lac_same), r0 = its
+@   saturation bits: ocal_sat_note; while the settle trace records (ocal_trace_on), meas_dft
+@   for this acquisition (also when the settle rule will discard it; the window is not fed) and
+@   one trace entry with K of the codes (meas_kval) and the flags bit 0 the settle rule
+@   discards it (MO_SETL set and t_arm before MO_TSET), bit 1 saturated. Changes r0..r3, r12,
+@   s0..s13.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_ocal_acq, %function
+meas_ocal_acq:
+	push	{r6, lr}
+	mov	r6, r0
+	bl	ocal_sat_note
+	bl	ocal_trace_on
+	cbz	r0, .Loa_out
+	bl	meas_dft
+	bl	meas_kval		@ s0 = K
+	movs	r0, #0
+	cmp	r6, #0
+	it	ne
+	movne	r0, #2			@ saturated
+	ldr	r1, [r4, #MO_SETL]
+	cbz	r1, .Loa_add
+	ldr	r1, [r4, #MO_TARM]
+	ldr	r2, [r4, #MO_TSET]
+	subs	r1, r1, r2
+	it	mi
+	orrmi	r0, r0, #1		@ the settle rule discards it
+.Loa_add:
+	bl	ocal_trace_add
+.Loa_out:
+	pop	{r6, pc}
 
 @ ----------------------------------------------------------------------------
 @ meas_dft - S1.2 for both buffers: the bin k (1 below 10 kHz, 4 below 100 kHz, else 16, the
@@ -1278,9 +1445,15 @@ meas_add:
 
 @ ----------------------------------------------------------------------------
 @ meas_publish - the window closes (S1.3 "Publish", S1.7, S1.8). MO_SEQ + 1. Under hold
-@   nothing is written. Else: sum I' = 0 gives the no-reading set; Zbar = K sum V' / sum I';
+@   nothing is written, nor while S4.4 waits for steady DC midpoints after a bias change
+@   (meas_bias_wait). Else: sum I' = 0 gives the no-reading set; Zbar = K sum V' / sum I';
+@   with OCAL GAIN for the cell (ocal_gain) Zbar = K zeta nu sum V' / sum I' and no decade
+@   interpolation / S4.2 (K) references; the OCAL_RAW record is taken first (ocal_raw);
 @   Re, Im or |Zbar| not finite gives the overload set; theta = atan2(Im, Re) in degrees (0 for
-@   Zbar = 0, cos 1, sin 0), cos = Re / |Zbar|, sin = Im / |Zbar|. The magnitude chain of
+@   Zbar = 0, cos 1, sin 0), cos = Re / |Zbar|, sin = Im / |Zbar|. On screens 1 and 2 the
+@   complex open / short compensation of stage 4 (meas_comp, S4.1 with S4.2 option (K)) gives
+@   |Z|c, theta, cos and sin from Zdut, or the overload set at its guard; where it cannot be
+@   used (meas_comp r0 = 0) and on screen 3 the magnitude chain of
 @   fn_0800a068: |Z|c = |Zbar| on screen 3 with calibration type 0, else |Zbar| minus the short
 @   entry of fn_080090a4(frequency, level), and on screens 1 and 2 the decade interpolation
 @   (meas_interp). Then |Z|c to 0x200050C4, theta to 0x200050CC, Rs = |Z|c cos, Xs = |Z|c sin,
@@ -1298,9 +1471,13 @@ meas_publish:
 	ldr	r0, [r4, #MO_SEQ]
 	adds	r0, r0, #1
 	str	r0, [r4, #MO_SEQ]
+	bl	ocal_raw		@ the OCAL_RAW record of every close, also under hold (2.2)
 	ldr	r0, [r5, #VB_HOLD]
 	cmp	r0, #0
 	bne	.Lpb_reset		@ hold: the display keeps its values
+	bl	meas_bias_wait		@ S4.4: r0 = 1 while the DC midpoints still move
+	cmp	r0, #0
+	bne	.Lpb_reset		@ the window is not published
 	vldr	s0, [r4, #MO_SUM]	@ V'r
 	vldr	s1, [r4, #MO_SUM + 4]	@ V'i
 	vldr	s2, [r4, #MO_SUM + 8]	@ I'r
@@ -1323,8 +1500,19 @@ meas_publish:
 	vldr	s7, [r4, #MO_K]
 	vdiv.f32	s5, s5, s4
 	vdiv.f32	s6, s6, s4
-	vmul.f32	s16, s5, s7	@ s16 = Re Zbar
+	bl	ocal_gain		@ S4.3: r0 = 1, s0 / s1 = zeta nu of the cell (keeps s4..s7)
+	cbz	r0, .Lpb_nom
+	vmul.f32	s2, s7, s0	@ Kr = K Re(zeta nu)
+	vmul.f32	s3, s7, s1	@ Ki = K Im(zeta nu)
+	vmul.f32	s16, s5, s2
+	vmls.f32	s16, s6, s3	@ s16 = Re Z_inst = s5 Kr - s6 Ki
+	vmul.f32	s17, s5, s3
+	vmla.f32	s17, s6, s2	@ s17 = Im Z_inst = s5 Ki + s6 Kr
+	b	.Lpb_mag
+.Lpb_nom:
+	vmul.f32	s16, s5, s7	@ s16 = Re Zbar (the stage-1 instructions, bit-identical)
 	vmul.f32	s17, s6, s7	@ s17 = Im Zbar
+.Lpb_mag:
 	vmul.f32	s0, s16, s16
 	vmla.f32	s0, s17, s17
 	vsqrt.f32	s18, s0		@ s18 = |Zbar|
@@ -1364,6 +1552,18 @@ meas_publish:
 	vmov	s0, r1
 	bl	fn_080090a4		@ r0 = table entry of this frequency and level
 	mov	r7, r0
+	ldr	r0, [r5, #VB_SCREEN]
+	cmp	r0, #3
+	beq	.Lpb_s1			@ screen 3: never compensated (S4.1): the store format of V1.1
+	bl	meas_comp		@ S4.1 / S4.2 (K): r0 = 1 done, 2 overload, 0 stage 1
+	cmp	r0, #1
+	bne	.Lpb_c2
+	ldr	r6, =V_RES
+	b	.Lpb_out		@ s19..s22 from the compensated Zdut
+.Lpb_c2:
+	cmp	r0, #2
+	beq	.Lpb_ovl		@ the guard of S4.1 or a non-finite Zdut: the overload set
+.Lpb_s1:
 	vmov.f32	s22, s18	@ s22 = |Z|c
 	ldr	r6, =V_RES
 	ldr	r0, [r5, #VB_SCREEN]
@@ -1376,6 +1576,9 @@ meas_publish:
 	vsub.f32	s22, s22, s0	@ minus the short entry
 	cmp	r0, #3
 	beq	.Lpb_out		@ screen 3: no interpolation
+	bl	ocal_gain_on		@ the gain applied: no decade interpolation (2.1)
+	cmp	r0, #0
+	bne	.Lpb_out
 	vmov.f32	s0, s22
 	mov	r0, r7
 	bl	meas_interp
@@ -2136,6 +2339,349 @@ own_freq_step:
 	pop	{r4, r5, r6, r7}
 	b.w	fn_08009f10
 
+@ ----------------------------------------------------------------------------
+@ meas_bias_wait - S4.4, the bias transient (design 8.1: built with the DC-midpoint rule; the
+@   count limit BIAS_LIM and the time bound BIAS_MAX_MS are [J], marked for M6). After a bias change
+@   (MF_BIASP != 0, set by meas_watch) a window is published only when the DC midpoints of ADC1 and
+@   ADC2 (halfwords 0x200011D0 / 0x200011D8, written by fn_08007fd4 / fn_08007f38 for the
+@   acquisition that closed the window) each differ by at most BIAS_LIM counts from those at the
+@   previous window close (steady over two windows), or once BIAS_MAX_MS have passed since the
+@   change. Returns r0 = 1 for a window not to be published (its midpoints kept in MF_BMID for the
+@   next close, MF_BIASP = 2), r0 = 0 to publish (MF_BIASP = 0). Changes r0..r3, r12.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_bias_wait, %function
+meas_bias_wait:
+	push	{r6, lr}
+	ldr	r6, =OWN_FUNC
+	ldr	r0, [r6, #MF_BIASP]
+	cmp	r0, #0
+	beq	.Lbw_ret		@ r0 = 0: no transient pending
+	ldrh	r1, [r5, #VB_MIDV]
+	ldrh	r2, [r5, #VB_MIDI]
+	orr	r1, r1, r2, lsl #16	@ r1 = the midpoints of this close
+	cmp	r0, #2
+	bne	.Lbw_keep		@ the first close after the change: nothing to compare with
+	ldr	r2, [r6, #MF_BMID]
+	uxth	r0, r1
+	uxth	r3, r2
+	subs	r0, r0, r3
+	it	mi
+	rsbmi	r0, r0, #0		@ |delta V midpoint|
+	push	{r0, r1}
+	bl	ocal_bias_limit		@ S4.4 limit: BIAS section, default 4 = BIAS_LIM (r0, r1)
+	mov	r12, r0
+	pop	{r0, r1}
+	cmp	r0, r12
+	bhi	.Lbw_keep
+	lsrs	r0, r1, #16
+	lsrs	r3, r2, #16
+	subs	r0, r0, r3
+	it	mi
+	rsbmi	r0, r0, #0		@ |delta I midpoint|
+	push	{r0, r1}
+	bl	ocal_bias_limit		@ S4.4 limit: BIAS section, default 4 = BIAS_LIM (r0, r1)
+	mov	r12, r0
+	pop	{r0, r1}
+	cmp	r0, r12
+	bls	.Lbw_done		@ both steady over two windows
+.Lbw_keep:
+	str	r1, [r6, #MF_BMID]
+	movs	r0, #2
+	str	r0, [r6, #MF_BIASP]
+	ldr	r0, [r6, #MF_BT0]
+	ldr	r1, =MS_TICK
+	ldr	r1, [r1]
+	subs	r0, r1, r0		@ ms since the change (unsigned difference)
+	ldr	r1, =BIAS_MAX_MS
+	cmp	r0, r1
+	bhs	.Lbw_done		@ the time bound: published from now on
+	movs	r0, #1
+	pop	{r6, pc}
+.Lbw_done:
+	movs	r0, #0
+	str	r0, [r6, #MF_BIASP]
+.Lbw_ret:
+	pop	{r6, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_comp - stage 4 on screens 1 and 2: S4.1, the complex open / short compensation, with
+@   S4.2 option (K) (design 8.1: D11 = (K), computed per reading, 0 RAM). r7 = the user-table
+@   entry of the frequency and level (fn_080090a4: type t at +4 t, its phase at +0x2D0 + 4 t),
+@   s16 / s17 = Re / Im Zbar.
+@   - Zs = |t0| e^(j theta0) (type 0 is stored raw). |t0| or theta0 not finite, or |theta0| > 180:
+@     r0 = 0 (the stage-1 chain);
+@   - Zo = (t11 + |t0|) e^(j theta11) (type 11 is stored as |Zm| - |Zs| of its time). The open is
+@     unusable, and the compensation short-only (Zdut = Zm - Zs), when t11 is exactly 1e12 with
+@     theta 0 (the default), 1e10 (no reading), theta11 not finite or beyond +-180 (-400 the
+@     no-reading set, +400 an open "not resolved" by cal.s), t11 not finite, or |Zo| below 1e5 or
+@     Zo = Zs; else Yo = 1 / (Zo - Zs) and Zdut = (Zm - Zs) / (1 - (Zm - Zs) Yo) (meas_cz);
+@   - (K): b'_k = |comp((b_k + |t0|) e^(j theta_k))| for the references k = 1..10 (assumption A1
+@     of the design: b_k was stored as |Zm_k| - |t0|). One not finite, a guard at one, or b'_k not
+@     strictly increasing: r0 = 0 (the stage-1 chain for this reading); skipped where the OCAL
+@     gain was applied (ocal_gain_on): |Z|c = |Zdut| then;
+@   - Zdut = comp(Zbar): the guard |1 - (Zm - Zs) Yo| < 1e-6, or Zdut not finite: r0 = 2 (the
+@     overload set). Else |Z|c = the decade interpolation (meas_interp) of |Zdut| against b'_k
+@     (every reference reads its nominal by construction), theta = atan2(Im, Re) of Zdut in
+@     degrees, cos / sin = Re / Im over |Zdut| (|Zdut| = 0: theta 0, cos 1, sin 0) into s19..s22,
+@     r0 = 1.
+@   Changes r0..r3, r12, s0..s15, s23..s31 (s16..s18 kept; s19..s22 only with r0 = 1).
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_comp, %function
+meas_comp:
+	push	{r6, r8, r9, r10, r11, lr}
+	sub	sp, #48			@ b'_k at sp + 4 k, k = 1..10 (the layout meas_interp reads)
+	vldr	s0, [r7]		@ t0
+	bl	meas_fin
+	cmp	r0, #0
+	beq	.Lco_none
+	vldr	s0, [r7]
+	vabs.f32	s23, s0		@ s23 = |t0|
+	vldr	s0, [r7, #PH_OFF]	@ theta0
+	bl	meas_angok
+	cmp	r0, #0
+	beq	.Lco_none
+	vldr	s0, [r7, #PH_OFF]
+	bl	meas_cis		@ s0 = cos theta0, s1 = sin theta0
+	vmul.f32	s24, s23, s0	@ s24 = Re Zs
+	vmul.f32	s25, s23, s1	@ s25 = Im Zs
+	movs	r8, #0			@ r8 = 1: the open is usable
+	ldr	r0, [r7, #0x2C]		@ t11 bits
+	ldr	r1, [r7, #PH_OFF + 0x2C]	@ theta11 bits
+	ldr	r2, =F_OPENDEF
+	cmp	r0, r2
+	bne	.Lco_o1
+	cmp	r1, #0
+	beq	.Lco_refs		@ the default open, 1e12 at 0 degrees
+.Lco_o1:
+	ldr	r2, =F_1E10
+	cmp	r0, r2
+	beq	.Lco_refs		@ the no-reading value
+	vmov	s0, r0
+	bl	meas_fin
+	cmp	r0, #0
+	beq	.Lco_refs
+	vldr	s0, [r7, #PH_OFF + 0x2C]
+	bl	meas_angok
+	cmp	r0, #0
+	beq	.Lco_refs		@ -400, +400 ("not resolved") or not finite
+	vldr	s0, [r7, #0x2C]
+	vadd.f32	s28, s0, s23	@ s28 = |Zo| = t11 + |t0|
+	ldr	r0, =meas_ck
+	vldr	s1, [r0, #CK_1E5]
+	vcmpe.f32	s28, s1
+	vmrs	APSR_nzcv, fpscr
+	blt	.Lco_refs		@ below 100 kohm (or not ordered)
+	vldr	s0, [r7, #PH_OFF + 0x2C]
+	bl	meas_cis
+	vmul.f32	s2, s28, s0
+	vsub.f32	s2, s2, s24	@ Re (Zo - Zs)
+	vmul.f32	s3, s28, s1
+	vsub.f32	s3, s3, s25	@ Im (Zo - Zs)
+	vmul.f32	s4, s2, s2
+	vmla.f32	s4, s3, s3	@ |Zo - Zs|^2
+	vmov	r0, s4
+	ldr	r1, =EXP_MASK
+	and	r0, r0, r1
+	cmp	r0, r1
+	beq	.Lco_refs		@ not finite
+	vcmp.f32	s4, #0
+	vmrs	APSR_nzcv, fpscr
+	beq	.Lco_refs		@ Zo = Zs
+	vdiv.f32	s26, s2, s4	@ s26 = Re Yo
+	vdiv.f32	s27, s3, s4
+	vneg.f32	s27, s27	@ s27 = Im Yo
+	movs	r8, #1
+.Lco_refs:
+	bl	ocal_gain_on		@ the gain applied: no S4.2 (K) references (OWN_CAL_DESIGN 2.1)
+	cmp	r0, #0
+	bne	.Lco_zdut
+	movs	r9, #1			@ r9 = k
+.Lco_ref:
+	add	r10, r7, r9, lsl #2	@ r10 = &b_k
+	vldr	s0, [r10]
+	bl	meas_fin
+	cmp	r0, #0
+	beq	.Lco_none
+	vldr	s0, [r10, #PH_OFF]
+	bl	meas_angok
+	cmp	r0, #0
+	beq	.Lco_none
+	vldr	s0, [r10]
+	vadd.f32	s30, s0, s23	@ s30 = |Zm_k| = b_k + |t0|
+	vldr	s0, [r10, #PH_OFF]
+	bl	meas_cis
+	vmul.f32	s2, s30, s1
+	vmul.f32	s0, s30, s0	@ Re Zm_k
+	vmov.f32	s1, s2		@ Im Zm_k
+	bl	meas_cz
+	cmp	r0, #0
+	bne	.Lco_none		@ the guard at a reference
+	vmul.f32	s2, s0, s0
+	vmla.f32	s2, s1, s1
+	vsqrt.f32	s0, s2		@ b'_k
+	bl	meas_fin
+	cmp	r0, #0
+	beq	.Lco_none
+	cmp	r9, #1
+	beq	.Lco_put
+	vcmpe.f32	s0, s29
+	vmrs	APSR_nzcv, fpscr
+	ble	.Lco_none		@ not strictly increasing (or not ordered)
+.Lco_put:
+	vmov.f32	s29, s0		@ s29 = b'_k for the next test
+	add	r0, sp, r9, lsl #2
+	vstr	s0, [r0]
+	adds	r9, r9, #1
+	cmp	r9, #10
+	bls	.Lco_ref
+.Lco_zdut:
+	vmov.f32	s0, s16
+	vmov.f32	s1, s17
+	bl	meas_cz			@ Zdut of the window
+	cmp	r0, #0
+	bne	.Lco_ovl
+	vmov.f32	s30, s0		@ s30 = Re Zdut
+	vmov.f32	s31, s1		@ s31 = Im Zdut
+	vmul.f32	s2, s0, s0
+	vmla.f32	s2, s1, s1
+	vsqrt.f32	s28, s2		@ s28 = |Zdut|
+	vmov.f32	s0, s28
+	bl	meas_fin
+	cmp	r0, #0
+	beq	.Lco_ovl
+	vmov.f32	s0, s28
+	bl	ocal_gain_on		@ changes r0, r1 only
+	cmp	r0, #0
+	bne	.Lco_noint		@ the gain applied: |Z|c = |Zdut|
+	vmov.f32	s0, s28
+	mov	r0, sp
+	bl	meas_interp		@ against b'_k (S4.2 (K))
+.Lco_noint:
+	vmov.f32	s22, s0		@ s22 = |Z|c
+	vcmp.f32	s28, #0
+	vmrs	APSR_nzcv, fpscr
+	bne	.Lco_ang
+	movs	r0, #0
+	vmov	s19, r0			@ theta = 0
+	vmov.f32	s20, #1.0	@ cos
+	vmov	s21, r0			@ sin
+	b	.Lco_done
+.Lco_ang:
+	vdiv.f32	s20, s30, s28	@ s20 = cos theta
+	vdiv.f32	s21, s31, s28	@ s21 = sin theta
+	vmov.f32	s0, s31
+	vmov.f32	s1, s30
+	bl	meas_deg
+	vmov.f32	s19, s0		@ s19 = theta, degrees
+.Lco_done:
+	movs	r0, #1
+	b	.Lco_ret
+.Lco_ovl:
+	movs	r0, #2
+	b	.Lco_ret
+.Lco_none:
+	movs	r0, #0
+.Lco_ret:
+	add	sp, #48
+	pop	{r6, r8, r9, r10, r11, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_cz - comp(Zm) of S4.1 for s0 / s1 = Re / Im Zm, with s24 / s25 = Zs, s26 / s27 = Yo and
+@   r8 = 1 when the open is usable (meas_comp): D = Zm - Zs; r8 = 0: Zdut = D; else W = 1 - D Yo,
+@   |W|^2 < 1e-12 (|W| < 1e-6, or not ordered) is the guard (r0 = 1), else Zdut = D / W =
+@   D conj(W) / |W|^2. Returns s0 / s1 = Zdut, r0 = 0. A leaf; changes r0, s0..s7.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_cz, %function
+meas_cz:
+	vsub.f32	s0, s0, s24	@ Re D
+	vsub.f32	s1, s1, s25	@ Im D
+	cmp	r8, #0
+	beq	.Lcz_ok			@ short only
+	vmul.f32	s2, s0, s26
+	vmls.f32	s2, s1, s27	@ Re (D Yo)
+	vmul.f32	s3, s0, s27
+	vmla.f32	s3, s1, s26	@ Im (D Yo)
+	vmov.f32	s4, #1.0
+	vsub.f32	s4, s4, s2	@ Re W
+	vneg.f32	s5, s3		@ Im W
+	vmul.f32	s6, s4, s4
+	vmla.f32	s6, s5, s5	@ |W|^2
+	ldr	r0, =meas_ck
+	vldr	s7, [r0, #CK_1EM12]
+	vcmpe.f32	s6, s7
+	vmrs	APSR_nzcv, fpscr
+	blt	.Lcz_guard
+	vmul.f32	s2, s0, s4
+	vmla.f32	s2, s1, s5	@ Re D Re W + Im D Im W
+	vmul.f32	s3, s1, s4
+	vmls.f32	s3, s0, s5	@ Im D Re W - Re D Im W
+	vdiv.f32	s0, s2, s6
+	vdiv.f32	s1, s3, s6
+.Lcz_ok:
+	movs	r0, #0
+	bx	lr
+.Lcz_guard:
+	movs	r0, #1
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ meas_cis - s0 = an angle in degrees: s0 = cos, s1 = sin of it (radians = degrees * pi / 180,
+@   then the vendor's single-precision cosine fn_08010900 and sine fn_08011780, runtime_37.s /
+@   runtime_38.s; the angle is finite, meas_angok). Keeps s16..s31 (s16 / s17 saved around the
+@   calls). Changes r0..r3, r12, s0..s15.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_cis, %function
+meas_cis:
+	push	{r3, lr}
+	vpush	{d8}
+	ldr	r0, =meas_ck
+	vldr	s1, [r0, #CK_D2R]
+	vmul.f32	s0, s0, s1	@ s0 = radians
+	vmov.f32	s16, s0		@ kept for the sine
+	bl	fn_08010900		@ cos
+	vmov.f32	s17, s0
+	vmov.f32	s0, s16
+	bl	fn_08011780		@ sin
+	vmov.f32	s1, s0
+	vmov.f32	s0, s17
+	vpop	{d8}
+	pop	{r3, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_angok - r0 = 1 when s0 is a finite angle with |s0| <= 180 degrees (an ordered compare:
+@   NaN and the infinities give 0), else 0. A leaf; changes r0, s1, s2.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_angok, %function
+meas_angok:
+	ldr	r0, =meas_ck
+	vldr	s1, [r0, #CK_180]
+	vabs.f32	s2, s0
+	vcmpe.f32	s2, s1
+	vmrs	APSR_nzcv, fpscr
+	ite	ls
+	movls	r0, #1
+	movhi	r0, #0
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ meas_fin - r0 = 1 when s0 is finite (exponent field not all ones), else 0. A leaf; changes r0.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_fin, %function
+meas_fin:
+	vmov	r0, s0
+	and	r0, r0, #EXP_MASK
+	cmp	r0, #EXP_MASK
+	ite	ne
+	movne	r0, #1
+	moveq	r0, #0
+	bx	lr
+
 	.ltorg
 
 @ ============================================================================
@@ -2159,6 +2705,13 @@ meas_k:
 	.word	0x447A0000		@ 1000 (S2.6, D4)
 	.word	0x461C4000		@ 10000
 	.word	0x4545A471		@ 3162.2776 = sqrt(1000 * 10000)
+
+@ meas_ck - floats of stage 4 (offsets CK_*, defined at the top)
+meas_ck:
+	.word	0x43340000		@ 180.0
+	.word	0x3C8EFA35		@ 0.017453292 = pi / 180
+	.word	0x47C35000		@ 100000.0
+	.word	0x2B8CBCCC		@ 1e-12
 
 @ freq_cycle - the frequency key cycle of own_freq_step (S2.12), Hz
 freq_cycle:

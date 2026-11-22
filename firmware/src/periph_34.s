@@ -922,6 +922,20 @@ fn_080085d0:
 .else
 	bl	fn_080087ce
 .endif
+.ifdef OWN
+	mov	r0, r4			@ own build: ch1 and ch8 enabled by two consecutive stores
+	mov	r1, r5			@ (own/fix.s own_dma_enable), so V and I start on the same
+	mov	r2, r6			@ trigger; r0 / r1 / r2 = DMA1 ch1 / ch8 / DMA2 ch5
+	pop.w	{r4, r5, r6, lr}
+	b.w	own_dma_enable		@ tail call, as the vendor's last fn_08008770
+	nop.n				@ 14 bytes of the vendor sequence not reached: the
+	nop.n				@ addresses after it stay those of V1.1
+	nop.n
+	nop.n
+	nop.n
+	nop.n
+	nop.n
+.else
 	movs	r1, #1
 	mov	r0, r4
 	bl	fn_08008770
@@ -932,6 +946,7 @@ fn_080085d0:
 	pop.w	{r4, r5, r6, lr}
 	movs	r1, #1
 	b.w	fn_08008770
+.endif
 .L08008628:
 	pop	{r4, r5, r6, pc}
 	.short	0x0000			@ padding

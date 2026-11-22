@@ -25,7 +25,8 @@ flash_mode 'app' (our application build; SETTINGS_SAVE_DESIGN.md "Tests", USB_CO
   controller semantics (mmio), and who may erase / program what depends on the code that does it
   (the PC of the store, exact in unicorn's mmio callbacks):
     - code in the application area: exactly the four settings pages 0x08066000, 0x08066800,
-      0x0807F000, 0x0807F800 and, only when the test names one (Meter(boot_target='A' or 'B')),
+      0x0807F000, 0x0807F800, the eight pages of the own calibration area 0x08062000..0x08065FFF
+      and, only when the test names one (Meter(boot_target='A' or 'B')),
       that slot's twelve pages and the record pages 0x08068000 / 0x08068800;
     - code in page 0 or a slot (starter, slot bootloader): the record pages only (in this mode the
       application area is not writable, so the UF2 path is tested in mode 'boot');
@@ -183,6 +184,7 @@ SLOTS_END = 0x0807B000
 SETTINGS = 0x0807F000
 SET_A, SET_B = 0x0807F000, 0x08066000
 SETTINGS_PAGES = (0x08066000, 0x08066800, 0x0807F000, 0x0807F800)
+OCAL_PAGES = tuple(range(0x08062000, 0x08066000, 0x800))   # own calibration area (OWN_CAL_DESIGN.md 1.2)
 SRAM, SRAM_SIZE = 0x20000000, 0x24000
 FLAG, FLAG_MAGIC = 0x2001FFF0, 0x464C5446
 FC = 0x40022000
@@ -305,7 +307,7 @@ class Meter:
         self.timing = None
         self.uc = None
         self.tm = None
-        pages = set(SETTINGS_PAGES)
+        pages = set(SETTINGS_PAGES) | set(OCAL_PAGES)
         if boot_target:
             s = SLOTS[SLOT_NAMES.index(boot_target)]
             pages |= set(range(s, s + SLOT_SIZE, PAGE)) | {REC0, REC1}

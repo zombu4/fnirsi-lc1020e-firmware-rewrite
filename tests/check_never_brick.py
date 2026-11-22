@@ -42,10 +42,14 @@ USB_CONTROL_DESIGN.md 7):
   A4  every flash address (0x08000000..0x08080000) constructed in a save.s function, and every word
       of a save.s data label (up to the next symbol), lies in the gate: copy B 0x08066000..
       0x08067000, the record pages 0x08068000..0x08069000, slots A / B 0x0806F000..0x0807B000,
-      copy A 0x0807F000..0x08080000 (the end values are the exclusive bounds of save.s gate_ok),
+      copy A 0x0807F000..0x08080000, the own calibration area 0x08062000..0x08066000 (the end values are the exclusive bounds of save.s gate_ok),
       or is the address of a save.s symbol; so no page 0, application area or slot F target (only
       0x08069000 itself, REC_END, is accepted: it is the record pages' end bound)
   A5  no store to a constant flash address outside save.s; inside save.s only to the gate
+  A6  every flash address (0x08000000..0x08080000) constructed in an own/ocal.s function, and every
+      word of an ocal.s data label, lies in the own calibration area 0x08062000..0x08065FFF, or is
+      0x08066000 (OCAL_END, the area's exclusive end bound), or is the address of an ocal.s or
+      save.s symbol (OWN_CAL_DESIGN.md 1.4); A5 applies to ocal.s unchanged
   W3 / W4 do not apply (the settings pages are this mode's own targets; the application holds
   addresses of its own area).
 """
@@ -275,8 +279,10 @@ ALLOWED_OWN_EXTRA = {
 # range table mem_ranges of own/cmd.s (range limits compared with the requested address).
 A1_DATA_SYMBOLS = {'mem_ranges': 32}
 # the gate of save.s gate_ok, each [lo, hi] with hi the exclusive end value of the range
-APP_GATE = ((0x08066000, 0x08067000), (0x08068000, 0x08069000), (0x0806F000, 0x0807B000),
-            (0x0807F000, 0x08080000))
+APP_GATE = ((0x08062000, 0x08066000), (0x08066000, 0x08067000), (0x08068000, 0x08069000),
+            (0x0806F000, 0x0807B000), (0x0807F000, 0x08080000))
+OCAL_SRC = os.path.join(REPO, 'firmware', 'own', 'ocal.s')
+OCAL_AREA = (0x08062000, 0x08066000)        # [lo, hi]: hi = OCAL_END, the exclusive end bound
 
 
 def app_classify(v, slot=None):
@@ -319,7 +325,9 @@ def elf_symbols(elf):
 
 
 def save_symbols(elf, src):
-    """The labels of save.s in the ELF: ({name: (address, type)}, labels missing from the ELF)."""
+    """The labels of a module (save.s, ocal.s) in the ELF: ({name: (address, type)}, labels missing
+    from the ELF). Local labels count under the FILE symbol <module>.s / <module>.o."""
+    base = os.path.basename(src)[:-2]
     text = open(src).read()
     labels = set(re.findall(r'^([A-Za-z_][A-Za-z0-9_]*):', text, re.M))
     globs = set(re.findall(r'^\s*\.global\s+([A-Za-z_][A-Za-z0-9_]*)', text, re.M))
@@ -327,14 +335,14 @@ def save_symbols(elf, src):
     for val, typ, bind, name, f in elf_symbols(elf):
         if name not in labels:
             continue
-        if bind == 'LOCAL' and f in ('save.s', 'save.o'):
+        if bind == 'LOCAL' and f in (base + '.s', base + '.o'):
             found[name] = (val, typ)
         elif bind == 'GLOBAL' and name in globs:
             found[name] = (val, typ)
     return found, sorted(labels - set(found))
 
 
-def check_app(binp, elf, src=SAVE_SRC, base=APP_BASE):
+def check_app(binp, elf, src=SAVE_SRC, base=APP_BASE, ocal_src=OCAL_SRC):
     """Application-mode scan; returns (findings, flash-controller users)."""
     data = open(binp, 'rb').read()
     bad = []
@@ -358,6 +366,14 @@ def check_app(binp, elf, src=SAVE_SRC, base=APP_BASE):
     if missing:
         bad.append('A0 labels of %s missing from the ELF: %s' % (os.path.basename(src), missing))
     save_addr = {a for a, t in found.values()}
+    ocal, o_missing = save_symbols(elf, ocal_src) if os.path.exists(ocal_src) else ({}, [])
+    if o_missing:
+        bad.append('A0 labels of %s missing from the ELF: %s' % (os.path.basename(ocal_src), o_missing))
+    ocal_addr = {a for a, t in ocal.values()}
+    own_syms = save_addr | ocal_addr
+
+    def in_area(v):
+        return OCAL_AREA[0] <= v <= OCAL_AREA[1]
     collect = []
     d_bad, users = disasm_scan(elf, data, base, True, keyed=True, collect=collect, cls=app_classify)
     bad += d_bad
@@ -377,6 +393,8 @@ def check_app(binp, elf, src=SAVE_SRC, base=APP_BASE):
                 bad.append('A5 store to flash 0x%08X in %s at %s' % (v, name, where))
         elif mine and in_flash(v) and not in_gate(v) and v not in save_addr:
             bad.append('A4 flash address 0x%08X (%s) in save.s %s at %s outside the gate' % (v, how, name, where))
+        if kind != 'store' and fa in ocal_addr and in_flash(v) and not in_area(v) and v not in own_syms:
+            bad.append('A6 flash address 0x%08X (%s) in ocal.s %s at %s outside the area' % (v, how, name, where))
     bounds = sorted({s[0] for s in elf_symbols(elf)} | {base + len(data)})
     for name, (a, typ) in sorted(found.items()):
         if typ == 'FUNC':
@@ -386,6 +404,14 @@ def check_app(binp, elf, src=SAVE_SRC, base=APP_BASE):
             v = struct.unpack_from('<I', data, w - base)[0]
             if in_flash(v) and not in_gate(v) and v not in save_addr:
                 bad.append('A4 word 0x%08X in save.s data %s at 0x%08X outside the gate' % (v, name, w))
+    for name, (a, typ) in sorted(ocal.items()):
+        if typ == 'FUNC':
+            continue
+        end = next((b for b in bounds if b > a), base + len(data))
+        for w in range(a, min(end, base + len(data)) - 3, 4):
+            v = struct.unpack_from('<I', data, w - base)[0]
+            if in_flash(v) and not in_area(v) and v not in own_syms:
+                bad.append('A6 word 0x%08X in ocal.s data %s at 0x%08X outside the area' % (v, name, w))
     return bad, users
 
 
@@ -400,6 +426,11 @@ def app_controls():
     open(other, 'w').write(head +
         '.global rogue\n.thumb_func\n.type rogue, %function\nrogue:\n'
         ' ldr r0, =0x40022000\n str r1, [r0, #4]\n ldr r2, =0x08070000\n str r1, [r2]\n bx lr\n.ltorg\n')
+    ocal_s = os.path.join(d, 'ocal.s')
+    open(ocal_s, 'w').write(head +
+        '.global ocal_planted\n.thumb_func\n.type ocal_planted, %function\nocal_planted:\n'
+        ' ldr r0, =0x08062000\n ldr r1, =0x08066000\n ldr r2, =0x08066004\n ldr r3, =0x08061FFC\n'
+        ' ldr r2, =0x08062000\n str r1, [r2]\n bx lr\n.ltorg\n')
     open(save, 'w').write(head +
         '.global flash_word\n.thumb_func\n.type flash_word, %function\nflash_word:\n'
         ' ldr r0, =0x40022000\n str r1, [r0, #0x10]\n ldr r2, =0x0807F000\n ldr r2, =0x08069000\n'
@@ -408,18 +439,21 @@ def app_controls():
         ' ldr r3, =0x08069800\n ldr r3, =0x08010000\n bx lr\n.ltorg\n'
         '.p2align 2\ngate_ranges:\n .word 0x08066000, 0x08067000, 0x1FFFF800\n')
     objs = []
-    for s in (other, save):
+    for s in (other, save, ocal_s):
         subprocess.run(['arm-none-eabi-as', '-mcpu=cortex-m4', '-mthumb', '-o', s[:-2] + '.o', s], check=True)
         objs.append(s[:-2] + '.o')
     elf, binp = os.path.join(d, 'ctl.elf'), os.path.join(d, 'ctl.bin')
     subprocess.run(['arm-none-eabi-ld', '-Ttext=0x%08X' % APP_BASE, '-e', 'rogue', '-o', elf] + objs, check=True)
     subprocess.run(['arm-none-eabi-objcopy', '-O', 'binary', elf, binp], check=True)
-    bad, users = check_app(binp, elf, src=save)
+    bad, users = check_app(binp, elf, src=save, ocal_src=ocal_s)
     expect = ['A3 flash-controller address outside save.s: rogue',
               'A5 store to flash 0x08070000 in rogue',
               'A4 flash address 0x08069800',
               'A4 flash address 0x08010000',
-              'A1 system memory / option bytes: word 0x1FFFF800']
+              'A1 system memory / option bytes: word 0x1FFFF800',
+              'A6 flash address 0x08066004',
+              'A6 flash address 0x08061FFC',
+              'A5 store to flash 0x08062000 in ocal_planted']
     fails = 0
     for e in expect:
         ok = sum(1 for b in bad if b.startswith(e)) == 1

@@ -745,6 +745,9 @@ fn_0800bcd8:
 @ then calls fn_08009f10.
 @ Finally calls fn_0800e028(float 0x200050c4, two 8-byte stack buffers, a word
 @ set to 0) and fn_080228d0(word 0x2000595c, "%s%s", both buffers).
+@ Our build (.ifdef OWN at 0x0800BDBA): the load of 0x200050e4 is movs r0, #0, so
+@ it never counts, stores or finishes; own/cal.s runs the sweep (the gate and the
+@ display text stay).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800bd5c,"ax",%progbits
 	.p2align 2
@@ -786,7 +789,12 @@ fn_0800bd5c:
 	beq.n	.L0800be7c
 	ldr	r1, .L0800beac
 	mov.w	r8, #0
+.ifdef OWN
+	movs.n	r0, #0			@ 0x0800BDBA: our build: the sweep runs in own/cal.s, so the
+	nop.n				@ running test below always takes the display path .L0800be24
+.else
 	ldr.w	r0, [r1, #0xb68]
+.endif
 	cbz	r0, .L0800be24
 	ldr.w	r0, [r1, #0xb6c]
 	.inst.n 0x1c40	@ adds r0, r0, #1
