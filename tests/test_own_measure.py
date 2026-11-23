@@ -43,7 +43,7 @@ Probes (hooks of this file, Probe below), each record with the emulated time:
     0x200163A7 before main, RAM only, before own_load.
 
 Expected values come from the specification text, the DUT model (z) or the captured buffers (float64
-recomputation), each named per check. RUN LIMIT: the cases are 17 runs of this file at most (one per
+recomputation), each named per check. RUN LIMIT: the cases are 18 runs of this file at most (one per
 case prefix); the cases themselves start at most a few rigs each.
 """
 
@@ -1554,6 +1554,90 @@ def m14_handshake():
     check(not rig.probe.acqs or rig.probe.acqs[0]['t'] > rig.probe.arms[0][0], 'm14 (f): an acquisition before our first request')
     used_after_own_request(rig, 'm14 (f)')
     rig.watch.check(what='m14 (f)')
+    return True
+
+
+# ---------------------------------------------------------------- m17 open terminals, noise-limited I
+
+class OpenGauss(DutSource):
+    """Open terminals as the meter showed them (2026-11-22, image 760aebc, 1 kHz 0.6 V): V the generator
+    (p-p about 2100 at c5 = 0, DutSource's k), I = 2048 + Gaussian noise of RMS sigma23 * G[c6] / G[2] *
+    R[c8] / R[3] counts (noise before the gain stage and the range resistor; the meter: c6 = 2, c8 = 3,
+    residual sigma 410..633 counts, p-p 2035..2613), clipped to 0..4095. Gaussian by Box-Muller from a
+    fixed linear congruential sequence (the same sequence in every run)."""
+
+    def __init__(self, sigma23):
+        super().__init__(kind='R', value=1e12)
+        self.sigma23, self.s, self.spare = sigma23, 2463534242, None
+
+    def gauss(self):
+        if self.spare is not None:
+            g, self.spare = self.spare, None
+            return g
+        self.s = (self.s * 1103515245 + 12345) & 0x7FFFFFFF
+        u1 = (self.s + 1) / 0x80000000
+        self.s = (self.s * 1103515245 + 12345) & 0x7FFFFFFF
+        u2 = self.s / 0x80000000
+        r = math.sqrt(-2.0 * math.log(u1))
+        self.spare = r * math.sin(2 * math.pi * u2)
+        return r * math.cos(2 * math.pi * u2)
+
+    def i_codes(self, c6, c8, n):
+        rms = self.sigma23 * GAIN[c6] / GAIN[2] * RANGE_OHM[c8] / RANGE_OHM[3]
+        return [max(0, min(4095, int(round(2048 + rms * self.gauss())))) for _ in range(n)]
+
+    def samples(self, path, adc, channel, times):
+        if adc != 2:
+            return super().samples(path, adc, channel, times)
+        c5, c6, c8 = path.front_end()
+        return self.i_codes(c6, c8, len(times))
+
+
+def out_of_band(codes):
+    """The ranging's criterion on one ADC2 acquisition (meas.s meas_acq, fn_0800b000): saturated (a code 0
+    or 4095: p-p taken as 4095) or p-p below 1500 or above 3600."""
+    pp = 4095 if max(codes) >= 4095 or min(codes) == 0 else max(codes) - min(codes)
+    return pp < 1500 or pp > 3600
+
+
+@case
+def m17_open_noise():
+    """Open terminals with a noise-limited I channel (OpenGauss, sigma 545 counts at c6 = 2, c8 = 3, 1 kHz,
+    speed 0). Input property first, by the firmware's criterion (out_of_band) on 4000 acquisitions of the
+    source at c6 = 2, c8 = 3: at least 1 % out of band (so a range step on a single acquisition resets the
+    window more often than once per T_win = 1 s at about 500 acquisitions per second), at most 10 %
+    (so three in a row are rare: below 0.1 %, and the band holds the channel at c6 = 2), at c6 = 3 at
+    least 90 % and at c6 = 1 at least 50 % out of band (a step away from c6 = 2 is followed by a step
+    back within a few acquisitions). Then the firmware (S1.6, meas.s meas_acq: the first and second
+    out-of-band acquisition in a row are not ranged): codes 0x30200 (c5 0, c6 2, c8 3) at the end, and
+    windows published (not the 1e10 set) after 3 s: at least 3 in the 5 s from 3 s to 8 s."""
+    src = OpenGauss(545.0)
+    probe_src = OpenGauss(545.0)
+    probe_src.s = 987654321
+    oob = [out_of_band(probe_src.i_codes(2, 3, 128)) for _ in range(4000)]
+    p = sum(oob) / len(oob)
+    runs3 = sum(1 for a, b, c in zip(oob, oob[1:], oob[2:]) if a and b and c) / (len(oob) - 2)
+    up = sum(out_of_band(probe_src.i_codes(3, 3, 128)) for _ in range(500)) / 500
+    dn = sum(out_of_band(probe_src.i_codes(1, 3, 128)) for _ in range(500)) / 500
+    check(0.01 <= p <= 0.10 and runs3 <= 0.001 and up >= 0.9 and dn >= 0.5,
+          'm17 input: out of band at c6 2: %.4f (3 in a row %.5f), at c6 3: %.3f, at c6 1: %.3f' % (p, runs3, up, dn))
+    NOTES.append('m17 input: out of band at c6 = 2: %.2f %% (3 in a row %.3f %%), c6 = 3: %.1f %%, c6 = 1: %.1f %%'
+                 % (100 * p, 100 * runs3, 100 * up, 100 * dn))
+    rig = own_rig(src, freq=1000, speed=0)
+    log_codes(rig)
+    rig.run(8.0)
+    codes = (rig.rd8(V_C5), rig.rd8(V_C6), rig.rd8(V_C8))
+    pubs = [q for q in rig.probe.normal(3.0) if not is_set(q)]
+    late = [x for x in rig.code_log if x[0] > 3.0]
+    NOTES.append('m17: codes %r, %d windows after 3 s (SEQ %d), %d code changes and %d meas_change calls after '
+                 '3 s, %d acquisitions used' % (codes, len(pubs), mo(rig, 'SEQ'), len(late),
+                                                 len([t for t in rig.probe.changes if t > 3.0]), len(rig.probe.acqs)))
+    check(codes == (0, 2, 3), 'm17: codes %r at the end (0, 2, 3 expected)' % (codes,))
+    check(len(pubs) >= 3, 'm17: %d windows published from 3 s to 8 s (SEQ %d, %d code changes after 3 s)'
+          % (len(pubs), mo(rig, 'SEQ'), len(late)))
+    for q in pubs:
+        no_nan(q, 'm17')
+    rig.watch.check(what='m17')
     return True
 
 

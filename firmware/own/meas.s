@@ -18,6 +18,8 @@
 @   fix.s) and a settle time after every change of a setting, of the codes or a restart;
 @ - S1.5 saturation (a sample at code 0 or 4095) steps the range, three overload acquisitions in
 @   a row publish the overload set;
+@ - S1.6 ranging only from the third out-of-band acquisition in a row (meas_acq), so single
+@   noise excursions of a noise-limited channel do not step a code and reset the window;
 @ - S1.7 the vendor's magnitude compensation (short, decade interpolation) on screens 1 and 2,
 @   the raw value for the calibration store on screen 3;
 @ - S1.8 theta not folded, the derived values from the complex Zbar, D and Q without NaN, the
@@ -91,7 +93,10 @@
 @   0xF4 MO_S1      sum of the 128 codes of V and I (integer)
 @   0xFC MO_FL      bit 0: Zm defined, bit 1: resolved (the acquisition being processed); bit 2:
 @                   MO_TFIRST holds the tick of the previous window's close (set by meas_publish,
-@                   cleared by meas_reset and by the first addition that uses it)
+@                   cleared by meas_reset and by the first addition that uses it); bits 3 / 4:
+@                   1 / 2 or more consecutive out-of-band acquisitions of the ranging path
+@                   (meas_acq; kept by meas_reset and meas_win, cleared by an in-band acquisition
+@                   and by every acquisition while OCAL_LOCK holds the codes)
 @
 @ Register use: own_measure keeps r4 = OWN_MEAS and r5 = 0x2000057C (V_BLOCK) for all the
 @ helpers below, which may also use s16..s31 freely (own_measure saves d8..d15); each helper
@@ -140,6 +145,12 @@
 	.equ	WIN_WORDS,	21		@ 0x38..0x8B: the words meas_reset clears
 	.equ	SLOT,		24		@ bytes of one slot (Vr, Vi, Ir, Ii, Zr, Zi)
 	.equ	FL_ANCHOR,	4		@ MO_FL bit 2: MO_TFIRST is the previous close
+	.equ	FL_OOB1,	8		@ MO_FL bits 3, 4: consecutive out-of-band acquisitions,
+	.equ	FL_OOB2,	0x10		@   0, 1 (bit 3) or 2 and more (bit 4)
+	.equ	FL_OOB,		0x18
+	.equ	PP_LO,		1500		@ ranging band of fn_0800b20c / fn_0800b000 (p-p counts)
+	.equ	PP_HI,		3600		@   (3600 for I: the .ifdef OWN at 0x0800B072)
+	.equ	A3_HI,		250		@ ADC3 p-p above it: fn_0800b000 steps c8 down (auto, c8 > 0)
 
 	.if	MO_FL + 4 > MEAS_SIZE
 	.error	"meas.s: the state does not fit O_MEAS"
@@ -165,6 +176,7 @@
 	.equ	VB_MIN2,	0xC58		@ halfword 0x200011D4 ADC2 minimum
 	.equ	VB_MIDV,	0xC54		@ halfword 0x200011D0 ADC1 (min + max) / 2 (fn_08007fd4)
 	.equ	VB_MIDI,	0xC5C		@ halfword 0x200011D8 ADC2 (min + max) / 2 (fn_08007f38)
+	.equ	VB_PP3,		0xC62		@ halfword 0x200011DE ADC3 p-p (fn_08007f84, measure_32.s)
 	.equ	VB_SERPAR,	0xC70		@ 0x200011EC 0 series, 1 parallel values in use
 	.equ	VB_RING,	0xC78		@ 0x200011F4 accepted count of the open window
 	.equ	VB_MARK,	0xC80		@ 0x200011FC restart marker (fn_08009f10 clears it)
@@ -588,12 +600,26 @@ meas_arm:
 @ meas_acq - steps 2 and 3 for an acquisition that passed step 1; r6 = G as read in step 1.
 @   The peak scans fn_08007f84 (ADC3), fn_08007fd4 (ADC1, r0 = p-p), fn_08007f38 (ADC2), then
 @   saturation (ocal_clip: maximum >= CLIP hi or minimum <= CLIP lo, defaults 4095 / 0, S1.5, S4.5) with p-p 4095 for
-@   the saturated channel, while OCAL_LOCK holds the codes meas_lockset, else the ranging calls fn_0800b20c (V) and, when it made no change,
-@   fn_0800b000 (I and range).
+@   the saturated channel. While OCAL_LOCK holds the codes: meas_lockset (no ranging, so no band
+@   rule; the out-of-band run of MO_FL bits 3 / 4 ends). Else (S1.6) the band rule: out of band
+@   is V or I p-p as passed on below 1500 or above 3600 (a saturated channel at 4095 included),
+@   or ADC3 p-p 0x200011DE above 250 with range auto (0x2000114C = 0) and c8 > 0: the inputs on
+@   which fn_0800b20c / fn_0800b000 step a code (app_02.s fn_0800b20c, 0x0800B01C..0x0800B072),
+@   apart from a forced range. The first and the second out-of-band acquisition in a row are
+@   discarded without ranging (MO_FL bits 3 / 4 count them; 0x2000120C kept; meas_ocal_acq with
+@   r1 = 1 notes saturation and records them in the settle trace, flags bit 2); from the third in
+@   a row on each one is ranged; an in-band acquisition ends the run. The reason: one ranging
+@   step resets the window (a code change, S1.4), and a noise-limited channel (open terminals)
+@   whose single acquisitions leave the band now and then reset it faster than T_win, so no
+@   window closed (the meter, 2026-11-22: 4 of 7 boots without a window, 6 of 6 with the rule);
+@   a real level change keeps every acquisition out of band and is ranged from the third one.
+@   Ranged: fn_0800b20c (V) and, when it made no change, fn_0800b000 (I and range).
 @   Codes changed: a change of kind 6 with SETTLE[6][fi] (default 5 ms; the overload count ends).
 @   Codes unchanged (in band, or no step left): 0x2000120C = 0, then
 @   - saturated: one more overload acquisition; at the third in a row the window is reset and
-@     the overload set published;
+@     the overload set published (on the ranging path a saturated run is out of band, so its
+@     first two are band-discarded before: the set comes at its fifth acquisition; locked, at
+@     the third);
 @   - not saturated after three or more overload acquisitions: a change (kind 6);
 @   - a pending settle not yet over (t_arm before the deadline): discarded;
 @   - else the two DFT bins (meas_dft), step 3 (G read again: a re-arm during the reads
@@ -622,9 +648,52 @@ meas_acq:
 	mov	r10, r0			@ r10 = codes before the ranging
 	bl	ocal_locked		@ r0 = the OCAL_LOCK word, 0 when not locked
 	cbz	r0, .Lac_auto
+	ldr	r1, [r4, #MO_FL]
+	bic	r1, r1, #FL_OOB
+	str	r1, [r4, #MO_FL]	@ locked: no band rule, an out-of-band run ends
 	bl	meas_lockset		@ the locked codes; no ranging call (OWN_CAL_DESIGN.md 2.2)
 	b	.Lac_ranged
 .Lac_auto:
+	@ S1.6 band rule: r0 = 1 when an input of the ranging calls is out of band
+	movs	r0, #0
+	movw	r1, #PP_LO
+	movw	r2, #PP_HI
+	cmp	r7, r1
+	it	lo
+	movlo	r0, #1			@ V p-p below 1500: fn_0800b20c steps c5 up
+	cmp	r7, r2
+	it	hi
+	movhi	r0, #1			@ V p-p above 3600: c5 down
+	cmp	r8, r1
+	it	lo
+	movlo	r0, #1			@ I p-p below 1500: fn_0800b000 steps c6 up (or c8)
+	cmp	r8, r2
+	it	hi
+	movhi	r0, #1			@ I p-p above 3600: c6 down (or c8)
+	ldrh	r1, [r5, #VB_PP3]
+	cmp	r1, #A3_HI
+	bls	.Lac_band		@ ADC3 p-p at most 250 (0x0800B020)
+	ldr	r1, [r5, #VB_RANGE]
+	cbnz	r1, .Lac_band		@ a forced range: the ADC3 test is skipped (0x0800B026)
+	ldrb	r1, [r5, #VB_C8]
+	cmp	r1, #0
+	it	ne
+	movne	r0, #1			@ c8 > 0: fn_0800b000 steps c8 down (0x0800B02C)
+.Lac_band:
+	ldr	r1, [r4, #MO_FL]
+	cbz	r0, .Lac_inband
+	tst	r1, #FL_OOB2
+	bne	.Lac_range		@ the third out-of-band one in a row (or later): ranged
+	adds	r1, r1, #FL_OOB1	@ the first or the second: counted, not ranged, not used
+	str	r1, [r4, #MO_FL]	@ (0x2000120C kept: no in-band acquisition)
+	mov	r0, r9
+	movs	r1, #1			@ band-discarded
+	bl	meas_ocal_acq		@ the saturation note and the settle trace (2.2)
+	b	.Lac_ret
+.Lac_inband:
+	bic	r1, r1, #FL_OOB
+	str	r1, [r4, #MO_FL]	@ in band: the out-of-band run ends
+.Lac_range:
 	mov	r0, r7
 	bl	fn_0800b20c		@ V gain; 0 = it changed c5
 	cbz	r0, .Lac_ranged
@@ -644,6 +713,7 @@ meas_acq:
 	b	.Lac_ret
 .Lac_same:
 	mov	r0, r9
+	movs	r1, #0			@ not band-discarded
 	bl	meas_ocal_acq		@ the saturation note and the settle trace (2.2)
 	movs	r0, #0
 	str	r0, [r5, #VB_NRCNT]	@ an in-band acquisition: 0x2000120C = 0
@@ -752,27 +822,31 @@ meas_kval:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ meas_ocal_acq - an acquisition whose codes did not change (meas_acq .Lac_same), r0 = its
-@   saturation bits: ocal_sat_note; while the settle trace records (ocal_trace_on), meas_dft
-@   for this acquisition (also when the settle rule will discard it; the window is not fed) and
-@   one trace entry with K of the codes (meas_kval) and the flags bit 0 the settle rule
-@   discards it (MO_SETL set and t_arm before MO_TSET), bit 1 saturated. Changes r0..r3, r12,
-@   s0..s13.
+@ meas_ocal_acq - an acquisition whose codes did not change (meas_acq .Lac_same, or discarded by
+@   the S1.6 band rule before the ranging), r0 = its saturation bits, r1 = 1 when the band rule
+@   discards it, else 0: ocal_sat_note; while the settle trace records (ocal_trace_on), meas_dft
+@   for this acquisition (also when the settle rule or the band rule discards it; the window is
+@   not fed) and one trace entry with K of the codes (meas_kval) and the flags bit 0 the settle
+@   rule discards it (MO_SETL set and t_arm before MO_TSET), bit 1 saturated, bit 2 the band
+@   rule discards it. Changes r0..r3, r12, s0..s13.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	meas_ocal_acq, %function
 meas_ocal_acq:
 	push	{r6, lr}
-	mov	r6, r0
-	bl	ocal_sat_note
+	orr	r6, r0, r1, lsl #2	@ r6 = saturation bits 0 / 1 | band-discarded << 2
+	bl	ocal_sat_note		@ r0 = the saturation bits
 	bl	ocal_trace_on
 	cbz	r0, .Loa_out
 	bl	meas_dft
 	bl	meas_kval		@ s0 = K
 	movs	r0, #0
-	cmp	r6, #0
+	tst	r6, #3
 	it	ne
 	movne	r0, #2			@ saturated
+	tst	r6, #4
+	it	ne
+	orrne	r0, r0, #4		@ discarded by the band rule
 	ldr	r1, [r4, #MO_SETL]
 	cbz	r1, .Loa_add
 	ldr	r1, [r4, #MO_TARM]

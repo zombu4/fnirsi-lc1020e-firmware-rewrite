@@ -1636,8 +1636,8 @@ ocal_restart_take:
 @   trace (state 1) starts recording: state 2, the change tick, the kind, 0 entries. Changes
 @   r0..r3.
 @ ocal_trace_on - r0 = 1 while the trace records and is not full, else 0. Changes r1.
-@ ocal_trace_add - r0 = entry flags (bit 0 the settle rule discards it, bit 1 saturated),
-@   s0 = K of the codes now: while recording, one entry: tick, Zm = K V conj(I) / |I|^2 of
+@ ocal_trace_add - r0 = entry flags (bit 0 the settle rule discards it, bit 1 saturated, bit 2
+@   the S1.6 band rule of meas.s meas_acq discards it), s0 = K of the codes now: while recording, one entry: tick, Zm = K V conj(I) / |I|^2 of
 @   MO_X (NaN when |I|^2 = 0), flags, c5, c6, c8; the 32nd makes the trace full (state 3).
 @   Changes r1..r3, s1..s7.
 @ ----------------------------------------------------------------------------
