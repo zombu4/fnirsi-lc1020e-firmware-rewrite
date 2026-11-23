@@ -43,7 +43,7 @@ Probes (hooks of this file, Probe below), each record with the emulated time:
     0x200163A7 before main, RAM only, before own_load.
 
 Expected values come from the specification text, the DUT model (z) or the captured buffers (float64
-recomputation), each named per check. RUN LIMIT: the cases are 18 runs of this file at most (one per
+recomputation), each named per check. RUN LIMIT: the cases are 24 runs of this file at most (one per
 case prefix); the cases themselves start at most a few rigs each.
 """
 
@@ -1176,9 +1176,17 @@ def expect_words(rig, p, sp=None):
 def m11_contract():
     """Section 2 / S1.8: every output word against the formulas from the published sums (float64,
     relative 2e-5), 0x200050C8 = Xs in series and in parallel mode, series / parallel by the S2.6 rule of
-    stage 2 (serpar_rule; R 1 kohm, C 100 nF, R 2 Mohm); the no-reading path (ranging that never settles: I at p-p 1400 on even
-    and 3700 on odd c6 codes, forced range): the 1e10 / -400 set after 2 s once, then 0x20001208 = 0;
-    MEASURE_DONE (event 0x95) once per window whose |Z| / theta bits changed (USB, DTR set)."""
+    stage 2 (serpar_rule; R 1 kohm, C 100 nF, R 2 Mohm); the no-reading path (ranging that never settles,
+    forced range 1 kohm: the I amplitude a square wave of 0.25 s half period between 15 and 3.75 counts per
+    unit gain, I p-p 300 x 2^c6 / 75 x 2^c6, so that every half period forces a step: high, c6 5 at 9600
+    (saturated) and c6 4 at 4800 step down to c6 3 at 2400; low, c6 3 at 600 and c6 4 at 1200 step up to c6
+    5 at 2400; each code held at most 0.25 s plus two history buckets, below T_win 0.5 s of speed 1, so no
+    window closes and the S1.8 hunting rule publishes the set): the 1e10 / -400 set after 2 s, 1 to 3 times
+    in 5 s and at least 2 s apart, then 0x20001208 = 0. Until S1.6 revision 8 the input was a fixed I p-p of
+    1400 on even and 3700 on odd c6 codes; with revision 8 an even code is held after the step down (the
+    history keeps 3700 / 2 = 1850 > 1500), the ranging settles and that input no longer reaches the
+    no-reading path. MEASURE_DONE (event 0x95) once per window whose |Z| / theta bits changed (USB, DTR
+    set)."""
     for src, name in ((DutSource('R', 1000.0, noise_lsb=0.5), 'R 1 kohm'), (DutSource('C', 100e-9, noise_lsb=0.5), 'C 100 nF'),
                       (DutSource('R', 2e6, noise_lsb=0.5), 'R 2 Mohm')):
         rig = own_rig(src)
@@ -1196,13 +1204,16 @@ def m11_contract():
         NOTES.append('m11 %s: %d windows, all words as the formulas, serpar %d' % (name, len(pubs), pubs[-1]['serpar']))
         rig.watch.check(what='m11 %s' % name)
     # no reading
-    class Hunt(AmpSource):
-        def samples(self, path, adc, channel, times):
-            if adc == 2:
-                c5, c6, c8 = path.front_end()
-                self.a_i0 = (700.0 if c6 % 2 == 0 else 1850.0) / (2 ** c6 * RANGE_OHM[c8] / 100.0)
-            return super().samples(path, adc, channel, times)
-    rig = own_rig(Hunt(1000.0, 1.0, 0.0), range=2)
+    half, a_hi, a_lo = 0.25, 15.0, 3.75
+    pp = lambda a, c6: 2 * a * 2 ** c6 * RANGE_OHM[1] / 100.0          # AmpSource I p-p at c8 = 1
+    # input property, by the firmware's criteria (band 1500..3600, a step up only with the history at most
+    # 1500): high half: c6 5 above the band, c6 4 above it, c6 3 in band; low half: c6 3 and c6 4 below 1500
+    # with the scaled history of the low half at most 1500, c6 5 in band; the half period below T_win
+    check(pp(a_hi, 5) > 3600 and pp(a_hi, 4) > 3600 and 1500 <= pp(a_hi, 3) <= 3600 and pp(a_lo, 3) < 1500
+          and pp(a_lo, 4) < 1500 and pp(a_lo, 3) * 2 <= 1500 and 1500 <= pp(a_lo, 5) <= 3600 and half < 0.5,
+          'm11 no reading input: p-p %r' % [pp(a, c) for a in (a_hi, a_lo) for c in (3, 4, 5)])
+    sq = lambda t: a_hi if int(t / half) % 2 == 0 else a_lo
+    rig = own_rig(AmpSource(1000.0, sq, 0.0), range=2)
     rig.run(5.0)
     nr = [p for p in rig.probe.pubs if is_set(p)]
     check(1 <= len(nr) <= 3, 'm11 no reading: %d sets in 5 s' % len(nr))
@@ -1818,6 +1829,172 @@ def m19_noise_under_part():
         check(abs(z / 10000.0 - 1) <= 0.01, 'm19: |Z| %.2f at t %.3f' % (z, p['t']))
     check(not any(hunt), 'm19: MO_FL bit 7 set at %d of %d publish entries' % (sum(1 for h in hunt if h), len(hunt)))
     rig.watch.check(what='m19')
+    return True
+
+
+# ---------------------------------------------------------------- m20 / m21 the step-up rule (S1.6 revision 8)
+
+OWN_FUNC = 0x20018000 + 0x5DE0
+MF_RHV, MF_RHI = 0x8C, 0x90
+
+
+class MeterNoise(OpenGauss):
+    """Open terminals as the meter showed them at 10 kHz (2026-11-23, image a24406e, calibration point 9:
+    OCAL_TRACE and six reads of 0x200011C4..0x200011E3): c6 alternating 2 <-> 3 every few acquisitions, I
+    p-p 2424..3699 at c6 3 and 2040 at c6 2 in single acquisitions, settle and band discards in every
+    trace entry. V the generator (DutSource), I = 2048 + Gaussian noise (OpenGauss's sequence) of RMS r *
+    G[c6] / G[2] * R[c8] / R[3], with r drawn anew for every acquisition (path.idx holds item 0: the first
+    item after the channel's enable) uniformly in [r_lo, r_hi] from random.Random(seed): broadband noise
+    whose level changes between acquisitions, clipped to 0..4095."""
+
+    def __init__(self, r_lo, r_hi, seed=5):
+        super().__init__(0.0)
+        import random
+        self.r_lo, self.r_hi, self.rnd = r_lo, r_hi, random.Random(seed)
+        self.r = r_lo
+
+    def acq(self, c6, c8):
+        """One acquisition's 128 ADC2 codes at a new level (for the input checks)."""
+        self.r = self.rnd.uniform(self.r_lo, self.r_hi)
+        self.sigma23 = self.r
+        return self.i_codes(c6, c8, 128)
+
+    def samples(self, path, adc, channel, times):
+        if adc != 2:
+            return DutSource.samples(self, path, adc, channel, times)
+        if path.idx is not None and 0 in path.idx:
+            self.r = self.rnd.uniform(self.r_lo, self.r_hi)
+        self.sigma23 = self.r
+        c5, c6, c8 = path.front_end()
+        return self.i_codes(c6, c8, len(times))
+
+
+def pp_of(codes):
+    """The p-p the ranging gets for one ADC2 acquisition (4095 when saturated)."""
+    return 4095 if max(codes) >= 4095 or min(codes) == 0 else max(codes) - min(codes)
+
+
+def meter_noise(what, r_lo, r_hi, lo, level):
+    """S1.6 revision 8 against the meter's open-terminal noise (MeterNoise), 10 kHz, speed 0, range AUTO, level
+    word `level`; the vendor's single-acquisition band hunts between c6 = lo and lo + 1 on this input.
+    Input checked first (a second source of the same model, 400 acquisitions per code, c8 3), by the
+    firmware's criteria: at lo at least 30 % below 1500 (three in a row at least 2.7 %: the band rule of
+    S1.6 steps up) and none above 3600; at lo + 1 at least 10 % above 3600 (three in a row 0.1 %: it steps
+    down); every block of 50 consecutive acquisitions at lo has a p-p maximum above 1500 (no history
+    bucket at lo allows the step up when a bucket holds at least 50 acquisitions: checked after the run, 110
+    ms at the median interval of the used acquisitions). Expected from 3 s to 8 s: c5, c6, c8 unchanged, c6
+    = lo, c8 = 3; at least 4 normal windows (T_win 1 s) and no no-reading or overload set; no output word
+    NaN; the I history maximum (MF_RHI, the larger bucket) above 1500 at every publish entry."""
+    p = MeterNoise(r_lo, r_hi, seed=77)
+    p.s = 987654321
+    at_lo = [pp_of(p.acq(lo, 3)) for _ in range(400)]
+    at_hi = [pp_of(p.acq(lo + 1, 3)) for _ in range(400)]
+    f_lo = sum(1 for x in at_lo if x < 1500) / 400.0
+    f_over = sum(1 for x in at_lo if x > 3600) / 400.0
+    f_hi = sum(1 for x in at_hi if x > 3600) / 400.0
+    blocks = [max(at_lo[k:k + 50]) for k in range(0, 400, 50)]
+    check(f_lo >= 0.3 and f_over == 0 and f_hi >= 0.1 and min(blocks) > 1500,
+          '%s input: at c6 %d below 1500 %.3f, above 3600 %.3f; at c6 %d above 3600 %.3f; smallest block maximum %d'
+          % (what, lo, f_lo, f_over, lo + 1, f_hi, min(blocks)))
+    blk = block_with(**{'0x%08x' % V_FREQ: 10000, '0x%08x' % V_SPEED: 0, '0x%08x' % V_LEVEL: level})
+    rig = own_rig(MeterNoise(r_lo, r_hi), block=blk)
+    log_codes(rig)
+    hist = []
+    rig.probe.on_publish_entry = lambda r: hist.append(max(r.rd16(OWN_FUNC + MF_RHI), r.rd16(OWN_FUNC + MF_RHI + 2)))
+    rig.run(8.0 - rig.m.now())
+    codes = (rig.rd8(V_C5), rig.rd8(V_C6), rig.rd8(V_C8))
+    late = [x for x in rig.code_log if x[0] > 3.0]
+    pubs = [q for q in rig.probe.pubs if q['t'] > 3.0]
+    sets = [q for q in pubs if is_set(q)]
+    dt = rig.probe.acq_interval()
+    check(dt > 0 and 0.110 / dt >= 50, '%s input: %.2f acquisitions per 110 ms (median interval %.6f s)'
+          % (what, 0.110 / dt if dt else 0.0, dt))
+    NOTES.append('%s: input at c6 %d below 1500 %.2f, at c6 %d above 3600 %.2f, %.0f acquisitions per 110 ms; codes '
+                 '%r, %d code changes after 3 s, %d publishes after 3 s (%d sets), I history maximum at the publishes %r'
+                 % (what, lo, f_lo, lo + 1, f_hi, 0.110 / dt, codes, len(late), len(pubs), len(sets), sorted(set(hist))[:4]))
+    check(not late and codes[1] == lo and codes[2] == 3, '%s: codes %r, changes after 3 s %r' % (what, codes, late[:6]))
+    check(len(pubs) >= 4 and not sets, '%s: %d publishes after 3 s, %d sets' % (what, len(pubs), len(sets)))
+    for q in pubs:
+        no_nan(q, what)
+    check(hist and min(hist) > 1500, '%s: I history maximum at the publishes %r' % (what, sorted(set(hist))[:4]))
+    rig.watch.check(what=what)
+    return True
+
+
+@case
+def m20_meter_open_noise():
+    """S1.6 revision 8 on the meter's open terminals at 10 kHz (meter_noise): level 0.1 V with the hunting pair
+    c6 2 / 3 (r 200..400 counts at c6 2, the meter's I p-p 2040..3699), then level 0.6 V with the pair c6 3 / 4
+    (r 100..200)."""
+    meter_noise('m20 0.1 V', 200.0, 400.0, 2, 0x3DCCCCCD)
+    meter_noise('m20 0.6 V', 100.0, 200.0, 3, 0x3F19999A)
+    return True
+
+
+class StepAmp(AmpSource):
+    """AmpSource with the V amplitude a function of the time too (a_v0(t))."""
+
+    def samples(self, path, adc, channel, times):
+        if adc == 1 and callable(self.a_v):
+            self.a_v0 = self.a_v(times[0] if times else 0.0)
+        return super().samples(path, adc, channel, times)
+
+
+@case
+def m21_level_steps():
+    """S1.6 revision 8, real level changes (StepAmp, 1 kHz, forced range 1 kohm, so I p-p = 2 a_i 2^c6 10 and
+    V p-p = 2 a_v 2^c5): from the start V p-p 2400 at c5 3 and I 2400 at c6 3 (a_v 150, a_i 15); at T1 = 2 s the
+    I amplitude / 8 (p-p 300 at c6 3): the step up waits until no history bucket holds an acquisition from
+    before the drop, at least one bucket (more than 100 ms) and at most two (2 x (110 ms + 10 ms + one
+    acquisition)) plus one display update (0.12 s, NOTES "Load of a publish"), then the walk c6 3 -> 6 (p-p
+    2400) at three acquisitions per step: the first step 0.10..0.45 s after T1, c6 = 6 within 0.65 s; at T2 = 3 s
+    the I amplitude x 8 (c6 6 saturated): down at once (the S1.6 two-discard rule: the third out-of-band
+    acquisition), the first step within 0.15 s, c6 = 3 within 0.25 s (one display update included); the same
+    for V at T3 = 4 s (/ 4: c5 3 -> 5) and T4 = 5 s (x 4: c5 5 -> 3). Then forced range 100 kohm with I p-p
+    1280 at c6 7 (a_i 0.005): c6 stays 7 after the start (the vendor step there, c6 7 -> 0 with c8 kept, is a
+    gain / 128: held), no c6 change from 1 s to 3 s, at least 3 normal windows."""
+    T1, T2, T3, T4 = 2.0, 3.0, 4.0, 5.0
+    ai = lambda t: 15.0 / 8 if T1 <= t < T2 else 15.0
+    av = lambda t: 150.0 / 4 if T3 <= t < T4 else 150.0
+    src = StepAmp(150.0, ai, 0.0)
+    src.a_v = av
+    rig = own_rig(src, freq=1000, range=2)
+    log_codes(rig)
+    check(rig.m.now() < 1.5, 'm21: the rig came up at %.3f s' % rig.m.now())
+    rig.run(1.5 - rig.m.now())
+    check((rig.rd8(V_C5), rig.rd8(V_C6), rig.rd8(V_C8)) == (3, 3, 1), 'm21: codes %r at 1.5 s'
+          % ((rig.rd8(V_C5), rig.rd8(V_C6), rig.rd8(V_C8)),))
+    rig.run(5.8 - rig.m.now())
+
+    def changes(addr, t0, t1):
+        return [(t, v) for t, a, v in rig.code_log if a == addr and t0 < t <= t1]
+    res = []
+    for addr, name, t0, t1, frm, to, first, last in ((V_C6, 'I drop', T1, T2, 3, 6, (0.10, 0.45), 0.65),
+                                                     (V_C6, 'I rise', T2, T3, 6, 3, (0.0, 0.15), 0.25),
+                                                     (V_C5, 'V drop', T3, T4, 3, 5, (0.10, 0.45), 0.65),
+                                                     (V_C5, 'V rise', T4, 5.8, 5, 3, (0.0, 0.15), 0.25)):
+        ch = changes(addr, t0, t1)
+        other = changes(V_C5 if addr == V_C6 else V_C6, t0, t1) + changes(V_C8, t0, t1)
+        vals = [v for t, v in ch]
+        res.append('%s: %r' % (name, [(round(t - t0, 3), v) for t, v in ch]))
+        check(ch and first[0] <= ch[0][0] - t0 <= first[1] and ch[-1][0] - t0 <= last and vals[-1] == to
+              and len(vals) == abs(to - frm) and not other,
+              'm21 %s: changes %r (from %d to %d), other codes %r' % (name, [(round(t - t0, 3), v) for t, v in ch],
+                                                                     frm, to, other))
+    NOTES.append('m21 ' + '; '.join(res))
+    rig.watch.check(what='m21')
+    # forced range 100 kohm, I p-p 1280 at c6 7
+    a = 0.005
+    check(2 * a * 128 * RANGE_OHM[3] / 100.0 < 1500, 'm21 forced input: p-p %.0f at c6 7' % (2 * a * 128 * RANGE_OHM[3] / 100.0))
+    rig = own_rig(AmpSource(150.0, a, 0.0), freq=1000, range=4)
+    log_codes(rig)
+    rig.run(3.0 - rig.m.now())
+    ch = [x for x in rig.code_log if x[1] == V_C6 and x[0] > 1.0]
+    pubs = rig.probe.normal(1.0)
+    NOTES.append('m21 forced 100 kohm: c6 %d, %d c6 changes after 1 s, %d windows' % (rig.rd8(V_C6), len(ch), len(pubs)))
+    check(rig.rd8(V_C6) == 7 and not ch and len(pubs) >= 3 and not any(is_set(q) for q in pubs),
+          'm21 forced: c6 %d, changes %r, %d windows' % (rig.rd8(V_C6), ch[:6], len(pubs)))
+    rig.watch.check(what='m21 forced')
     return True
 
 

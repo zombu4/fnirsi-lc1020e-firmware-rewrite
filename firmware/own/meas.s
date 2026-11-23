@@ -19,7 +19,10 @@
 @ - S1.5 saturation (a sample at code 0 or 4095) steps the range, three overload acquisitions in
 @   a row publish the overload set;
 @ - S1.6 ranging only from the third out-of-band acquisition in a row (meas_acq), so single
-@   noise excursions of a noise-limited channel do not step a code and reset the window;
+@   noise excursions of a noise-limited channel do not step a code and reset the window; a
+@   gain step up (x 2) only when the p-p maximum of the last one to two history buckets (each at
+@   least 100 ms and 8 settled acquisitions) is at most 1500, so the p-p after the step stays at
+@   most 3000 (revision 8: meas_rhist, meas_rhscale, meas_rhclear; OWN_FUNC MF_RHV..MF_RHN);
 @ - S1.7 the vendor's magnitude compensation (short, decade interpolation) on screens 1 and 2,
 @   the raw value for the calibration store on screen 3;
 @ - S1.8 theta not folded, the derived values from the complex Zbar, D and Q without NaN, the
@@ -42,7 +45,7 @@
 @ (meas_bias_wait). S4.7 needs no code: ADC1 IN3 / ADC2 IN4 are fast channels (user manual
 @ figure 9-3), so the 1.5-cycle sample time stays.
 @ The words of OWN_FUNC this file writes: MF_SP, MF_HOLDP, MF_HL, MF_PSEQ, MF_BIASP, MF_BMID,
-@ MF_BT0, and MF_AUTO = 0 at a setting change (own.inc).
+@ MF_BT0, MF_RHV, MF_RHI, MF_RHT, MF_RHN, and MF_AUTO = 0 at a setting change (own.inc).
 @
 @ Vendor RAM words written here (each also written by fn_0800a068 in V1.1, same meaning unless
 @ the design's section 2 table says otherwise): 0x20005090 / 94 (|Zm| / theta of the last
@@ -166,6 +169,12 @@
 	.equ	PP_LO,		1500		@ ranging band of fn_0800b20c / fn_0800b000 (p-p counts)
 	.equ	PP_HI,		3600		@   (3600 for I: the .ifdef OWN at 0x0800B072)
 	.equ	A3_HI,		250		@ ADC3 p-p above it: fn_0800b000 steps c8 down (auto, c8 > 0)
+	.equ	RH_LIM,		1500		@ S1.6 revision 8: a gain step up (x 2) only when the p-p
+						@   maximum of the history is at most this: the p-p after the
+						@   step is then at most 3000, 600 below PP_HI
+	.equ	RH_T,		110		@ a history bucket closes after at least 110 tick ms (more
+						@   than 100 ms real: the tick moves in steps of 10, S1.4)
+	.equ	RH_N,		8		@   and at least 8 settled acquisitions
 
 	.if	MO_FL + 4 > MEAS_SIZE
 	.error	"meas.s: the state does not fit O_MEAS"
@@ -347,7 +356,8 @@ own_measure:
 @   meas_change with r0 = the time, r1 = the kind (window reset, new settle deadline); a change
 @   of kinds 0..4 also lets the AUTO class and series / parallel decide anew. A bias change
 @   also starts the S4.4 wait (MF_BIASP = 1, MF_BT0 = the tick; meas_bias_wait). Any change
-@   also clears MO_FL bits 5..7 (the hunting test starts anew).
+@   also clears MO_FL bits 5..7 (the hunting test starts anew) and makes the p-p history of the
+@   ranging not known (meas_rhclear: no gain step up until a bucket of new acquisitions closed).
 @   Returns r0 = 1 when the restart marker was 0. Changes r0..r3, r12.
 @ ----------------------------------------------------------------------------
 	.thumb_func
@@ -424,6 +434,7 @@ meas_watch:
 	ldr	r0, [r4, #MO_FL]
 	bic	r0, r0, #FL_HTEST
 	str	r0, [r4, #MO_FL]	@ a new setting, restart or foreign code: the hunting test anew
+	bl	meas_rhclear		@ and the p-p history of the ranging not known (S1.6 revision 8)
 	cmp	r9, #0
 	beq	.Lmw_change
 	ldr	r0, =OWN_FUNC		@ a setting change or a restart (S2.5, S2.6): AUTO class
@@ -620,7 +631,14 @@ meas_arm:
 @   The peak scans fn_08007f84 (ADC3), fn_08007fd4 (ADC1, r0 = p-p), fn_08007f38 (ADC2), then
 @   saturation (ocal_clip: maximum >= CLIP hi or minimum <= CLIP lo, defaults 4095 / 0, S1.5, S4.5) with p-p 4095 for
 @   the saturated channel. While OCAL_LOCK holds the codes: meas_lockset (no ranging, so no band
-@   rule; the out-of-band run of MO_FL bits 3 / 4 ends). Else (S1.6) the band rule: out of band
+@   rule; the out-of-band run of MO_FL bits 3 / 4 ends; the p-p history not known, meas_rhclear).
+@   Else first the step-up rule (S1.6 revision 8): the p-p values into the history (meas_rhist);
+@   V below 1500 with c5 < 7, or I below 1500 with c6 < 7, while that channel's history maximum
+@   (the larger bucket) exceeds RH_LIM 1500, is passed on as 1500 (in band: the code is held, a
+@   x 2 step would land above 3000); I below 1500 at c6 7 under a forced range likewise (the
+@   vendor step there sets c6 0 with c8 kept, a gain / 128). At c6 7 in auto range the wrap to c6
+@   0 with c8 + 1 (K x 10 / 128) and the in-band range step (c6 >= 4) stay as they are. Then
+@   (S1.6) the band rule: out of band
 @   is V or I p-p as passed on below 1500 or above 3600 (a saturated channel at 4095 included),
 @   or ADC3 p-p 0x200011DE above 250 with range auto (0x2000114C = 0) and c8 > 0: the inputs on
 @   which fn_0800b20c / fn_0800b000 step a code (app_02.s fn_0800b20c, 0x0800B01C..0x0800B072),
@@ -633,7 +651,8 @@ meas_arm:
 @   window closed (the meter, 2026-11-22: 4 of 7 boots without a window, 6 of 6 with the rule);
 @   a real level change keeps every acquisition out of band and is ranged from the third one.
 @   Ranged: fn_0800b20c (V) and, when it made no change, fn_0800b000 (I and range).
-@   Codes changed: a change of kind 6 with SETTLE[6][fi] (default 5 ms; the overload count ends);
+@   Codes changed: the history scaled to the new codes (meas_rhscale), a change of kind 6 with
+@   SETTLE[6][fi] (default 5 ms; the overload count ends);
 @   when an acquisition went to the window since the previous own step (MO_FL bit 5) the step cut
 @   a window: the first such cut sets bit 6, the second bit 7 (hunting); bit 5 cleared. A
 @   monotonic walk of steps without a used acquisition between them is no cut. While OCAL_LOCK
@@ -678,8 +697,55 @@ meas_acq:
 	bic	r1, r1, #FL_LOCKCLR
 	str	r1, [r4, #MO_FL]	@ locked: no band rule, an out-of-band run ends, no hunting
 	bl	meas_lockset		@ the locked codes; no ranging call (OWN_CAL_DESIGN.md 2.2)
+	bl	meas_rhclear		@ locked: the p-p history is not known afterwards
 	b	.Lac_ranged
 .Lac_auto:
+	@ S1.6 revision 8, the step-up rule: this acquisition into the p-p history, then a channel
+	@ below PP_LO whose code would step up by x 2 holds its code (its p-p passed on as PP_LO,
+	@ in band) while the history maximum exceeds RH_LIM
+	mov	r0, r7
+	mov	r1, r8
+	bl	meas_rhist
+	ldr	r3, =OWN_FUNC
+	movw	r2, #PP_LO
+	movw	r12, #RH_LIM
+	cmp	r7, r2
+	bhs	.Lac_hi			@ V not below the band: no step up
+	ldrb	r0, [r5, #VB_C5]
+	cmp	r0, #7
+	bhs	.Lac_hi			@ c5 7: fn_0800b20c has no step up
+	ldr	r0, [r3, #MF_RHV]
+	lsrs	r1, r0, #16		@ previous bucket
+	uxth	r0, r0			@ current bucket
+	cmp	r0, r1
+	it	lo
+	movlo	r0, r1			@ r0 = the history maximum of V
+	cmp	r0, r12
+	it	hi
+	movhi	r7, r2			@ held: V in band for the ranging
+.Lac_hi:
+	cmp	r8, r2
+	bhs	.Lac_rule		@ I not below the band
+	ldrb	r0, [r5, #VB_C6]
+	cmp	r0, #7
+	bhs	.Lac_i7
+	ldr	r0, [r3, #MF_RHI]
+	lsrs	r1, r0, #16
+	uxth	r0, r0
+	cmp	r0, r1
+	it	lo
+	movlo	r0, r1			@ r0 = the history maximum of I
+	cmp	r0, r12
+	it	hi
+	movhi	r8, r2			@ held: I in band for the ranging
+	b	.Lac_rule
+.Lac_i7:
+	ldr	r0, [r5, #VB_RANGE]
+	cmp	r0, #0
+	it	ne
+	movne	r8, r2			@ c6 7 under a forced range: fn_0800b000 would set c6 0 with c8
+					@ kept (gain / 128, app_02.s .L0800b04a), never a step up: held
+.Lac_rule:
 	@ S1.6 band rule: r0 = 1 when an input of the ranging calls is out of band
 	movs	r0, #0
 	movw	r1, #PP_LO
@@ -730,6 +796,8 @@ meas_acq:
 	cmp	r0, r10
 	beq	.Lac_same
 	str	r0, [r4, #MO_CODES]	@ our own ranging (or the lock): a change
+	mov	r1, r10
+	bl	meas_rhscale		@ the p-p history to the new codes (S1.6 revision 8)
 	ldr	r1, [r4, #MO_FL]
 	tst	r1, #FL_USED
 	beq	.Lac_step		@ no acquisition used since the last step: a walk
@@ -837,6 +905,185 @@ meas_lockset:
 	bl	fn_080093b8		@ the range, r0 = c8
 .Lls_out:
 	pop	{r6, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_rhist - S1.6 revision 8, the p-p history of the ranging (OWN_FUNC MF_RHV / MF_RHI /
+@   MF_RHT / MF_RHN): r0 = V p-p, r1 = I p-p of this acquisition as the ranging gets them (4095
+@   for a saturated channel). A settled acquisition (no settle pending, or t_arm at or after the
+@   deadline: the test of meas_acq .Lac_settle) raises the current bucket's maximum of both
+@   channels and is counted; an unsettled one raises it only for a channel above PP_HI (so the
+@   acquisition that steps a code down is always in the history) and is not counted. At the
+@   RH_N-th counted acquisition with at least RH_T tick ms since the bucket's start the bucket
+@   closes: previous = current, current = 0, count 0, start = now. The history maximum is the
+@   larger of the two buckets, so it covers the last one to two buckets. Changes r0..r3, r12.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_rhist, %function
+meas_rhist:
+	ldr	r12, =OWN_FUNC
+	ldr	r2, [r4, #MO_SETL]
+	cbz	r2, .Lrh_set		@ no settle pending
+	ldr	r2, [r4, #MO_TARM]
+	ldr	r3, [r4, #MO_TSET]
+	subs	r2, r2, r3
+	bpl	.Lrh_set		@ started at or after the deadline
+	movs	r3, #0			@ r3 = 0: unsettled, not counted, only a channel above PP_HI
+	movw	r2, #PP_HI
+	cmp	r0, r2
+	it	ls
+	movls	r0, #0
+	cmp	r1, r2
+	it	ls
+	movls	r1, #0
+	b	.Lrh_max
+.Lrh_set:
+	movs	r3, #1			@ r3 = 1: settled, counted
+.Lrh_max:
+	ldrh	r2, [r12, #MF_RHV]
+	cmp	r0, r2
+	it	hi
+	strhhi	r0, [r12, #MF_RHV]	@ the current bucket's V maximum
+	ldrh	r2, [r12, #MF_RHI]
+	cmp	r1, r2
+	it	hi
+	strhhi	r1, [r12, #MF_RHI]	@ the current bucket's I maximum
+	cbz	r3, .Lrh_out
+	ldr	r2, [r12, #MF_RHN]
+	adds	r2, r2, #1
+	str	r2, [r12, #MF_RHN]
+	cmp	r2, #RH_N
+	blo	.Lrh_out
+	ldr	r0, =MS_TICK
+	ldr	r0, [r0]		@ r0 = now
+	ldr	r1, [r12, #MF_RHT]
+	subs	r1, r0, r1		@ tick ms since the bucket's start (unsigned)
+	cmp	r1, #RH_T
+	blo	.Lrh_out
+	ldrh	r1, [r12, #MF_RHV]
+	lsls	r1, r1, #16
+	str	r1, [r12, #MF_RHV]	@ previous = current, current = 0
+	ldrh	r1, [r12, #MF_RHI]
+	lsls	r1, r1, #16
+	str	r1, [r12, #MF_RHI]
+	movs	r1, #0
+	str	r1, [r12, #MF_RHN]
+	str	r0, [r12, #MF_RHT]
+.Lrh_out:
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ meas_rhclear - the p-p history not known: both channels current 0 and previous 0xFFFF (above
+@   RH_LIM, so no step up until a bucket of new acquisitions closed), count 0, start = now.
+@   Called at every change meas_watch finds and at every acquisition under OCAL_LOCK. Changes
+@   r0..r2.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_rhclear, %function
+meas_rhclear:
+	ldr	r2, =OWN_FUNC
+	movw	r0, #0
+	movt	r0, #0xFFFF		@ previous 0xFFFF (not known), current 0
+	str	r0, [r2, #MF_RHV]
+	str	r0, [r2, #MF_RHI]
+	movs	r0, #0
+	str	r0, [r2, #MF_RHN]
+	ldr	r1, =MS_TICK
+	ldr	r1, [r1]
+	str	r1, [r2, #MF_RHT]
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ meas_rhscale - the p-p history after an own code change: r0 = the codes now, r1 = the codes
+@   before (c5 | c6 << 8 | c8 << 16, meas_codes). The counts each channel gets scale with its
+@   factor in K = R[c8] G[c6] / G[c5] (S1.3; the vendor tables 0x0802AEEC, 0x0802AEE4): V by
+@   G[c5 now] / G[c5 before], I by (R[c8] G[c6]) now / before (a c6 step x 2 or / 2, the wrap c6
+@   7 -> 0 with c8 + 1 x 10 / 128, the in-band range step x 10, a range step down / 10). Both
+@   buckets of the channel are scaled (meas_rhmul; 0xFFFF, not known, stays). Changes r0..r3,
+@   r12, s0, s1.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_rhscale, %function
+meas_rhscale:
+	push	{r6, lr}
+	ldr	r12, =d_0802aee4	@ gains 1, 2, 4 .. 128 (bytes)
+	uxtb	r2, r0			@ c5 now
+	uxtb	r3, r1			@ c5 before
+	cmp	r2, r3
+	beq	.Lrs_i
+	ldrb	r2, [r12, r2]
+	ldrb	r3, [r12, r3]
+	vmov	s0, r2
+	vmov	s1, r3
+	vcvt.f32.u32	s0, s0
+	vcvt.f32.u32	s1, s1
+	vdiv.f32	s0, s0, s1	@ G[c5 now] / G[c5 before]
+	ldr	r6, =OWN_FUNC + MF_RHV
+	bl	meas_rhmul
+.Lrs_i:
+	bic	r2, r0, #0xFF		@ c6 and c8 now
+	bic	r3, r1, #0xFF		@ c6 and c8 before
+	cmp	r2, r3
+	beq	.Lrs_out
+	ldr	r6, =d_0802aeec		@ range resistors 100, 1k, 10k, 100k (words)
+	ubfx	r2, r0, #8, #8
+	ldrb	r2, [r12, r2]		@ G[c6 now]
+	ubfx	r3, r0, #16, #8
+	ldr	r3, [r6, r3, lsl #2]	@ R[c8 now]
+	mul	r2, r2, r3
+	vmov	s0, r2
+	ubfx	r2, r1, #8, #8
+	ldrb	r2, [r12, r2]		@ G[c6 before]
+	ubfx	r3, r1, #16, #8
+	ldr	r3, [r6, r3, lsl #2]	@ R[c8 before]
+	mul	r2, r2, r3
+	vmov	s1, r2
+	vcvt.f32.u32	s0, s0
+	vcvt.f32.u32	s1, s1
+	vdiv.f32	s0, s0, s1	@ (R G6) now / before
+	ldr	r6, =OWN_FUNC + MF_RHI
+	bl	meas_rhmul
+.Lrs_out:
+	pop	{r6, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_rhmul - the two halfwords at r6 (current, previous bucket) times s0, each truncated and
+@   at most 0xFFFE; a halfword 0xFFFF (not known) is kept. Called only by meas_rhscale. Changes
+@   r2, r3, s1.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_rhmul, %function
+meas_rhmul:
+	ldrh	r2, [r6, #0]
+	movw	r3, #0xFFFF
+	cmp	r2, r3
+	beq	.Lrm_prev		@ not known: kept
+	vmov	s1, r2
+	vcvt.f32.u32	s1, s1
+	vmul.f32	s1, s1, s0
+	vcvt.u32.f32	s1, s1		@ toward zero, saturating
+	vmov	r2, s1
+	subs	r3, r3, #1		@ 0xFFFE
+	cmp	r2, r3
+	it	hi
+	movhi	r2, r3
+	strh	r2, [r6, #0]
+.Lrm_prev:
+	ldrh	r2, [r6, #2]
+	movw	r3, #0xFFFF
+	cmp	r2, r3
+	beq	.Lrm_out
+	vmov	s1, r2
+	vcvt.f32.u32	s1, s1
+	vmul.f32	s1, s1, s0
+	vcvt.u32.f32	s1, s1
+	vmov	r2, s1
+	subs	r3, r3, #1
+	cmp	r2, r3
+	it	hi
+	movhi	r2, r3
+	strh	r2, [r6, #2]
+.Lrm_out:
+	bx	lr
 
 @ ----------------------------------------------------------------------------
 @ meas_kval - s0 = K = R[c8] G[c6] / G[c5] of the codes now (the tables of meas_win). Changes

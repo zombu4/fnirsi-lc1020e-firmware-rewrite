@@ -583,7 +583,14 @@
         .equ    MF_BMID,        0x84            @ meas.s S4.4: halfword 0x200011D0 | halfword
                                                 @ 0x200011D8 << 16 at the previous window close
         .equ    MF_BT0,         0x88            @ meas.s S4.4: tick word 0x20000480 at the change
-        .equ    MF_END,         0x8C
+        .equ    MF_RHV,         0x8C            @ meas.s S1.6 revision 8, the p-p history of the
+                                                @ ranging: V p-p maximum of the current bucket
+                                                @ (halfword 0x8C) and of the previous bucket
+                                                @ (halfword 0x8E; 0xFFFF: not known)
+        .equ    MF_RHI,         0x90            @ meas.s: the same for I (0x90 current, 0x92 previous)
+        .equ    MF_RHT,         0x94            @ meas.s: tick word 0x20000480 at the bucket's start
+        .equ    MF_RHN,         0x98            @ meas.s: settled acquisitions in the current bucket
+        .equ    MF_END,         0x9C
         .if     MF_END > FUNC_SIZE
         .error  "own.inc: the OWN_FUNC words do not fit O_FUNC"
         .endif
