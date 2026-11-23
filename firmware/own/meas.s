@@ -23,7 +23,9 @@
 @ - S1.7 the vendor's magnitude compensation (short, decade interpolation) on screens 1 and 2,
 @   the raw value for the calibration store on screen 3;
 @ - S1.8 theta not folded, the derived values from the complex Zbar, D and Q without NaN, the
-@   no-reading set after 2 s without an in-band acquisition.
+@   no-reading set after 2 s without an in-band acquisition, or after 2 s of hunting (two windows
+@   cut by our own range steps since the last window close: from then on in-band acquisitions
+@   between the steps no longer clear the count 0x2000120C; meas_acq, MO_FL bits 5..7).
 @ While hold (0x200011A4) is set the measurement runs on and windows close, but nothing is
 @ published (the display freeze of design decision D1).
 @ Stage 2 (revision 6): S2.6 series / parallel with hysteresis (meas_serpar), S2.7 a hold that
@@ -96,7 +98,15 @@
 @                   cleared by meas_reset and by the first addition that uses it); bits 3 / 4:
 @                   1 / 2 or more consecutive out-of-band acquisitions of the ranging path
 @                   (meas_acq; kept by meas_reset and meas_win, cleared by an in-band acquisition
-@                   and by every acquisition while OCAL_LOCK holds the codes)
+@                   and by every acquisition while OCAL_LOCK holds the codes); bits 5..7, the
+@                   hunting test of the no-reading path (S1.8 "hunting longer than 2 s"): bit 5
+@                   an acquisition went to the window (meas_win) since our own last range step,
+@                   bit 6 one own range step came after such an acquisition (a window cut by
+@                   ranging), bit 7 a second one did (hunting: in-band acquisitions no longer
+@                   clear 0x2000120C); kept by meas_reset and by the no-reading set (meas_pub_nr:
+@                   hunting that goes on gives the next set 2 s later), cleared by every window
+@                   close (meas_publish, also under hold), the overload set (meas_pub_ovl), every
+@                   change meas_watch finds and every acquisition while OCAL_LOCK holds the codes
 @
 @ Register use: own_measure keeps r4 = OWN_MEAS and r5 = 0x2000057C (V_BLOCK) for all the
 @ helpers below, which may also use s16..s31 freely (own_measure saves d8..d15); each helper
@@ -148,6 +158,11 @@
 	.equ	FL_OOB1,	8		@ MO_FL bits 3, 4: consecutive out-of-band acquisitions,
 	.equ	FL_OOB2,	0x10		@   0, 1 (bit 3) or 2 and more (bit 4)
 	.equ	FL_OOB,		0x18
+	.equ	FL_USED,	0x20		@ MO_FL bit 5: an acquisition went to the window since our last step
+	.equ	FL_CUT,		0x40		@ MO_FL bit 6: one window cut by our own range step
+	.equ	FL_HUNT,	0x80		@ MO_FL bit 7: two cut: hunting
+	.equ	FL_HTEST,	0xE0		@ the hunting test's bits 5..7
+	.equ	FL_LOCKCLR,	0xF8		@ FL_OOB | FL_HTEST: what an acquisition under OCAL_LOCK clears
 	.equ	PP_LO,		1500		@ ranging band of fn_0800b20c / fn_0800b000 (p-p counts)
 	.equ	PP_HI,		3600		@   (3600 for I: the .ifdef OWN at 0x0800B072)
 	.equ	A3_HI,		250		@ ADC3 p-p above it: fn_0800b000 steps c8 down (auto, c8 > 0)
@@ -331,7 +346,8 @@ own_measure:
 @   (meas_wkind: r7 = the time, r8 = its kind, the first found on a tie). Any change:
 @   meas_change with r0 = the time, r1 = the kind (window reset, new settle deadline); a change
 @   of kinds 0..4 also lets the AUTO class and series / parallel decide anew. A bias change
-@   also starts the S4.4 wait (MF_BIASP = 1, MF_BT0 = the tick; meas_bias_wait).
+@   also starts the S4.4 wait (MF_BIASP = 1, MF_BT0 = the tick; meas_bias_wait). Any change
+@   also clears MO_FL bits 5..7 (the hunting test starts anew).
 @   Returns r0 = 1 when the restart marker was 0. Changes r0..r3, r12.
 @ ----------------------------------------------------------------------------
 	.thumb_func
@@ -405,6 +421,9 @@ meas_watch:
 	bl	meas_wkind		@ kind 6: range or gain ([S12] p.35)
 .Lmw_done:
 	cbz	r7, .Lmw_ret
+	ldr	r0, [r4, #MO_FL]
+	bic	r0, r0, #FL_HTEST
+	str	r0, [r4, #MO_FL]	@ a new setting, restart or foreign code: the hunting test anew
 	cmp	r9, #0
 	beq	.Lmw_change
 	ldr	r0, =OWN_FUNC		@ a setting change or a restart (S2.5, S2.6): AUTO class
@@ -614,8 +633,15 @@ meas_arm:
 @   window closed (the meter, 2026-11-22: 4 of 7 boots without a window, 6 of 6 with the rule);
 @   a real level change keeps every acquisition out of band and is ranged from the third one.
 @   Ranged: fn_0800b20c (V) and, when it made no change, fn_0800b000 (I and range).
-@   Codes changed: a change of kind 6 with SETTLE[6][fi] (default 5 ms; the overload count ends).
-@   Codes unchanged (in band, or no step left): 0x2000120C = 0, then
+@   Codes changed: a change of kind 6 with SETTLE[6][fi] (default 5 ms; the overload count ends);
+@   when an acquisition went to the window since the previous own step (MO_FL bit 5) the step cut
+@   a window: the first such cut sets bit 6, the second bit 7 (hunting); bit 5 cleared. A
+@   monotonic walk of steps without a used acquisition between them is no cut. While OCAL_LOCK
+@   holds the codes, bits 5..7 are cleared at every acquisition (no ranging, no hunting).
+@   Codes unchanged (in band, or no step left): 0x2000120C = 0 unless bit 7 (hunting) is set (so
+@   hunting longer than 2 s gives the no-reading set, S1.8, also when in-band acquisitions come
+@   between the steps: the meter, 2026-11-22, c6 3 / 2 / 3 seconds apart at open terminals),
+@   then
 @   - saturated: one more overload acquisition; at the third in a row the window is reset and
 @     the overload set published (on the ranging path a saturated run is out of band, so its
 @     first two are band-discarded before: the set comes at its fifth acquisition; locked, at
@@ -623,7 +649,7 @@ meas_arm:
 @   - not saturated after three or more overload acquisitions: a change (kind 6);
 @   - a pending settle not yet over (t_arm before the deadline): discarded;
 @   - else the two DFT bins (meas_dft), step 3 (G read again: a re-arm during the reads
-@     discards it) and the window (meas_win).
+@     discards it), MO_FL bit 5 set and the window (meas_win).
 @   Changes r0..r3, r12, s0..s31.
 @ ----------------------------------------------------------------------------
 	.thumb_func
@@ -649,8 +675,8 @@ meas_acq:
 	bl	ocal_locked		@ r0 = the OCAL_LOCK word, 0 when not locked
 	cbz	r0, .Lac_auto
 	ldr	r1, [r4, #MO_FL]
-	bic	r1, r1, #FL_OOB
-	str	r1, [r4, #MO_FL]	@ locked: no band rule, an out-of-band run ends
+	bic	r1, r1, #FL_LOCKCLR
+	str	r1, [r4, #MO_FL]	@ locked: no band rule, an out-of-band run ends, no hunting
 	bl	meas_lockset		@ the locked codes; no ranging call (OWN_CAL_DESIGN.md 2.2)
 	b	.Lac_ranged
 .Lac_auto:
@@ -704,6 +730,16 @@ meas_acq:
 	cmp	r0, r10
 	beq	.Lac_same
 	str	r0, [r4, #MO_CODES]	@ our own ranging (or the lock): a change
+	ldr	r1, [r4, #MO_FL]
+	tst	r1, #FL_USED
+	beq	.Lac_step		@ no acquisition used since the last step: a walk
+	tst	r1, #FL_CUT
+	ite	ne
+	orrne	r1, r1, #FL_HUNT	@ the second window cut by a step: hunting
+	orreq	r1, r1, #FL_CUT		@ the first
+.Lac_step:
+	bic	r1, r1, #FL_USED
+	str	r1, [r4, #MO_FL]
 	movs	r0, #0
 	str	r0, [r4, #MO_OVL]
 	movs	r0, #6
@@ -716,7 +752,10 @@ meas_acq:
 	movs	r1, #0			@ not band-discarded
 	bl	meas_ocal_acq		@ the saturation note and the settle trace (2.2)
 	movs	r0, #0
-	str	r0, [r5, #VB_NRCNT]	@ an in-band acquisition: 0x2000120C = 0
+	ldr	r1, [r4, #MO_FL]
+	tst	r1, #FL_HUNT
+	it	eq
+	streq	r0, [r5, #VB_NRCNT]	@ an in-band acquisition, no hunting: 0x2000120C = 0
 	cmp	r9, #0
 	beq	.Lac_unsat
 	ldr	r0, [r4, #MO_OVL]
@@ -757,6 +796,9 @@ meas_acq:
 	ldr	r0, [r4, #MO_G]
 	subs	r0, r0, r6		@ step 3: G again
 	bne	.Lac_ret		@ re-armed during the reads: discarded
+	ldr	r0, [r4, #MO_FL]
+	orr	r0, r0, #FL_USED
+	str	r0, [r4, #MO_FL]	@ an acquisition for the window since our last step
 	bl	meas_win
 .Lac_ret:
 	pop	{r7, r8, r9, r10, r11, pc}
@@ -1535,8 +1577,9 @@ meas_add:
 @   (w Xs / Xp), Ls / Lp = Xs / Xp 1e6 / w (w = 2 pi f), Q = 0 for Xs = 0, +Inf for Rs = 0, else
 @   |Xs / Rs|; D = 0 for Rs = 0, +Inf for Xs = 0, else |Rs / Xs|; series / parallel: circuit 1
 @   series, 2 parallel, 0 by meas_serpar (S2.6, with hysteresis); the calibration entry of 60 Hz
-@   is the 100 Hz entry of the level (S2.12); then meas_tail. Always ends with meas_reset, then MO_TFIRST = the tick now and the anchor bit set
-@   (the next window is timed from this close). Changes r0..r3, r12, s0..s31.
+@   is the 100 Hz entry of the level (S2.12); then meas_tail. Always ends with meas_reset, then
+@   MO_TFIRST = the tick now and the anchor bit set (the next window is timed from this close)
+@   and MO_FL bits 5..7 (the hunting test) cleared. Changes r0..r3, r12, s0..s31.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	meas_publish, %function
@@ -1756,6 +1799,7 @@ meas_publish:
 	ldr	r0, [r0]
 	str	r0, [r4, #MO_TFIRST]	@ the next window is timed from this close
 	ldr	r0, [r4, #MO_FL]
+	bic	r0, r0, #FL_HTEST	@ a close (also under hold): the hunting test anew
 	orr	r0, r0, #FL_ANCHOR
 	str	r0, [r4, #MO_FL]
 	pop	{r6, r7, r8, pc}
@@ -1848,11 +1892,15 @@ meas_pub_set:
 	b	meas_tail
 
 @ ----------------------------------------------------------------------------
-@ meas_pub_ovl - S1.5: the overload set, unless hold is set. Changes r0..r3, r12, s0..s15.
+@ meas_pub_ovl - S1.5: MO_FL bits 5..7 (the hunting test) cleared, then the overload set, unless
+@   hold is set. Changes r0..r3, r12, s0..s15.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	meas_pub_ovl, %function
 meas_pub_ovl:
+	ldr	r0, [r4, #MO_FL]
+	bic	r0, r0, #FL_HTEST
+	str	r0, [r4, #MO_FL]	@ an overload: the hunting test anew
 	ldr	r0, [r5, #VB_HOLD]
 	cmp	r0, #0
 	beq	meas_pub_set
@@ -1860,7 +1908,10 @@ meas_pub_ovl:
 
 @ ----------------------------------------------------------------------------
 @ meas_pub_nr - S1.8 "No reading": the no-reading set (unless hold is set), then 0x20001208 and
-@   0x2000120C cleared and the window reset. Changes r0..r3, r12, s0..s15.
+@   0x2000120C cleared and the window reset. MO_FL bits 5..7 (the hunting test) are kept: hunting
+@   that goes on after its own no-reading set gives the next one 2 s later (clearing them here
+@   made it wait for two more cut windows first: 2.89 s between the sets in m18a, 2026-11-22).
+@   Changes r0..r3, r12, s0..s15.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	meas_pub_nr, %function

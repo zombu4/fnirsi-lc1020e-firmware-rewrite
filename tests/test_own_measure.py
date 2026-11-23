@@ -1641,6 +1641,186 @@ def m17_open_noise():
     return True
 
 
+# ---------------------------------------------------------------- m18 / m19 hunting I gain (S1.8)
+
+class HuntNoise(OpenGauss):
+    """Broadband I noise whose level drifts, as the meter showed it at open terminals (2026-11-22, image
+    5ee0a86, 1 kHz: c6 between 3 and 2, I p-p 3549..3910 at c6 = 3 and 1843..2021 at c6 = 2, the ADC2
+    buffer p-p 590..3638 over four reads: a noise level that moves). V the generator (DutSource), I =
+    2048 + (a component: the DutSource current k G[c6] R[c8] Re(v / Z)) + Gaussian noise (OpenGauss's
+    sequence) of RMS sigma(t) * G[c6] / G[2] * R[c8] / R[3], sigma(t) = s0 + sa sin(2 pi t / period) at the
+    acquisition's first sample, clipped to 0..4095. The period (1.2 s) is a choice of this model: the
+    meter's reads were 3 s apart and cannot show faster changes, and its MO_SEQ went 1 -> 2 in 30 s, so
+    no in-band run there lasted a window (m17 closes windows on steady noise of this kind)."""
+
+    def __init__(self, z_ohm=None, s0=300.0, sa=100.0, period=1.2):
+        super().__init__(0.0)
+        self.zc, self.s0, self.sa, self.period = z_ohm, s0, sa, period
+
+    def sigma(self, t):
+        return self.s0 + self.sa * math.sin(2 * math.pi * t / self.period)
+
+    def pp(self, sigma23, c6, c8, n):
+        """n acquisitions' ADC2 codes of the noise alone at level sigma23 (for the input checks)."""
+        self.sigma23 = sigma23
+        return [self.i_codes(c6, c8, 128) for _ in range(n)]
+
+    def samples(self, path, adc, channel, times):
+        if adc != 2:
+            return DutSource.samples(self, path, adc, channel, times)
+        c5, c6, c8 = path.front_end()
+        f = path.frequency()
+        rms = self.sigma(times[0]) * GAIN[c6] / GAIN[2] * RANGE_OHM[c8] / RANGE_OHM[3]
+        coh = [0.0] * len(times)
+        if self.zc is not None and f > 0:
+            coh = [self.k * GAIN[c6] * RANGE_OHM[c8] * (x / complex(self.zc, 0.0)).real for x in path.generator(times)]
+        return [max(0, min(4095, int(round(2048 + c + rms * self.gauss())))) for c in coh]
+
+
+M18_T0, M18_END, M18_GAP = 4.0, 12.0, 2.5
+
+
+def hunt_input(src, what):
+    """The input property of m18, by the firmware's band criterion (out_of_band) on 400 acquisitions of a
+    second source of the same model per point: at the lowest level (s0 - sa) c6 = 2 is out of band in at
+    least 90 % (p-p below 1500: fn_0800b000 steps c6 up) and c6 = 3 in band in at least 90 %; at the
+    highest (s0 + sa) c6 = 3 out of band in at least 90 % (above 3600: steps down) and c6 = 2 in band in at
+    least 90 %. So the drift forces a step at both ends and the code stepped to holds in-band runs."""
+    p = HuntNoise(s0=src.s0, sa=src.sa, period=src.period)
+    p.s = 987654321
+    frac = {}
+    for lvl, name in ((src.s0 - src.sa, 'lo'), (src.s0 + src.sa, 'hi')):
+        for c6 in (2, 3):
+            frac[name, c6] = sum(map(out_of_band, p.pp(lvl, c6, 3, 400))) / 400.0
+    check(frac['lo', 2] >= 0.9 and frac['lo', 3] <= 0.1 and frac['hi', 3] >= 0.9 and frac['hi', 2] <= 0.1,
+          '%s input: out of band lo c6 2 / 3 %.3f / %.3f, hi c6 2 / 3 %.3f / %.3f'
+          % (what, frac['lo', 2], frac['lo', 3], frac['hi', 2], frac['hi', 3]))
+    return frac
+
+
+def hunting(func):
+    """S1.8 "No reading" (hunting longer than 2 s gives the no-reading set) with the I gain hunting at open
+    terminals, Func `func` (word 0x20001148 from the settings), 1 kHz, speed 0 (T_win 1 s), range AUTO,
+    source HuntNoise without a component.
+    Input checked first: hunt_input; then from the run, after M18_T0: c5 and c8 unchanged (c8 = 3, the
+    codes hunt_input assumes); every used acquisition's I noise-limited (float64 |X_I|^2 < 64 * 8^2 *
+    max(sigma^2, 1/12), dft64 of the captured buffer: below the stay-resolved threshold of meas_win); c6
+    changes at least 8 times, at least 6 of them with a used acquisition since the change before (a
+    window started, then cut by an own range step: in-band runs between the steps).
+    Expected, from M18_T0 to M18_END: the no-reading set published (is_set at the store of 1 to
+    0x20001200) at least every M18_GAP seconds = the 2 s of S1.8 + 0.5 s (the steps that establish the
+    hunting at its start, one display update); no output word NaN; every publish finite or the set."""
+    blk = block_with(**{'0x%08x' % T.V_FUNC: func, '0x%08x' % V_FREQ: 1000, '0x%08x' % V_SPEED: 0})
+    src = HuntNoise()
+    frac = hunt_input(src, 'm18 Func %d' % func)
+    rig = own_rig(src, block=blk)
+    log_codes(rig)
+    check(rig.rd(T.V_FUNC) == func, 'm18 Func %d: Func word %d after the start' % (func, rig.rd(T.V_FUNC)))
+    rig.run(M18_END - rig.m.now())
+    used = [a for a in rig.probe.acqs if a['t'] > M18_T0]
+    check(len(used) >= 50, 'm18 Func %d input: %d used acquisitions after %.1f s' % (func, len(used), M18_T0))
+    other = [x for x in rig.code_log if x[0] > M18_T0 and x[1] != V_C6]
+    check(not other and rig.rd8(V_C8) == 3, 'm18 Func %d input: c5 / c8 changes %r, c8 %d' % (func, other, rig.rd8(V_C8)))
+    for a in used:
+        X, s2 = dft64(a['i'], 1)
+        check(abs(X) ** 2 < 64 * 8 ** 2 * max(s2, 1 / 12.0),
+              'm18 Func %d input: I resolved at t %.3f (|X|^2 %.4g, sigma^2 %.4g)' % (func, a['t'], abs(X) ** 2, s2))
+    c6 = [t for t, ad, v in rig.code_log if ad == V_C6 and t > M18_T0]
+    cut = sum(1 for t1, t2 in zip(c6, c6[1:]) if any(t1 < a['t'] < t2 for a in used))
+    check(len(c6) >= 8 and cut >= 6, 'm18 Func %d input: c6 changes %d, with a used acquisition before %d'
+          % (func, len(c6), cut))
+    pubs = [p for p in rig.probe.pubs if p['t'] > M18_T0]
+    sets = [p['t'] for p in pubs if is_set(p)]
+    times = [M18_T0] + sets + [rig.m.now()]
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    NOTES.append('m18 Func %d: %d publishes (%d the set), longest gap between sets %.2f s, c6 changes %d (%d '
+                 'cut a window), input lo c6 2 / 3 %.2f / %.2f, hi %.2f / %.2f out of band'
+                 % (func, len(pubs), len(sets), max(gaps), len(c6), cut, frac['lo', 2], frac['lo', 3],
+                    frac['hi', 2], frac['hi', 3]))
+    check(max(gaps) <= M18_GAP, 'm18 Func %d: no no-reading set for %.2f s (publishes %d after %.1f s, %d sets, '
+          'MO_SEQ %d, 0x2000120C %d, MO_FL 0x%X)' % (func, max(gaps), len(pubs), M18_T0, len(sets), mo(rig, 'SEQ'),
+                                                     rig.rd(V_NRCNT), mo(rig, 'FL')))
+    for p in pubs:
+        no_nan(p, 'm18 Func %d' % func)
+        check(is_set(p) or (p['Z'] & 0x7F800000) != 0x7F800000, 'm18 Func %d: |Z| 0x%08X' % (func, p['Z']))
+    rig.watch.check(what='m18 Func %d' % func)
+    return True
+
+
+@case
+def m18a_hunting_auto():
+    """hunting in Func 0 (AUTO)."""
+    return hunting(0)
+
+
+@case
+def m18b_hunting_r():
+    """hunting in Func 1."""
+    return hunting(1)
+
+
+@case
+def m18c_hunting_c():
+    """hunting in Func 2."""
+    return hunting(2)
+
+
+@case
+def m18d_hunting_l():
+    """hunting in Func 3."""
+    return hunting(3)
+
+
+@case
+def m18e_hunting_z():
+    """hunting in Func 4."""
+    return hunting(4)
+
+
+@case
+def m19_noise_under_part():
+    """The control of m18: a 10 kohm resistor with the same drifting noise (HuntNoise, z_ohm 10000), Func 0,
+    1 kHz, speed 0, range AUTO. Input checked first, after M18_T0: the codes unchanged, and in every used
+    acquisition the I bin |X_I| / 64 (the amplitude, dft64) at least 20 times the residual RMS sqrt(sigma^2)
+    (the noise far below the signal) and I p-p within 1500..3600 (no band step). Expected, from M18_T0 to
+    M18_END: no no-reading or overload set, normal publishes at least every T_win + 11 ms + 2 acquisition
+    intervals (p01's bound), at least 7 of them, |Z| within 1 % of 10 kohm, no output word NaN; MO_FL bit 7
+    (hunting) never set at a publish."""
+    blk = block_with(**{'0x%08x' % V_FREQ: 1000, '0x%08x' % V_SPEED: 0})
+    rig = own_rig(HuntNoise(z_ohm=10000.0), block=blk)
+    log_codes(rig)
+    hunt = []
+    rig.probe.on_publish_entry = lambda r: hunt.append(mo(r, 'FL') & 0x80)
+    rig.run(M18_END - rig.m.now())
+    used = [a for a in rig.probe.acqs if a['t'] > M18_T0]
+    late = [x for x in rig.code_log if x[0] > M18_T0]
+    check(len(used) >= 50 and not late, 'm19 input: %d used acquisitions, code changes after %.1f s %r'
+          % (len(used), M18_T0, late))
+    snr = []
+    for a in used:
+        X, s2 = dft64(a['i'], 1)
+        snr.append(abs(X) / 64 / math.sqrt(max(s2, 1 / 12.0)))
+        pp = max(a['i']) - min(a['i'])
+        check(1500 <= pp <= 3600, 'm19 input: I p-p %d at t %.3f' % (pp, a['t']))
+    check(min(snr) >= 20, 'm19 input: smallest I amplitude / noise RMS %.1f' % min(snr))
+    pubs = [p for p in rig.probe.pubs if p['t'] > M18_T0]
+    times = [M18_T0] + [p['t'] for p in pubs] + [rig.m.now()]
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    lim = 1.0 + 0.011 + 2 * rig.probe.acq_interval()
+    zs = [u32f(p['Z']) for p in pubs]
+    NOTES.append('m19: codes %r, %d publishes after %.1f s, longest gap %.3f s (limit %.3f), |Z| %.1f..%.1f, '
+                 'smallest amplitude / noise %.0f' % ((rig.rd8(V_C5), rig.rd8(V_C6), rig.rd8(V_C8)), len(pubs), M18_T0,
+                                                     max(gaps), lim, min(zs) if zs else 0, max(zs) if zs else 0, min(snr)))
+    check(not any(is_set(p) for p in pubs), 'm19: %d no-reading / overload sets' % sum(map(is_set, pubs)))
+    check(len(pubs) >= 7 and max(gaps) <= lim, 'm19: %d publishes, longest gap %.3f s' % (len(pubs), max(gaps)))
+    for p, z in zip(pubs, zs):
+        no_nan(p, 'm19')
+        check(abs(z / 10000.0 - 1) <= 0.01, 'm19: |Z| %.2f at t %.3f' % (z, p['t']))
+    check(not any(hunt), 'm19: MO_FL bit 7 set at %d of %d publish entries' % (sum(1 for h in hunt if h), len(hunt)))
+    rig.watch.check(what='m19')
+    return True
+
+
 # ---------------------------------------------------------------- profile
 
 @case
