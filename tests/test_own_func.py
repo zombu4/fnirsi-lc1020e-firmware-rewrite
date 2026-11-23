@@ -188,30 +188,78 @@ def f20_ol_and_marker():
     for name, v in (('own_fmt_th', -45.0), ('own_fmt_dq', 0.5)):
         t, u, i, mk = fmt(rig, name, v, 60)
         check(mk == 0, '%s at 60 Hz: marker %d' % (name, mk))
-    # the row colour: amber by key 0x47, key 0x48 0xFF on the row's glyphs, then 0 again
+    # the row marker (fmt.s own_row_draw): one amber multiply cover per glyph, no image recolour
     rig.wr(V_FREQ, 1000)
     c47 = entry_hook(rig, 'fn_080265dc')
     c48 = entry_hook(rig, 'fn_080265f4')
+    hide = entry_hook(rig, 'fn_08023050', (UC_ARM_REG_R0, UC_ARM_REG_R1))
+    show = entry_hook(rig, 'fn_08023558', (UC_ARM_REG_R0, UC_ARM_REG_R1))
+    made = entry_hook(rig, 'fn_08023678', (UC_ARM_REG_R0,))
     amber = fcall(rig, 'rgb_to_565_0801d792', 0xFD, 0xD0, 0x1B) & 0xFFFF
     objs = [rig.rd(GLYPHS + 4 * i) for i in range(7)]
-    live = [o for o in objs if o]
-    check(len(live) == 7, 'row 0 glyph objects %r' % [hex(o) for o in objs])
+    check(all(objs), 'row 0 glyph objects %r' % [hex(o) for o in objs])
+    # the shared rig stops at the main loop just after its first row-0 draw, of the value 0 ohm
+    # (marked: below 10 mohm), so covers can exist; an unmarked draw first hides any
+    rig.wr(TXT, b'-1.2345\x00')
+    rig.wr(OWN_FUNC + MF['MARK'], 0)
+    fcall(rig, 'own_row_draw', 0, TXT)
+    del hide[:], show[:], made[:]
+    before = [cover(rig, g) for g in objs]
+    check(mf(rig, 'ROW0') == 0 and all(n == 0 or (n == 1 and rig.rd(c + 0x1C) & 1) for n, c in before),
+          'row 0 before the marker: MF_ROW0 %d, children %r' % (mf(rig, 'ROW0'), before))
+    rig.wr(TXT, b'-1.2345\x00')
+    rig.wr(OWN_FUNC + MF['MARK'], 1)
+    fcall(rig, 'own_row_draw', 0, TXT)
+    cov = [cover(rig, g) for g in objs]
+    check([m[1] for m in made] == [g for g, (n, c) in zip(objs, before) if not n] and all(n == 1 for n, c in cov)
+          and all(c == c0 for (n, c), (n0, c0) in zip(cov, before) if n0), 'covers made %r, children %r, before %r'
+          % (made, cov, before))
+    for g, (n, c) in zip(objs, cov):
+        size = tuple(fcall(rig, 'fn_08024bac', c, 0, k) & 0xFFFF for k in (1, 4))
+        wh = rig.rd(g + 0x2C)                                 # halfwords +0x2C width, +0x2E height
+        check(size == (wh & 0xFFFF, wh >> 16), 'cover 0x%X size %r, glyph image 0x%08X' % (c, size, wh))
+        style = tuple(fcall(rig, 'fn_08024bac', c, 0, k) & 0xFFFF for k in (0x20, 0x21, 0x0B, 0x32, 0x67))
+        check(style == (amber, 0xFF, 0, 0, 3) and not rig.rd(c + 0x1C) & 1,
+              'cover 0x%X: keys 0x20 0x21 0x0B 0x32 0x67 %r, flags 0x%X' % (c, style, rig.rd(c + 0x1C)))
+    check(not c47 and not c48, 'image recolour keys set: %r %r' % (c47, c48))
+    check(mf(rig, 'ROW0') == 1 and mf(rig, 'MARK') == 0, 'MF_ROW0 %d, MF_MARK %d' % (mf(rig, 'ROW0'), mf(rig, 'MARK')))
+    check([(o, m) for _, o, m in show] == [(c, 1) for (n, c), (n0, c0) in zip(cov, before) if n0],
+          'shown again %r (the hidden covers of before)' % show)
+    del show[:]
+    fcall(rig, 'own_row_draw', 0, TXT)                        # MF_MARK 0 now: covers hidden
+    check([(o, m) for _, o, m in hide] == [(c, 1) for n, c in cov] and all(rig.rd(c + 0x1C) & 1 for n, c in cov),
+          'hide calls %r' % hide)
+    check(mf(rig, 'ROW0') == 0, 'MF_ROW0 %d after the switch-off' % mf(rig, 'ROW0'))
+    del hide[:]
+    fcall(rig, 'own_row_draw', 0, TXT)
+    check(not hide and not show, 'unmarked row touched again: %r %r' % (hide, show))
+    rig.wr(OWN_FUNC + MF['MARK'], 1)
+    fcall(rig, 'own_row_draw', 0, TXT)                        # marked again: the same covers shown
+    check(len(made) == sum(not n for n, c in before) and [cover(rig, g) for g in objs] == cov
+          and [(o, m) for _, o, m in show] == [(c, 1) for n, c in cov], 'second marker: made %d, shown %r'
+          % (len(made), show))
+    # 6 characters: place 6 shows the blank image d_08036040 (fn_0800d14c index 13), its cover is hidden
     rig.wr(TXT, b'1.2345\x00')
     rig.wr(OWN_FUNC + MF['MARK'], 1)
     fcall(rig, 'own_row_draw', 0, TXT)
-    check([(o, c & 0xFFFF) for _, o, c, _ in c47] == [(o, amber) for o in live], 'key 0x47 calls %r' % c47)
-    check([(o, c) for _, o, c, _ in c48] == [(o, 0xFF) for o in live], 'key 0x48 calls %r' % c48)
-    check(mf(rig, 'ROW0') == objs[0] and mf(rig, 'MARK') == 0, 'MF_ROW0 0x%X, MF_MARK %d' % (mf(rig, 'ROW0'), mf(rig, 'MARK')))
-    del c47[:], c48[:]
-    fcall(rig, 'own_row_draw', 0, TXT)                        # MF_MARK 0 now: colour off
-    check(not c47 and [(o, c) for _, o, c, _ in c48] == [(o, 0) for o in live], 'switch-off calls %r' % c48)
-    check(mf(rig, 'ROW0') == 0, 'MF_ROW0 0x%X after the switch-off' % mf(rig, 'ROW0'))
-    del c48[:]
-    fcall(rig, 'own_row_draw', 0, TXT)
-    check(not c48, 'unmarked row touched again: %r' % c48)
-    NOTES.append('f20: %d limit rows, NaN / +-Inf OL, row colour on 7 glyphs, amber 0x%04X' % (len(rows), amber))
+    check(rig.rd(objs[6] + 0x24) == rig.s['d_08036040'] and rig.rd(cov[6][1] + 0x1C) & 1
+          and not any(rig.rd(c + 0x1C) & 1 for n, c in cov[:6]), 'blank place: image 0x%X, cover flags %r'
+          % (rig.rd(objs[6] + 0x24), [rig.rd(c + 0x1C) & 1 for n, c in cov]))
+    fcall(rig, 'own_row_draw', 0, TXT)                        # MF_MARK 0: leave the shared rig unmarked
+    NOTES.append('f20: %d limit rows, NaN / +-Inf OL, 7 covers (%d made here, amber 0x%04X), hidden and shown '
+                 'again, none over the blank image' % (len(rows), len(made), amber))
     rig.watch.check(what='f20')
     return True
+
+
+def cover(rig, g):
+    """(child count, child 0) of object g: word [g + 8] = attribute block, children list +0, count +4
+    (fn_080233c4, fn_08023da4); (0, 0) without a block or a child."""
+    blk = rig.rd(g + 8)
+    if not blk:
+        return (0, 0)
+    n = rig.rd(blk + 4)
+    return (n, rig.rd(rig.rd(blk)) if n else 0)
 
 
 # ---------------------------------------------------------------- f21 signs (formatter part)
@@ -704,6 +752,121 @@ def f29_sixty_hertz():
     check(r == 1100000, 'V1.1 fn_0800a030 at 60 Hz: %r' % r)
     NOTES.append('f29: %d windows at 60 Hz speed 1, N %r at speed 2 (%d windows), V1.1 OL limit at 60 Hz %d'
                  % (len(pubs), ns, len(fast), r))
+    return True
+
+
+# ---------------------------------------------------------------- f30 the marked value on the panel
+
+def glyph_image(rig, src):
+    """This test's own decoding of an indexed image (rodata_01.s: descriptor word 0 = cf bits 0..4, width
+    bits 10..20, height bits 21..31, word 2 = data; the data is the palette of 4-byte entries b, g, r, a,
+    then the pixel indices row by row, cf 10: 256 entries, 8 bits; cf 9: 16 entries, 4 bits, high nibble
+    first, rows padded to a byte; fn_080214b4, fn_080215f4 with rgb_to_565_0801d942(r, g, b)).
+    Returns (width, height, {(x, y): RGB565, or None where the alpha is 0})."""
+    hdr, data = rig.rd(src), rig.rd(src + 8)
+    cf, w, h = hdr & 0x1F, (hdr >> 10) & 0x7FF, hdr >> 21
+    check(cf in (9, 10), 'image 0x%X: colour format %d' % (src, cf))
+    bits = 8 if cf == 10 else 4
+    pal = rig.rd(data, 4 << bits)
+    rowb = (w * bits + 7) // 8
+    idx = rig.rd(data + (4 << bits), rowb * h)
+    out = {}
+    for y in range(h):
+        for x in range(w):
+            k = idx[y * rowb + x] if bits == 8 else (idx[y * rowb + x // 2] >> (4 - 4 * (x & 1))) & 0xF
+            b, g, r, a = pal[4 * k:4 * k + 4]
+            check(a in (0, 0xFF), 'image 0x%X pixel %r: alpha 0x%02X (the check assumes 0 or 0xFF)' % (src, (x, y), a))
+            out[(x, y)] = None if a == 0 else (r >> 3) << 11 | (g >> 2) << 5 | b >> 3
+    return w, h, out
+
+
+def mul565(s, d):
+    """fn_08014a9a (gfx_04.s): red (s >> 11)(d >> 11) >> 5, green ((s >> 5) & 63)((d >> 5) & 63) >> 6,
+    blue (s & 31)(d & 31) >> 5."""
+    return (((s >> 11) * (d >> 11)) >> 5) << 11 | (((s >> 5 & 63) * (d >> 5 & 63)) >> 6) << 5 | ((s & 31) * (d & 31)) >> 5
+
+
+@case
+def f30_marked_value_amber_digits():
+    """Meter 2026-11-22: a marked main value (60 Hz) was drawn as solid amber blocks. Panel model of
+    test_own_control.py: R 1 kohm, started at 100 Hz (a stored 60 is loaded as 100: save.s load_fix, design
+    D60-a), LCR_SET frequency index 5 (60 Hz: marked), index 2 (1 kHz, inside the
+    accuracy table: unmarked), then index 5 again. After each, the run goes on until
+    the last row-0 draw (own_row_draw r0 = 0) lies 0.1 s back, and the panel memory of the logged flushes
+    (fb_replay) is compared, on the rectangle of each of the 7 row-0 glyph objects (halfwords +0x14 x1,
+    +0x16 y1; size = the image's), with this test's decoding of the glyph's image (word +0x24): unmarked
+    the image's pixel (the root's background colour rgb_to_565_0801d7c2(0, 0, 0) where its alpha is 0),
+    marked that value multiplied by amber rgb_to_565_0801d792(0xFD, 0xD0, 0x1B) by fn_08014a9a. A glyph
+    showing the blank image d_08036040 (alpha 0, the places after the text) has no cover shown, and the
+    panel under it (the unit picture) is the same marked as unmarked. Also: MF_ROW0 1 / 0 / 1, each
+    other glyph's one cover shown when marked and hidden when not, the same covers the third time, at
+    least 4 glyphs with white pixels compared each time."""
+    blk = M.settings(freq=100)
+    rig = M.T.Ctl(a=M.T.copy_image(blk, 2), b=M.T.copy_image(blk, 1), usb=True, source=DutSource('R', 1000.0),
+                  panel=True)
+    rig.up()
+    draws = entry_hook(rig, 'own_row_draw', (UC_ARM_REG_R0,))
+    amber = fcall(rig, 'rgb_to_565_0801d792', 0xFD, 0xD0, 0x1B) & 0xFFFF
+    bg = fcall(rig, 'rgb_to_565_0801d7c2', 0, 0, 0) & 0xFFFF
+    seen, blanks = [], []
+    for step, (fi, marked) in enumerate(((5, True), (2, False), (5, True))):
+        rig.ask_ok('LCR_SET', bytes([2, fi]))
+        check(rig.rd(V_FREQ) == (60 if fi == 5 else 1000), 'step %d: frequency %d' % (step, rig.rd(V_FREQ)))
+        rig.run(2.0)
+        for _ in range(40):
+            row0 = [t for t, r0 in draws if r0 == 0]
+            check(row0, 'step %d: no row-0 draw' % step)
+            if rig.m.now() - row0[-1] >= 0.1:
+                break
+            rig.run(0.05)
+        else:
+            check(False, 'step %d: row 0 drawn within 0.1 s for 2 s' % step)
+        check(mf(rig, 'ROW0') == int(marked), 'step %d: MF_ROW0 %d' % (step, mf(rig, 'ROW0')))
+        fb = M.T.fb_replay(rig.m.panel.flushes)
+        objs = [rig.rd(GLYPHS + 4 * i) for i in range(7)]
+        covers = [cover(rig, g) for g in objs]
+        if marked:
+            check(all(n == 1 and not rig.rd(c + 0x1C) & 1 for (n, c), g in zip(covers, objs)
+                      if rig.rd(g + 0x24) != rig.s['d_08036040']), 'step %d covers %r' % (step, covers))
+        else:
+            check(all(n == 0 or rig.rd(c + 0x1C) & 1 for n, c in covers), 'step %d covers %r' % (step, covers))
+        seen.append(covers)
+        bad, compared, white, blank = [], 0, 0, {}
+        for g, (n, c) in zip(objs, covers):
+            w, h, img = glyph_image(rig, rig.rd(g + 0x24))
+            x1, y1, x2, y2 = struct.unpack('<hhhh', rig.rd(g + 0x14, 8))
+            check((x2 - x1 + 1, y2 - y1 + 1) == (w, h), 'glyph 0x%X rectangle %r, image %d x %d' % (g, (x1, y1, x2, y2), w, h))
+            if rig.rd(g + 0x24) == rig.s['d_08036040']:
+                # the blank image (alpha 0): no cover shown; what lies under it (the unit picture)
+                # is compared between the steps below
+                check(n == 0 or rig.rd(c + 0x1C) & 1, 'step %d: cover shown over the blank glyph 0x%X' % (step, g))
+                blank.update({(x1 + x, y1 + y): fb.get((x1 + x, y1 + y)) for (x, y) in img})
+                continue
+            top = max(img[p] or 0 for p in img)
+            white += top == 0xFFFF
+            for (x, y), v in img.items():
+                if not (0 <= x1 + x < 320 and 0 <= y1 + y < 240):
+                    continue
+                want = bg if v is None else v
+                if marked:
+                    want = mul565(amber, want)
+                got = fb.get((x1 + x, y1 + y))
+                compared += 1
+                if got != want:
+                    bad.append(((x1 + x, y1 + y), got, want))
+        check(not bad, 'step %d: %d of %d pixels differ, first %r' % (step, len(bad), compared, bad[:4]))
+        check(white >= 4, 'step %d: %d glyphs with white pixels' % (step, white))
+        blanks.append(blank)
+        NOTES.append('f30 step %d (%s): %d glyph pixels as expected, %d glyphs with white 0xFFFF -> 0x%04X, %d '
+                     'blank-glyph pixels' % (step, 'marked' if marked else 'unmarked', compared, white,
+                                             mul565(amber, 0xFFFF), len(blank)))
+    check(seen[2] == seen[0], 'covers of the third step %r, first %r' % (seen[2], seen[0]))
+    for k in (0, 2):
+        same = set(blanks[k]) & set(blanks[1])
+        diff = [(p, blanks[k][p], blanks[1][p]) for p in sorted(same) if blanks[k][p] != blanks[1][p]]
+        check(not diff, 'under the blank glyph, step %d against step 1: %d of %d differ, first %r'
+              % (k, len(diff), len(same), diff[:4]))
+        NOTES.append('f30: under the blank glyph %d pixels of step %d as unmarked' % (len(same), k))
     return True
 
 

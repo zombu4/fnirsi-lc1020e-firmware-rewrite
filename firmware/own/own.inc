@@ -548,7 +548,7 @@
 @ start; nothing of it is saved, design D7)
         .equ    MF_MARK,        0x00            @ fmt.s: 1 when the value formatted last lies
                                                 @ outside the accuracy table (S2.1), else 0
-        .equ    MF_ROW0,        0x04            @ fmt.s: glyph object 0 of row 0 last marked, or 0
+        .equ    MF_ROW0,        0x04            @ fmt.s: 1 while row 0's amber covers are shown
         .equ    MF_ROW1,        0x08            @ fmt.s: the same for row 1
         .equ    MF_SP,          0x0C            @ meas.s S2.6: 0 undecided, 1 series, 2 parallel
         .equ    MF_AUTO,        0x10            @ cmp.s S2.5: AUTO class 0 undecided, 1 R, 2 C,

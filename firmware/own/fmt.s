@@ -22,14 +22,13 @@
 @     column: always marked), else 0 (design D6: the value is shown, with a marker);
 @ - D, Q (0x0800DD44) and theta (0x0800DFC4): the vendor formatter on the value, the S2.4 decimal
 @   rule, MF_MARK = 0 (no table entry, design S2.1).
-@ own_row_draw draws the row's text with the vendor's fn_0800d14c and then colours the row's seven
-@ glyph objects (0x200059A8 + 32 row + 4 i, i = 0..6; ui_41.s 1111, 274) with the image recolour
-@ style keys the vendor uses for its own highlight in the settings dialog (ui_43.s 1114-1170: key
-@ 0x47 = colour through fn_080265dc, rgb_to_565_0801d792(0xFD, 0xD0, 0x1B); key 0x48 = 0xFF on,
-@ 0 off through fn_080265f4, both found and replaced in place by fn_08027294) when MF_MARK is 1,
-@ and switches the colour off again (key 0x48 = 0) on the objects it coloured.
+@ own_row_draw draws the row's text with the vendor's fn_0800d14c and then, when MF_MARK is 1, puts
+@ an amber multiply cover over each of the row's seven glyph objects (0x200059A8 + 32 row + 4 i,
+@ i = 0..6; ui_41.s 1111, 274), so the digits are drawn amber with their shapes; an unmarked row
+@ hides the covers again (own_row_draw below: why the image recolour cannot do it).
 @
-@ RAM: only MF_MARK, MF_ROW0, MF_ROW1 (OWN_FUNC, own.inc). Never-brick: no flash, no save.
+@ RAM: only MF_MARK, MF_ROW0, MF_ROW1 (OWN_FUNC, own.inc); the covers are GUI objects on the GUI
+@ heap. Never-brick: no flash, no save.
 
 	.syntax unified
 	.arch armv7e-m
@@ -329,12 +328,48 @@ fmt_reduce:
 @ ----------------------------------------------------------------------------
 @ own_row_draw - replaces bl fn_0800d14c at 0x0800D380 (row 1) and 0x0800D4B8 (row 0):
 @   r0 = row 0 / 1, r1 = text. fn_0800d14c(row, text), then by MF_MARK (the formatter of this
-@   row ran just before, in fn_0800d3d8 / fn_0800d294): 1 - every non-zero glyph object of the
-@   row gets image recolour colour amber and opacity 0xFF, and MF_ROW<row> = its object 0;
-@   0 - when MF_ROW<row> is the row's object 0 now (coloured by us), opacity 0 on every glyph and
-@   MF_ROW<row> = 0. MF_MARK is cleared after it is read (a row without a formatter call, the
-@   vendor's default case, is then never marked by a stale value). AAPCS.
+@   row ran just before, in fn_0800d3d8 / fn_0800d294):
+@   1 - every non-zero glyph object of the row (0x200059A8 + 32 row + 4 i, i = 0..6) gets an
+@     amber multiply cover shown, except a glyph showing the blank image d_08036040 (index 13 of
+@     fn_0800d14c, the places after the text; every pixel alpha 0), whose cover is hidden: there
+@     the cover would multiply what lies under the glyph (the unit picture 0x2000021C, f30,
+@     2026-11-22); MF_ROW<row> = 1;
+@   0 - when MF_ROW<row> is 1, the cover of every glyph that has one is hidden; MF_ROW<row> = 0.
+@   MF_MARK is cleared after it is read (a row without a formatter call, the vendor's default
+@   case, is then never marked by a stale value). AAPCS.
+@ Why a cover and not the image recolour (keys 0x47 / 0x48, fn_08024f78): the digit images
+@   0..9 and "L" of fn_0800d14c are cf 10, 256-entry palettes whose every used entry has alpha
+@   0xFF and a black background (rodata_01.s descriptors 0x05E0700A; the palette alpha becomes
+@   the mask byte in fn_080214b4 / fn_080215f4), and the recolour of fn_0801f980 turns every
+@   pixel into (colour w + pixel (255 - w)) 0x8081 >> 23 per channel without touching the mask:
+@   at w = 0xFF the whole 28 x 47 rectangle is the colour (the meter's solid blocks, 2026-11-22),
+@   and no w keeps the black black (pixel 0 gives colour w / 255).
+@ The cover: a base object (fn_08023678, class 0x0804FCFC: bits 2-3 of its class byte +0x18 are
+@   2, so fn_08025494 gives 0 and fn_080234ac puts it in no key group) as the only child of the
+@   glyph (fn_0800ca2c creates the glyphs without children, fn_0800d14c gives them none):
+@   background colour amber (key 0x20, rgb_to_565_0801d792(0xFD, 0xD0, 0x1B), the vendor's
+@   highlight of ui_43.s 1146-1149), background opacity 0xFF (key 0x21), radius 0 (key 0x0B),
+@   border width 0 (key 0x32) and blend mode 3 (key 0x67, fn_08026342). Key 0x67 carries the
+@   layer flag 0x10 (d_08050c98), so fn_08025d34 sets layer type 1; fn_08028ed4 then draws the
+@   cover into a layer and blends it with the key 0x67 value, which fn_0801f980 / fn_0801f75c
+@   hand to fn_080283c8: mode 3 is fn_08014a9a, the multiply (src R dst R) >> 5, (src G dst G)
+@   >> 6, (src B dst B) >> 5. fn_0802575e draws the children of the glyph after its image and
+@   clipped to its rectangle, so every pixel of the drawn digit is multiplied by amber: black
+@   stays black, white 0xFFFF becomes 0xF662, the grey edges scale with it. The cover takes the
+@   glyph's image size (halfwords +0x2C / +0x2E, fn_08021c14) at every marked draw, and shows
+@   or hides through flag 1 (fn_08023050 / fn_08023558; fn_08028ed4 skips an object with it).
+@   A cover that cannot be allocated leaves that glyph white. The covers are deleted with their
+@   glyphs when the screen is deleted; none is ever addressed by a stored pointer.
 @ ----------------------------------------------------------------------------
+	.equ	OBJ_ATTR,	0x08		@ object word: its attribute block (children list +0,
+						@ count +4; fn_080233c4, fn_08023da4)
+	.equ	IMG_SRC,	0x24		@ image object word: the image descriptor (fn_08021c14)
+	.equ	IMG_W,		0x2C		@ image object halfwords: the image width, height
+	.equ	IMG_H,		0x2E		@ (fn_08021c14)
+	.equ	OBJ_HIDDEN,	0x01		@ object flag word +0x1C bit 0: not drawn (fn_08028ed4)
+	.equ	K_BLEND,	0x67		@ style key: blend mode (fn_08028ed4)
+	.equ	BLEND_MUL,	3		@ fn_080283c8 mode 3: fn_08014a9a multiply
+
 	.global	own_row_draw
 	.thumb_func
 	.type	own_row_draw, %function
@@ -349,53 +384,131 @@ own_row_draw:
 	ldr	r7, =GLYPHS
 	add	r7, r7, r4, lsl #5	@ r7 = the row's 8 object words
 	add	r5, r5, r4, lsl #2	@ r5 + MF_ROW0 = this row's word
-	ldr	r8, [r7]		@ r8 = object 0 now
 	cmp	r6, #0
-	beq	.Lrw_clear
+	bne	.Lrw_mark
+	ldr	r0, [r5, #MF_ROW0]
+	cmp	r0, #0
+	beq	.Lrw_ret		@ no cover of this row shown
+	movs	r4, #0
+.Lrw_off:
+	ldr	r0, [r7, r4, lsl #2]
+	bl	row_cover_hide
+	adds	r4, r4, #1
+	cmp	r4, #7
+	blo	.Lrw_off
+	movs	r0, #0
+	str	r0, [r5, #MF_ROW0]
+	b	.Lrw_ret
+.Lrw_mark:
 	movs	r2, #0x1B
 	movs	r1, #0xD0
 	movs	r0, #0xFD
 	bl	rgb_to_565_0801d792	@ the vendor's highlight colour (ui_43.s 1146-1149)
-	mov	r6, r0			@ r6 = RGB565
+	uxth	r6, r0			@ r6 = RGB565
 	movs	r4, #0
 .Lrw_on:
-	ldr	r0, [r7, r4, lsl #2]
-	cbz	r0, .Lrw_on_next
+	ldr	r8, [r7, r4, lsl #2]	@ r8 = glyph object
+	cmp	r8, #0
+	beq	.Lrw_on_next
+	ldr	r0, [r8, #IMG_SRC]
+	ldr	r1, =d_08036040
+	cmp	r0, r1
+	bne	.Lrw_cover
+	mov	r0, r8			@ the blank image (alpha 0): no cover, it would
+	bl	row_cover_hide		@ multiply what lies under the glyph (the unit picture)
+	b	.Lrw_on_next
+.Lrw_cover:
+	mov	r0, r8
+	bl	row_cover_of
+	mov	r9, r0			@ r9 = cover
+	cmp	r0, #0
+	bne	.Lrw_size
+	mov	r0, r8
+	bl	fn_08023678		@ a base object, child of the glyph
+	mov	r9, r0
+	cmp	r0, #0
+	beq	.Lrw_on_next		@ no memory: this glyph stays white
 	mov	r1, r6
 	movs	r2, #0
-	bl	fn_080265dc		@ key 0x47: the recolour colour
-	ldr	r0, [r7, r4, lsl #2]
+	bl	fn_0802657a		@ key 0x20: background colour amber
+	mov	r0, r9
 	movs	r1, #0xFF
 	movs	r2, #0
-	bl	fn_080265f4		@ key 0x48: recolour on
+	bl	fn_08026592		@ key 0x21: background opacity 0xFF
+	mov	r0, r9
+	movs	r1, #0
+	movs	r2, #0
+	bl	fn_08026680		@ key 0x0B: radius 0
+	mov	r0, r9
+	movs	r1, #0
+	movs	r2, #0
+	bl	fn_080265be		@ key 0x32: border width 0
+	mov	r0, r9
+	movs	r1, #K_BLEND
+	movs	r2, #BLEND_MUL
+	movs	r3, #0
+	bl	fn_08026342		@ key 0x67: blend mode multiply (layer type 1)
+.Lrw_size:
+	mov	r0, r9
+	ldrh	r1, [r8, #IMG_W]
+	ldrh	r2, [r8, #IMG_H]
+	movs	r3, #0
+	bl	fn_080263a8		@ width, height = the glyph image's (set only when changed)
+	mov	r0, r9
+	movs	r1, #OBJ_HIDDEN
+	bl	all_flag_bits_set
+	cbz	r0, .Lrw_on_next	@ shown already
+	mov	r0, r9
+	movs	r1, #OBJ_HIDDEN
+	bl	fn_08023558		@ show it
 .Lrw_on_next:
 	adds	r4, r4, #1
 	cmp	r4, #7
 	blo	.Lrw_on
-	str	r8, [r5, #MF_ROW0]
-	b	.Lrw_ret
-.Lrw_clear:
-	ldr	r0, [r5, #MF_ROW0]
-	cmp	r0, #0
-	beq	.Lrw_ret		@ nothing of ours on this row
-	cmp	r0, r8
-	bne	.Lrw_forget		@ another object now (the screen was built again)
-	movs	r4, #0
-.Lrw_off:
-	ldr	r0, [r7, r4, lsl #2]
-	cbz	r0, .Lrw_off_next
-	movs	r1, #0
-	movs	r2, #0
-	bl	fn_080265f4		@ key 0x48: recolour off
-.Lrw_off_next:
-	adds	r4, r4, #1
-	cmp	r4, #7
-	blo	.Lrw_off
-.Lrw_forget:
-	movs	r0, #0
+	movs	r0, #1
 	str	r0, [r5, #MF_ROW0]
 .Lrw_ret:
 	pop	{r3, r4, r5, r6, r7, r8, r9, pc}
+
+@ ----------------------------------------------------------------------------
+@ row_cover_of - r0 = glyph object or 0; returns r0 = its first child (the cover of
+@   own_row_draw) or 0 when it has none. Changes r1.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	row_cover_of, %function
+row_cover_of:
+	cbz	r0, .Lco_ret
+	ldr	r0, [r0, #OBJ_ATTR]	@ attribute block (0: never had a child)
+	cbz	r0, .Lco_ret
+	ldr	r1, [r0, #4]		@ child count
+	cbz	r1, .Lco_none
+	ldr	r0, [r0]		@ children list
+	ldr	r0, [r0]		@ child 0
+	bx	lr
+.Lco_none:
+	movs	r0, #0
+.Lco_ret:
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ row_cover_hide - r0 = glyph object or 0: sets flag 1 (fn_08023050) on its cover when it has one
+@   that is shown. AAPCS.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	row_cover_hide, %function
+row_cover_hide:
+	push	{r4, lr}
+	bl	row_cover_of
+	cbz	r0, .Lch_ret
+	mov	r4, r0
+	movs	r1, #OBJ_HIDDEN
+	bl	all_flag_bits_set
+	cbnz	r0, .Lch_ret		@ hidden already
+	mov	r0, r4
+	movs	r1, #OBJ_HIDDEN
+	bl	fn_08023050
+.Lch_ret:
+	pop	{r4, pc}
 
 	.ltorg
 

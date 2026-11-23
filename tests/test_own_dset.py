@@ -937,11 +937,11 @@ def d04_screen_round_trips_heap():
         u = heap_walk(dict(ram=bytes(r.m.uc.mem_read(VRAM_LO, VRAM_N))))
         return len(u), sum(s for a, s in u)
     rig = base()
-    # one warm-up round trip via 3 and via 2 first: the rebuilt measure screen's row-0 glyphs can
-    # carry the image recolour style entries of fmt.s own_row_draw (keys 0x47 / 0x48, 7 entries
-    # of 20 -> 32 bytes, MEASUREMENT_FIX_DESIGN.md S2.1), which the glyphs of the first build never
-    # had; they belong to live objects and are freed with them, and from then on every round trip
-    # gives the same heap (measured: 7696 bytes before, 7780 after the first and the second trip)
+    # one warm-up round trip via 3 and via 2 first: the glyphs of a rebuilt measure screen get the
+    # amber covers of fmt.s own_row_draw (one child object per glyph, made at the glyph's first
+    # marked draw, MEASUREMENT_FIX_DESIGN.md S2.1) at other draws than the glyphs of the first build;
+    # they belong to live objects and are freed with them, and from then on every round trip gives
+    # the same heap
     for t in (3, 1, 2, 1):
         st, s = rig.ask('SCREEN', bytes([t]))
         check(st == S_OK and rig.rd(V_SCREEN) == t, 'warm-up via %d: status %d' % (t, st))
