@@ -13,7 +13,9 @@
 @ - S1.3 a complex window estimate: Zbar = K * sum(V u) / sum(I u) with u = conj(X_ref) / |X_ref|
 @   of a reference channel chosen once per window, the median-of-3 start, the outlier and
 @   part-change rules for resolved acquisitions, no distance test for noise-limited ones, a window
-@   that closes at the first accepted acquisition at least T_win after its first one;
+@   that closes at the first accepted acquisition at least T_win after its first one; a class
+@   change is a part change only when decisive (revision 9: S/N 24 to leave a noise-limited
+@   window, below 4 to leave a resolved one, three in a row; meas_win);
 @ - S1.4 an acquisition handshake by a re-arm generation word (MO_G, counted by own_dma_rearm in
 @   fix.s) and a settle time after every change of a setting, of the codes or a restart;
 @ - S1.5 saturation (a sample at code 0 or 4095) steps the range, three overload acquisitions in
@@ -27,8 +29,10 @@
 @   the raw value for the calibration store on screen 3;
 @ - S1.8 theta not folded, the derived values from the complex Zbar, D and Q without NaN, the
 @   no-reading set after 2 s without an in-band acquisition, or after 2 s of hunting (two windows
-@   cut by our own range steps since the last window close: from then on in-band acquisitions
-@   between the steps no longer clear the count 0x2000120C; meas_acq, MO_FL bits 5..7).
+@   cut since the last window close, by our own range steps or, revision 9, by the window rules'
+@   resets: part change by class or by outliers, three start-test drops; meas_cut: from then on
+@   in-band acquisitions between the cuts no longer clear the count 0x2000120C; meas_acq,
+@   MO_FL bits 5..7).
 @ While hold (0x200011A4) is set the measurement runs on and windows close, but nothing is
 @ published (the display freeze of design decision D1).
 @ Stage 2 (revision 6): S2.6 series / parallel with hysteresis (meas_serpar), S2.7 a hold that
@@ -105,8 +109,9 @@
 @                   hunting test of the no-reading path (S1.8 "hunting longer than 2 s"): bit 5
 @                   an acquisition went to the window (meas_win) since our own last range step,
 @                   bit 6 one own range step came after such an acquisition (a window cut by
-@                   ranging), bit 7 a second one did (hunting: in-band acquisitions no longer
-@                   clear 0x2000120C); kept by meas_reset and by the no-reading set (meas_pub_nr:
+@                   ranging) or one window rule reset the window (revision 9), bit 7 a second
+@                   cut came (hunting: in-band acquisitions no longer clear 0x2000120C; both
+@                   set by meas_cut); kept by meas_reset and by the no-reading set (meas_pub_nr:
 @                   hunting that goes on gives the next set 2 s later), cleared by every window
 @                   close (meas_publish, also under hold), the overload set (meas_pub_ovl), every
 @                   change meas_watch finds and every acquisition while OCAL_LOCK holds the codes
@@ -267,6 +272,8 @@
 	.equ	K_SP1K,		40		@ 1000: parallel -> series below it (S2.6)
 	.equ	K_SP10K,	44		@ 10000: series -> parallel above it
 	.equ	K_SPMID,	48		@ 3162.28: the undecided start
+	.equ	K_T24,		52		@ 64 * 24^2: decisively resolved (S1.3 revision 9)
+	.equ	K_T4,		56		@ 64 * 4^2: decisively noise-limited below it
 
 @ ============================================================================
 @ own_measure - one step of the measurement, called once per main-loop pass instead of
@@ -800,14 +807,9 @@ meas_acq:
 	bl	meas_rhscale		@ the p-p history to the new codes (S1.6 revision 8)
 	ldr	r1, [r4, #MO_FL]
 	tst	r1, #FL_USED
-	beq	.Lac_step		@ no acquisition used since the last step: a walk
-	tst	r1, #FL_CUT
-	ite	ne
-	orrne	r1, r1, #FL_HUNT	@ the second window cut by a step: hunting
-	orreq	r1, r1, #FL_CUT		@ the first
+	beq	.Lac_step		@ no acquisition used since the last step: a walk (bit 5 is clear)
+	bl	meas_cut		@ the step cut a window: bit 6, the second one bit 7; bit 5 cleared
 .Lac_step:
-	bic	r1, r1, #FL_USED
-	str	r1, [r4, #MO_FL]
 	movs	r0, #0
 	str	r0, [r4, #MO_OVL]
 	movs	r0, #6
@@ -1280,8 +1282,14 @@ meas_bin:
 @   and 8 to stay (window class resolved), and Zm is defined.
 @   Zm = K V conj(I) / |I|^2 when |I|^2 > 0 and the result is finite, else 0 and not defined;
 @   0x20005090 = |Zm| and 0x20005094 = its angle in degrees (only when defined).
-@   An empty window takes the acquisition's class. Otherwise an acquisition of the other class
-@   is not used; the third in a row is a part change (class set, window reset).
+@   An empty window takes the acquisition's class. In a window that is not empty only a decisive
+@   acquisition of the other class counts (S1.3 revision 9): in a noise-limited window one with
+@   S/N at least 24 on both channels and Zm defined, in a resolved window one with S/N below 4 on
+@   a channel or Zm not defined (twice / half the thresholds 12 / 8); it is not used, and the
+@   third in a row is a part change (class set, window reset, a cut of the hunting test:
+@   meas_cut). Every other acquisition is used in the window's class, also one between the
+@   thresholds (a channel whose single-acquisition S/N lies around 8..12, the meter's open at
+@   100 kHz 0.3 V, 2026-11-23: S/N 6.2..9.4, no longer cuts every window by class changes).
 @   Then by phase: 0 the acquisition is held in the next start slot (the third completes the
 @   start, meas_start); 1 the start test (meas_test); 2 added (noise-limited) or the outlier
 @   rule (meas_outlier). Changes r0..r3, r12, s0..s31.
@@ -1289,7 +1297,7 @@ meas_bin:
 	.thumb_func
 	.type	meas_win, %function
 meas_win:
-	push	{r6, r7, r8, lr}
+	push	{r6, r7, r8, r9, r10, lr}
 	ldr	r8, =meas_k
 	ldrb	r0, [r5, #VB_C8]
 	ldr	r1, =d_0802aeec		@ range resistors 100, 1k, 10k, 100k (words)
@@ -1325,6 +1333,25 @@ meas_win:
 	vldr	s5, [r7, #8]
 	vldr	s6, [r7, #12]
 	bl	meas_snr		@ I
+	@ the decisive test of S1.3 revision 9: r10 = 1 when both channels reach S/N 24 (in a
+	@ noise-limited window) or 4 (in a resolved one)
+	mov	r9, r6			@ r9 = the class at the window's threshold
+	ldr	r0, [r4, #MO_CLS]
+	vldr	s2, [r8, #K_T24]	@ 64 * 24^2: decisively resolved
+	cbz	r0, .Lwn_dthr
+	vldr	s2, [r8, #K_T4]		@ 64 * 4^2: not decisively noise-limited
+.Lwn_dthr:
+	movs	r6, #1
+	vldr	s4, [r4, #MO_SIG]
+	vldr	s5, [r7, #0]
+	vldr	s6, [r7, #4]
+	bl	meas_snr		@ V
+	vldr	s4, [r4, #MO_SIG + 4]
+	vldr	s5, [r7, #8]
+	vldr	s6, [r7, #12]
+	bl	meas_snr		@ I
+	mov	r10, r6			@ r10 = 1: both at the decisive threshold
+	mov	r6, r9
 	@ Zm
 	vldr	s0, [r7, #0]		@ Vr
 	vldr	s1, [r7, #4]		@ Vi
@@ -1384,6 +1411,7 @@ meas_win:
 	movs	r0, #0
 .Lwn_fl:
 	and	r6, r6, r0		@ resolved needs Zm
+	and	r10, r10, r0		@ so does decisively resolved
 	ldr	r1, [r4, #MO_FL]
 	bic	r1, r1, #3
 	orr	r1, r1, r0
@@ -1400,15 +1428,16 @@ meas_win:
 	b	.Lwn_phase
 .Lwn_cls:
 	ldr	r0, [r4, #MO_CLS]
-	cmp	r0, r6
-	beq	.Lwn_same
+	cmp	r0, r10			@ class 0 and r10 0, or class 1 and r10 1: not decisive
+	beq	.Lwn_same		@ used in the window's class
 	ldr	r0, [r4, #MO_CLSN]
 	adds	r0, r0, #1
 	str	r0, [r4, #MO_CLSN]
 	cmp	r0, #3
-	blo	.Lwn_ret		@ another class: not used
-	str	r6, [r4, #MO_CLS]	@ held 3 times: a part change
+	blo	.Lwn_ret		@ decisively the other class: not used
+	str	r10, [r4, #MO_CLS]	@ held 3 times: a part change, the other class
 	bl	meas_reset
+	bl	meas_cut		@ a window cut before its close (S1.8)
 	b	.Lwn_ret
 .Lwn_same:
 	movs	r0, #0
@@ -1444,7 +1473,29 @@ meas_win:
 .Lwn_res:
 	bl	meas_outlier
 .Lwn_ret:
-	pop	{r6, r7, r8, pc}
+	pop	{r6, r7, r8, r9, r10, pc}
+
+@ ----------------------------------------------------------------------------
+@ meas_cut - a window cut before its close (S1.8 hunting test; revision 9 adds the window
+@   rules): MO_FL bit 7 (hunting: in-band acquisitions no longer clear 0x2000120C) when bit 6
+@   (one cut since the last close) is already set, else bit 6; bit 5 cleared (a range step
+@   right after it is no second cut of the same window). Called by meas_acq for an own range
+@   step after a used acquisition, and after the meas_reset of each window rule: the part
+@   change by class (meas_win), three start-test drops in a row (meas_test), the part change by
+@   outliers (meas_outlier). So windows that keep restarting without a close give the
+@   no-reading set 2 s after the second cut, whatever cuts them. Changes r1.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_cut, %function
+meas_cut:
+	ldr	r1, [r4, #MO_FL]
+	tst	r1, #FL_CUT
+	ite	ne
+	orrne	r1, r1, #FL_HUNT	@ the second cut: hunting
+	orreq	r1, r1, #FL_CUT		@ the first
+	bic	r1, r1, #FL_USED
+	str	r1, [r4, #MO_FL]
+	bx	lr
 
 @ ----------------------------------------------------------------------------
 @ meas_snr - one channel of the class test: s2 = 64 T^2, s3 = 1/12, s4 = sigma^2, s5 / s6 =
@@ -1543,8 +1594,8 @@ meas_start:
 @ meas_test - the start test of the resolved class for the slot r0: it passes when |Zm| is at
 @   least 1.1e8 (the vendor's open exemption) or |Zm - Zref| <= 0.5 |Zref| (the 50 % rule of
 @   fn_08008ea8, complex); a pass is added (the start ends at 3 accepted: phase 2), a drop
-@   counts, and the third drop in a row resets the window (a new start, Zref and reference).
-@   Returns r0 = 1 when the window was reset or closed (the caller stops), else 0.
+@   counts, and the third drop in a row resets the window (a new start, Zref and reference; a
+@   cut of the hunting test, meas_cut). Returns r0 = 1 when the window was reset or closed (the caller stops), else 0.
 @   Changes r1..r3, r12, s0..s31.
 @ ----------------------------------------------------------------------------
 	.thumb_func
@@ -1573,6 +1624,7 @@ meas_test:
 	cmp	r0, #3
 	blo	.Lts_open
 	bl	meas_reset		@ 3 drops in a row: the start begins again
+	bl	meas_cut		@ a window cut before its close (S1.8)
 	movs	r0, #1
 	pop	{r6, pc}
 .Lts_pass:
@@ -1599,8 +1651,8 @@ meas_test:
 @ meas_outlier - phase 2 of the resolved class for MO_X (S1.3 "Resolved acquisitions"): with
 @   L^2 = max(25 s^2, 1e-4 |mu|^2), an acquisition with |Zm| >= 1.1e8 or |Zm - mu|^2 <= L^2 is
 @   added; else it is an outlier, held in slot MO_ST. The third held outlier: when all three lie
-@   within L of their component-wise median it is a part change (window reset, the three are the
-@   new start: meas_start); else the oldest is dropped (slots 1, 2 move to 0, 1).
+@   within L of their component-wise median it is a part change (window reset and a cut of the
+@   hunting test, meas_cut; the three are the new start: meas_start); else the oldest is dropped (slots 1, 2 move to 0, 1).
 @   Changes r0..r3, r12, s0..s31.
 @ ----------------------------------------------------------------------------
 	.thumb_func
@@ -1652,6 +1704,7 @@ meas_outlier:
 	blo	.Lou_chk
 	add	sp, sp, #8
 	bl	meas_reset		@ a part change: the three start the new window
+	bl	meas_cut		@ a window cut before its close (S1.8)
 	movs	r0, #3
 	str	r0, [r4, #MO_ST]
 	bl	meas_start
@@ -3077,6 +3130,8 @@ meas_k:
 	.word	0x447A0000		@ 1000 (S2.6, D4)
 	.word	0x461C4000		@ 10000
 	.word	0x4545A471		@ 3162.2776 = sqrt(1000 * 10000)
+	.word	0x47100000		@ 36864 = 64 * 24^2: S/N 24, a noise-limited window's part change
+	.word	0x44800000		@ 1024 = 64 * 4^2: S/N 4, a resolved window's part change
 
 @ meas_ck - floats of stage 4 (offsets CK_*, defined at the top)
 meas_ck:

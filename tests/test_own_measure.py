@@ -43,8 +43,8 @@ Probes (hooks of this file, Probe below), each record with the emulated time:
     0x200163A7 before main, RAM only, before own_load.
 
 Expected values come from the specification text, the DUT model (z) or the captured buffers (float64
-recomputation), each named per check. RUN LIMIT: the cases are 24 runs of this file at most (one per
-case prefix); the cases themselves start at most a few rigs each.
+recomputation), each named per check. RUN LIMIT: the cases are 26 runs of this file at most (one per
+case prefix: m01..m14, m17, m18a..m18e, m19..m21, m22a, m22b, p01); the cases themselves start at most a few rigs each.
 """
 
 import cmath
@@ -1995,6 +1995,208 @@ def m21_level_steps():
     check(rig.rd8(V_C6) == 7 and not ch and len(pubs) >= 3 and not any(is_set(q) for q in pubs),
           'm21 forced: c6 %d, changes %r, %d windows' % (rig.rd8(V_C6), ch[:6], len(pubs)))
     rig.watch.check(what='m21 forced')
+    return True
+
+
+# ---------------------------------------------------------------- m22 marginal I channel and class cuts (S1.3)
+
+def snr_of(codes, k=16):
+    """The class test's S/N of one channel (meas.s meas_win / meas_snr, S1.2): |X| / (8 sqrt(max(sigma^2,
+    1/12))) of bin k in float64; the firmware calls a channel resolved at T when |X|^2 >= 64 T^2 max(sigma^2, 1/12)."""
+    X, s2 = dft64(codes, k)
+    return abs(X) / (8.0 * math.sqrt(max(s2, 1.0 / 12)))
+
+
+def class_cuts(rig):
+    """Records in rig.cls_cuts the time of every store to MO_CLS while the window is not empty (MO_N, MO_ST or MO_PH
+    not 0): the part change by class of meas_win (the store before its meas_reset); the store into an empty window
+    is not one."""
+    rig.cls_cuts = []
+
+    def hook(uc, acc, addr, size, value, user):
+        if mo(rig, 'N') | mo(rig, 'ST') | mo(rig, 'PH'):
+            rig.cls_cuts.append(rig.m.now())
+    rig.m.uc.hook_add(UC_HOOK_MEM_WRITE, hook, begin=OWN_MEAS + MO['CLS'], end=OWN_MEAS + MO['CLS'] + 3)
+
+
+class OpenTone(OpenGauss):
+    """Open terminals at 100 kHz, 0.3 V as the meter showed them (2026-11-23, image 3ba15cc, calibration point 13,
+    the main session's SWD reads of the stalled measure screen: c5 1, c6 2, c8 3 constant; ADC2 p-p 991..2279 in six
+    reads of 0x200011D6, ADC1 p-p about 1900; four ADC2 buffers: bin-16 magnitude 15146..27529, residual sigma
+    306..468 counts, the largest other bins 22, 23, 38, 45, S/N of the class test 6.2, 9.4, 7.4, 8.9). V the generator
+    (DutSource). I = 2048 + s (a Re(gn exp(j theta)) + sum of four tones at the bins 22, 23, 38, 45 + Gaussian noise of
+    RMS g), gn the generator normalised to 1 (the stray-capacitance current, coherent: bin 16), s = G[c6] / G[2] *
+    R[c8] / R[3]; for every acquisition (path.idx holds item 0) a new amplitude a uniform in [a_lo, a_hi] and new tone
+    amplitudes uniform in [t_lo, t_hi] with new phases (random.Random(seed)); clipped to 0..4095. A model fitted to
+    those reads (one interference level per acquisition), not the meter's noise statistics, which four buffers do
+    not give."""
+
+    BINS = (22, 23, 38, 45)
+
+    def __init__(self, a_lo, a_hi, t_lo, t_hi, g, seed, theta=80.0):
+        super().__init__(g)
+        import random
+        self.rnd = random.Random(seed)
+        self.a_lo, self.a_hi, self.t_lo, self.t_hi, self.rot = a_lo, a_hi, t_lo, t_hi, cmath.exp(1j * math.radians(theta))
+        self.new()
+
+    def new(self):
+        self.a = self.rnd.uniform(self.a_lo, self.a_hi)
+        self.tones = [(b * 6250.0, self.rnd.uniform(self.t_lo, self.t_hi), self.rnd.uniform(0.0, 2 * math.pi))
+                      for b in self.BINS]
+
+    def codes(self, c6, c8, gn, times):
+        s = GAIN[c6] / GAIN[2] * RANGE_OHM[c8] / RANGE_OHM[3]
+        out = []
+        for x, t in zip(gn, times):
+            v = self.a * (x * self.rot).real + self.sigma23 * self.gauss()
+            for f, a, p in self.tones:
+                v += a * math.cos(2 * math.pi * f * t + p)
+            out.append(max(0, min(4095, int(round(2048 + s * v)))))
+        return out
+
+    def acq(self, c6=2, c8=3):
+        """One acquisition's 128 ADC2 codes as the firmware samples 100 kHz (128 samples over 16 periods, 1.25 us
+        apart), for the input checks."""
+        self.new()
+        times = [n * 1.25e-6 for n in range(128)]
+        return self.codes(c6, c8, [cmath.exp(2j * math.pi * 1e5 * t) for t in times], times)
+
+    def samples(self, path, adc, channel, times):
+        if adc != 2:
+            return DutSource.samples(self, path, adc, channel, times)
+        if path.idx is not None and 0 in path.idx:
+            self.new()
+        g = path.generator(times)
+        amp = abs(g[0]) if g and abs(g[0]) > 0 else 0.0
+        if amp == 0.0:
+            return 2048
+        c5, c6, c8 = path.front_end()
+        return self.codes(c6, c8, [x / amp for x in g], times)
+
+
+def runs3(flags):
+    """The number of places where three consecutive items are true (the count of 3 of meas_win's class change)."""
+    return sum(1 for a, b, c in zip(flags, flags[1:], flags[2:]) if a and b and c)
+
+
+@case
+def m22a_marginal_open_100k():
+    """The meter's stall at calibration point 13 (OpenTone, 100 kHz, 0.3 V, speed 0, range AUTO): the I channel's
+    single-acquisition S/N lies on both sides of the class thresholds 12 / 8, so meas_win's rule "three in a row of
+    the other class is a part change" cut every window before T_win (3ba15cc: no window, no no-reading set). Input
+    checked first on 2000 acquisitions of a second source of the same model at c6 2, c8 3, by the firmware's
+    criteria: p-p at least 900 and at most 3600 (no saturation, no step down), at least 0.1 of them below 1500 (the
+    step-up hold of S1.6 revision 8 in use, as on the meter); S/N (snr_of) at least 12 in at least 0.1 and below 8
+    in at least 0.1 of them, three in a row at least 12 at least 10 times (the old rule cuts a noise-limited window
+    several times per T_win); and never three in a row at least 24 or below 4 (one physical state: no decisive class
+    change, S1.3 revision 9). Expected from 3 s to 8 s: codes unchanged (c6 2, c8 3); at least 4 normal windows, no
+    no-reading or overload set, no output word NaN; no part change by class."""
+    p = OpenTone(240.0, 420.0, 60.0, 300.0, 40.0, seed=91)
+    p.s = 987654321
+    acqs = [p.acq() for _ in range(2000)]
+    pp = [pp_of(c) for c in acqs]
+    t = [snr_of(c) for c in acqs]
+    hi, lo = sum(1 for x in t if x >= 12) / 2000.0, sum(1 for x in t if x < 8) / 2000.0
+    r12 = runs3([x >= 12 for x in t])
+    dec = runs3([x >= 24 for x in t]) + runs3([x < 4 for x in t])
+    below = sum(1 for x in pp if x < 1500) / 2000.0
+    check(min(pp) >= 900 and max(pp) <= 3600 and below >= 0.1 and hi >= 0.1 and lo >= 0.1 and r12 >= 10 and dec == 0,
+          'm22a input: p-p %d..%d (below 1500 %.3f), S/N >= 12 %.3f, < 8 %.3f, three in a row >= 12 %d, decisive runs %d'
+          % (min(pp), max(pp), below, hi, lo, r12, dec))
+    blk = block_with(**{'0x%08x' % V_FREQ: 100000, '0x%08x' % V_SPEED: 0, '0x%08x' % V_LEVEL: 0x3E99999A})
+    rig = own_rig(OpenTone(240.0, 420.0, 60.0, 300.0, 40.0, seed=5), block=blk)
+    log_codes(rig)
+    class_cuts(rig)
+    rig.run(8.0 - rig.m.now())
+    codes = (rig.rd8(V_C5), rig.rd8(V_C6), rig.rd8(V_C8))
+    late = [x for x in rig.code_log if x[0] > 3.0]
+    pubs = [q for q in rig.probe.pubs if q['t'] > 3.0]
+    sets = [q for q in pubs if is_set(q)]
+    cuts = [x for x in rig.cls_cuts if x > 3.0]
+    dt = rig.probe.acq_interval()
+    NOTES.append('m22a: input p-p %d..%d (below 1500 %.2f), S/N >= 12 %.2f, < 8 %.2f, %d runs of three >= 12 in 2000; '
+                 'codes %r, %d code changes, %d publishes (%d sets), %d part changes by class after 3 s, median '
+                 'acquisition interval %.6f s' % (min(pp), max(pp), below, hi, lo, r12, codes, len(late), len(pubs),
+                                                   len(sets), len(cuts), dt))
+    check(not late and codes[1:] == (2, 3), 'm22a: codes %r, changes after 3 s %r' % (codes, late[:6]))
+    check(len(pubs) >= 4 and not sets and not cuts, 'm22a: %d publishes after 3 s, %d sets, %d part changes by class'
+          % (len(pubs), len(sets), len(cuts)))
+    for q in pubs:
+        no_nan(q, 'm22a')
+    rig.watch.check(what='m22a')
+    return True
+
+
+class AltOpen(OpenGauss):
+    """A part that comes and goes every `half` seconds of emulated time (a contact that bounces): V the generator; I
+    = 2048 + s a_on Re(gn exp(j 80 deg)) + Gaussian noise of RMS g_on while on, Gaussian noise of RMS g_off alone
+    while off (s as OpenTone), clipped to 0..4095."""
+
+    def __init__(self, a_on, g_on, g_off, half):
+        super().__init__(g_on)
+        self.a_on, self.g_on, self.g_off, self.half, self.rot = a_on, g_on, g_off, half, cmath.exp(1j * math.radians(80))
+
+    def codes(self, on, c6, c8, gn):
+        s = GAIN[c6] / GAIN[2] * RANGE_OHM[c8] / RANGE_OHM[3]
+        a, g = (self.a_on, self.g_on) if on else (0.0, self.g_off)
+        return [max(0, min(4095, int(round(2048 + s * (a * (x * self.rot).real + g * self.gauss()))))) for x in gn]
+
+    def acq(self, on):
+        times = [n * 1.25e-6 for n in range(128)]
+        return self.codes(on, 2, 3, [cmath.exp(2j * math.pi * 1e5 * t) for t in times])
+
+    def samples(self, path, adc, channel, times):
+        if adc != 2:
+            return DutSource.samples(self, path, adc, channel, times)
+        g = path.generator(times)
+        amp = abs(g[0]) if g and abs(g[0]) > 0 else 0.0
+        if amp == 0.0:
+            return 2048
+        c5, c6, c8 = path.front_end()
+        on = int(times[0] / self.half) % 2 == 0
+        return self.codes(on, c6, c8, [x / amp for x in g])
+
+
+@case
+def m22b_class_cuts_no_reading():
+    """No silent endless restart (S1.3 / S1.8 revision 9): a window cut by a part change by class counts as a cut of
+    the hunting test like a window cut by an own range step, so windows that never close give the no-reading set.
+    AltOpen at 100 kHz, 0.3 V, speed 0: I on (a 900, noise 60) and off (noise 400) every 0.25 s, so every window
+    (T_win 1 s) is cut by a decisive class change. Input checked first (300 acquisitions of each state at c6 2, c8 3):
+    on: S/N at least 24 and p-p 1500..3600 in every one; off: S/N below 4 in at least 0.95, p-p at most 3600 and no
+    saturation in every one. Expected: at least 4 part changes by class after 3 s (the input does cut); from 3 s to
+    8 s no normal window, at least 2 no-reading sets, the first by 4.0 s, then one every 2.0..2.5 s (the 2 s of
+    0x2000120C)."""
+    p = AltOpen(900.0, 60.0, 400.0, 0.25)
+    p.s = 987654321
+    on = [p.acq(True) for _ in range(300)]
+    off = [p.acq(False) for _ in range(300)]
+    t_on = min(snr_of(c) for c in on)
+    f_off = sum(1 for c in off if snr_of(c) < 4) / 300.0
+    pp_on = [pp_of(c) for c in on]
+    pp_off = [pp_of(c) for c in off]
+    check(t_on >= 24 and min(pp_on) >= 1500 and max(pp_on) <= 3600 and f_off >= 0.95 and max(pp_off) <= 3600,
+          'm22b input: on S/N >= %.1f, p-p %d..%d; off S/N < 4 in %.3f, p-p max %d' % (t_on, min(pp_on), max(pp_on), f_off,
+                                                                                     max(pp_off)))
+    blk = block_with(**{'0x%08x' % V_FREQ: 100000, '0x%08x' % V_SPEED: 0, '0x%08x' % V_LEVEL: 0x3E99999A})
+    rig = own_rig(AltOpen(900.0, 60.0, 400.0, 0.25), block=blk)
+    log_codes(rig)
+    class_cuts(rig)
+    rig.run(8.0 - rig.m.now())
+    pubs = [q for q in rig.probe.pubs if q['t'] > 3.0]
+    sets = [q['t'] for q in rig.probe.pubs if is_set(q)]
+    normal = [q for q in pubs if not is_set(q)]
+    cuts = [x for x in rig.cls_cuts if x > 3.0]
+    gaps = [b - a for a, b in zip(sets, sets[1:])]
+    NOTES.append('m22b: input on S/N >= %.1f, off S/N < 4 in %.3f; %d part changes by class after 3 s, sets at %r, '
+                 '%d normal windows after 3 s, codes %r' % (t_on, f_off, len(cuts), [round(x, 2) for x in sets],
+                                                           len(normal), (rig.rd8(V_C5), rig.rd8(V_C6), rig.rd8(V_C8))))
+    check(len(cuts) >= 4, 'm22b: %d part changes by class after 3 s (the input does not cut)' % len(cuts))
+    check(not normal, 'm22b: %d normal windows after 3 s' % len(normal))
+    check(len([x for x in sets if x > 3.0]) >= 2 and sets[0] <= 4.0 and all(2.0 <= g <= 2.5 for g in gaps),
+          'm22b: no-reading sets at %r' % [round(x, 3) for x in sets])
+    rig.watch.check(what='m22b')
     return True
 
 
