@@ -17,11 +17,14 @@ below the stack in use, as test_own_measure m03 places its array); the cases tha
 
 Expected values: every formatted text below is derived by hand from the vendor format thresholds of the
 ui_42.s headers (0x0800E028, 0x0800DB24, 0x0800DE2C, 0x0800DD44) and the rules of fmt.s: OL above the
-measurement range, one decimal less above 19,999 counts, a '-' for a negative L or X, the text of 0 for
-a negative R or C (S2.2 revision 13); the accuracy table
+measurement range, one decimal less above 19,999 counts, a '-' for a negative X; a negative value by its
+quantity (MEASUREMENT_FIX_DESIGN revision 14 rule 1): series R, parallel C, series L, |Z| and D the text
+of 0, parallel R, series C, parallel L and Q OL, series / parallel by the word 0x200011EC (V_SERPAR, set
+by every case that calls the R / C / L wrappers); OL for every text at 60 / 100 / 120 Hz with |Z|
+0x200050C4 above 1e7 (rule 2, V_Z set by those cases); the accuracy table
 of fmt.s fmt_spec (design S2.1); the AUTO thresholds 10 / 11 / 9 degrees (D3); series / parallel at
 1 k / 10 k / 3162.28 ohm (D4); the compare rules of the cmp.s header. RUN LIMIT: one run of this file
-per case prefix, 10 cases.
+per case prefix, 12 cases.
 """
 
 import os
@@ -53,6 +56,7 @@ V_NOMINAL, V_TOLERANCE, V_DISP_A8, V_KEY_BUSY = 0x20001184, 0x20001188, 0x200011
 V_SIGN_MODE, V_PASS, V_FAIL, V_DEV = 0x20001198, 0x200050F0, 0x200050F4, 0x200050D8
 V_R, V_Z, V_TH, V_CS, V_L, V_CMPV, V_D, V_Q, V_RS = (0x200050B8, 0x200050C4, 0x200050CC, 0x200050A8, 0x200050C0,
                                                     0x200050DC, 0x200050D4, 0x200050D0, 0x200050A0)
+V_C, V_X, V_SERPAR, V_NO_READ_CNT = 0x200050BC, 0x200050C8, 0x200011EC, 0x2000120C
 OBJS = 0x200001D4                     # +0 ring index, +1 latch, +0x14 AUTO picture, +0x38 / +0x3C counters,
                                       # +0x40 result text, +0x44 deviation text
 GLYPHS = 0x200059A8
@@ -152,11 +156,15 @@ def f20_ol_and_marker():
     """m20 (S2.1): values just inside and just outside every limit of the measurement range (OL) and of
     the accuracy table (marker) per frequency column; |Z| goes through the R row (own_fmt_r), X through
     own_fmt_x with the R limits (S2.2 revision 13: a negative R is 0, so the OL of a negative magnitude
-    above the range is X's; a negative R beyond it is 0 and marked); 60 Hz has no column (always
-    marked); NaN / Inf are OL. own_row_draw colours the seven glyphs of the row
+    above the range is X's; a negative series R beyond it is 0 and marked); |Z| through own_fmt_z (the R
+    row); 60 Hz has no column (always marked); NaN / Inf are OL. Inputs written first: |Z| 0x200050C4 =
+    1000 ohm (so rule 2 of revision 14, |Z| above 1e7 at 60 / 100 / 120 Hz, acts on no row here; f31 tests
+    it) and 0x200011EC = 0 (series: a negative R is 0). own_row_draw colours the seven glyphs of the row
     with key 0x47 / 0x48 when marked and switches it off again (fn_080265dc / fn_080265f4)."""
     rig = base_rig()
     check(mf(rig, 'TMODE') == 0, 'tolerance mode %d after the start' % mf(rig, 'TMODE'))
+    wf(rig, V_Z, 1000.0)
+    rig.wr(V_SERPAR, 0)
     # (formatter, value, frequency, OL expected, marker expected)
     rows = [
         ('own_fmt_r', 1.0e7, 1000, False, False), ('own_fmt_r', 1.0001e7, 1000, True, False),
@@ -166,6 +174,7 @@ def f20_ol_and_marker():
         ('own_fmt_r', 1.0e6, 100000, False, False), ('own_fmt_r', 1.0001e6, 100000, False, True),
         ('own_fmt_r', 1000.0, 60, False, True), ('own_fmt_x', -1.0001e7, 1000, True, False),
         ('own_fmt_x', -1.0e7, 1000, False, False), ('own_fmt_r', -1.0001e7, 1000, False, True),
+        ('own_fmt_z', 1.0e7, 1000, False, False), ('own_fmt_z', 1.0001e7, 1000, True, False),
         ('own_fmt_c', 1.0e8, 1000, False, False), ('own_fmt_c', 1.0001e8, 1000, True, False),
         ('own_fmt_c', 1000.0, 100, False, False), ('own_fmt_c', 999.0, 100, False, True),
         ('own_fmt_c', 0.001, 1000, False, False), ('own_fmt_c', 0.00099, 1000, False, True),
@@ -189,7 +198,7 @@ def f20_ol_and_marker():
         fcall_bits(rig, 'own_fmt_r', bits)
         check(cstr(rig, TXT) == '0L  ', 'own_fmt_r(0x%08X): %r, not OL' % (bits, cstr(rig, TXT)))
     # theta and D / Q never carry the marker
-    for name, v in (('own_fmt_th', -45.0), ('own_fmt_dq', 0.5)):
+    for name, v in (('own_fmt_th', -45.0), ('own_fmt_d', 0.5), ('own_fmt_q', 0.5)):
         t, u, i, mk = fmt(rig, name, v, 60)
         check(mk == 0, '%s at 60 Hz: marker %d' % (name, mk))
     # the row marker (fmt.s own_row_draw): one amber multiply cover per glyph, no image recolour
@@ -270,38 +279,51 @@ def cover(rig, g):
 
 @case
 def f21_signs():
-    """m21 (S2.2, revision 13 of 2026-11-23): a negative R (main row and secondary R), C, L, D or Q is
-    shown as 0, the vendor formatter's text of 0 (R, C, L marked, D / Q never); X and theta negative get
-    one '-' (X through own_fmt_x, the
+    """m21 (S2.2; MEASUREMENT_FIX_DESIGN revision 14 rule 1, which corrects revision 13's "every negative
+    is 0"): a negative value by its quantity, with 0x200011EC = 0 (series) and = 1 (parallel): series R
+    (main row and secondary R), parallel C and series L are the vendor formatter's text of 0 (marked);
+    parallel R, series C and parallel L are OL ("0L  ", unit empty, index 0, not marked); D is 0 and Q OL
+    in both modes (never marked); X and theta negative get one '-' (X through own_fmt_x, the
     wrapper of the X call 0x0800D32A, with or without 0x20001198 = 2; own_fmt_r ignores that word); the
     secondary R takes 0x200050B8 (own_fmt_rs ignores the s0 its caller made absolute); every text fits 7
-    characters; then the host record: Func R on z = -1 + j100 ohm at 1 kHz (TDut as m10), the MEASURE main
-    text equals the text the display drew on row 0, is the 0 of R, and the value field keeps the negative
-    R."""
+    characters; then the host record: Func R on z = -1 + j100 ohm at 1 kHz (TDut as m10; series, the
+    record's byte 40 = 0, input check), the MEASURE main text equals the text the display drew on row 0, is
+    the 0 of R, and the value field keeps the negative R."""
     rig = base_rig()
+    wf(rig, V_Z, 1000.0)                                      # rule 2 off (1 kHz anyway)
     # Expected texts, from the ui_42.s headers:
     # - R below 0 -> 0: fn_0800e028 on +0.0: bits 0 < 0x40ffff97 -> "%0.4f" -> "0.0000", unit ce a9, index 5;
     # - C below 0 -> 0: fn_0800db24 on +0.0: bits 0 not above 0xbb03126f (no OL), 0 < 0x3f4ccccd -> 0 * 1000
     #   with "%0.1f" -> "0.0", unit "pF", index 1 (also for -6.9163e6 nF, which unsigned would be 6.916 mF);
     # - both 0 counts (fmt_reduce keeps them) and marked: 0 lies below the 1 kHz lower limits 10 mohm / 1 pF;
-    # - L below 0 -> 0 (owner 2026-11-23): fn_0800de2c on +0.0: below 80 (0x42a00000) -> "%0.1f" -> "0.0",
-    #   unit "uH", index 3; marked (0 below the 1 kHz lower limit 1 uH);
-    # - D / Q below 0 -> 0: fn_0800dd44 on +0.0: below 10 (0x41200000) -> "%0.4f" -> "0.0000", unit empty,
+    # - L below 0 -> 0: fn_0800de2c on +0.0: below 80 (0x42a00000) -> "%0.1f" -> "0.0", unit "uH", index 3;
+    #   marked (0 below the 1 kHz lower limit 1 uH);
+    # - D below 0 -> 0: fn_0800dd44 on +0.0: below 10 (0x41200000) -> "%0.4f" -> "0.0000", unit empty,
     #   index 0; never marked (no accuracy-table entry);
+    # - OL (fmt.s .Lfc_ol): "0L  ", the 5th byte 0 (fmt() cleared the rest), unit text empty, index 0,
+    #   MF_MARK 0;
     # - X -12.3456: |X| in [7.99995 (0x40ffff97), 79.9995) -> "%0.3f" "12.346", 12,346 counts, '-';
     #   X -0.0001: < 7.99995 -> "%0.4f" "0.0001", '-' -> "-0.0001".
     zero_r, zero_c, zero_l = ('0.0000', '\xce\xa9', 5, 1), ('0.0', 'pF', 1, 1), ('0.0', 'uH', 3, 1)
-    zero_dq = ('0.0000', '', 0, 0)
-    rows = [('own_fmt_r', -1.5, zero_r), ('own_fmt_c', -0.0005, zero_c), ('own_fmt_r', -79.999, zero_r),
-            ('own_fmt_c', -0.799, zero_c), ('own_fmt_r', -0.0001, zero_r), ('own_fmt_c', -6.9163e6, zero_c),
-            ('own_fmt_l', -100.0, zero_l), ('own_fmt_l', -79.9, zero_l), ('own_fmt_l', -2.0e6, zero_l),
-            ('own_fmt_dq', -0.0123, zero_dq), ('own_fmt_dq', -2000.0, zero_dq)]
-    for name, v, (want, wunit, widx, wmk) in rows:
+    zero_dq, ol = ('0.0000', '', 0, 0), ('0L  ', '', 0, 0)
+    # (series / parallel word, formatter, value, expected)
+    rows = []
+    for sp in (0, 1):
+        r, c, l_ = (zero_r, ol, zero_l) if sp == 0 else (ol, zero_c, ol)
+        rows += [(sp, 'own_fmt_r', -1.5, r), (sp, 'own_fmt_c', -0.0005, c), (sp, 'own_fmt_r', -79.999, r),
+                 (sp, 'own_fmt_c', -0.799, c), (sp, 'own_fmt_r', -0.0001, r), (sp, 'own_fmt_c', -6.9163e6, c),
+                 (sp, 'own_fmt_l', -100.0, l_), (sp, 'own_fmt_l', -79.9, l_), (sp, 'own_fmt_l', -2.0e6, l_),
+                 (sp, 'own_fmt_d', -0.0123, zero_dq), (sp, 'own_fmt_d', -2000.0, zero_dq),
+                 (sp, 'own_fmt_q', -0.0123, ol), (sp, 'own_fmt_q', -2000.0, ol),
+                 (sp, 'own_fmt_z', -1.5, zero_r)]
+    for sp, name, v, (want, wunit, widx, wmk) in rows:
+        rig.wr(V_SERPAR, sp)
         t, u, i, mk = fmt(rig, name, v, 1000)
         raw = rig.rd(TXT, 8)
         check(t == want and u == wunit and i == widx and mk == wmk and raw == t.encode() + bytes(8 - len(t)),
-              '%s(%g): %r %r index %d marker %d (8 bytes %s), expected %r %r %d marker %d'
-              % (name, v, t, u, i, mk, raw.hex(), want, wunit, widx, wmk))
+              '%s(%g) with 0x200011EC = %d: %r %r index %d marker %d (8 bytes %s), expected %r %r %d marker %d'
+              % (name, v, sp, t, u, i, mk, raw.hex(), want, wunit, widx, wmk))
+    rig.wr(V_SERPAR, 0)
     for name, v, want in (('own_fmt_x', -12.3456, '-12.346'), ('own_fmt_x', -0.0001, '-0.0001'),
                           ('own_fmt_th', -45.0, '-45.00')):
         t = fmt(rig, name, v, 1000)[0]
@@ -313,7 +335,11 @@ def f21_signs():
     check(tx == '-12.346' and tr == '0.0000', 'with 0x20001198 = 2: X %r (one sign), R %r (0)' % (tx, tr))
     wf(rig, V_R, -0.05)
     t = fmt(rig, 'own_fmt_rs', 0.05, 1000)[0]
-    check(t == '0.0000', 'secondary R -0.05 from 0x200050B8: %r' % t)
+    check(t == '0.0000', 'secondary R -0.05 from 0x200050B8 (series): %r' % t)
+    rig.wr(V_SERPAR, 1)
+    t = fmt(rig, 'own_fmt_rs', 0.05, 1000)[0]
+    rig.wr(V_SERPAR, 0)
+    check(t == '0L  ', 'secondary R -0.05 from 0x200050B8 (parallel): %r' % t)
     wf(rig, V_R, 0.0123)
     t = fmt(rig, 'own_fmt_rs', 0.05, 1000)[0]
     check(t == '0.0123', 'secondary R 0.0123 from 0x200050B8 (s0 0.05): %r' % t)
@@ -331,6 +357,7 @@ def f21_signs():
     hr.ask_ok('LCR_SET', bytes([0, 1]))                      # Func R: main row R, secondary X
     hr.run(2.0)
     d = hr.ask_ok('MEASURE', size=M.T.MEASURE_SIZE)
+    check(d[40] == 0, 'MEASURE series / parallel %d (input: |Z| about 100 ohm is series, S2.6)' % d[40])
     text = d[16:24].split(b'\x00')[0]
     check(d[8] == 1 and rows0 and text == rows0[-1], 'MEASURE main row %d text %r, display %r' % (d[8], text, rows0[-1:]))
     value = struct.unpack_from('<f', d, 9)[0]
@@ -348,11 +375,17 @@ def f21_signs():
 
 @case
 def f22_dq_extremes():
-    """m22 (S2.3 / S1.8): D or Q of +Inf (Xs = 0 for D, Rs = 0 for Q) is "0L", 0 is "0.0000"."""
+    """m22 (S2.3 / S1.8): D or Q of +Inf (Xs = 0 for D, Rs = 0 for Q) is "0L" (fn_0800dd44's own OL at
+    1e5 and above), 0 is "0.0000", through both wrappers own_fmt_d and own_fmt_q (the frequency word
+    1000: rule 2 of revision 14 does not act)."""
     rig = base_rig()
-    fcall_bits(rig, 'own_fmt_dq', 0x7F800000)
-    check(cstr(rig, TXT) == '0L  ', 'D = +Inf: %r' % cstr(rig, TXT))
-    check(fmt(rig, 'own_fmt_dq', 0.0)[0] == '0.0000', 'Q = 0: %r' % fmt(rig, 'own_fmt_dq', 0.0)[0])
+    rig.wr(V_FREQ, 1000)
+    for name in ('own_fmt_d', 'own_fmt_q'):
+        rig.wr(TXT, bytes(16))
+        fcall_bits(rig, name, 0x7F800000)
+        check(cstr(rig, TXT) == '0L  ', '%s(+Inf): %r' % (name, cstr(rig, TXT)))
+        t = fmt(rig, name, 0.0)[0]
+        check(t == '0.0000', '%s(0): %r' % (name, t))
     rig.watch.check(what='f22')
     return True
 
@@ -362,7 +395,9 @@ def f22_dq_extremes():
 @case
 def f23_digits():
     """m23 (S2.4, D5): 19,999 / 20,000 counts in each vendor format range: the text keeps its decimals at
-    19,999 and drops one at 20,000 (in the unit the vendor formatter chose)."""
+    19,999 and drops one at 20,000 (in the unit the vendor formatter chose); D through own_fmt_d, Q through
+    own_fmt_q (the same vendor formatter and S2.4 rule; positive values, so the revision-14 sign rule and
+    the series / parallel word do not act; 1 kHz, so rule 2 does not act)."""
     rig = base_rig()
     rows = [('own_fmt_r', 1.9999, '1.9999'), ('own_fmt_r', 2.0, '2.000'), ('own_fmt_r', 19.999, '19.999'),
             ('own_fmt_r', 20.0, '20.00'), ('own_fmt_r', 199.99, '199.99'), ('own_fmt_r', 200.0, '200.0'),
@@ -371,20 +406,23 @@ def f23_digits():
             ('own_fmt_c', 200.0, '200.0'), ('own_fmt_c', 2000.0, '2.000'),
             ('own_fmt_l', 199.99, '199.99'), ('own_fmt_l', 200.0, '200.0'), ('own_fmt_l', 2000.0, '2.000'),
             ('own_fmt_l', 2.0e6, '2.000'),
-            ('own_fmt_dq', 1.9999, '1.9999'), ('own_fmt_dq', 2.0, '2.000'), ('own_fmt_dq', 9.9999, '10.000'),
-            ('own_fmt_dq', 20.0, '20.00'), ('own_fmt_dq', 200.0, '200.0'), ('own_fmt_dq', 2000.0, '2000'),
-            ('own_fmt_dq', 20000.0, '20000')]
+            ('own_fmt_d', 1.9999, '1.9999'), ('own_fmt_d', 2.0, '2.000'), ('own_fmt_d', 9.9999, '10.000'),
+            ('own_fmt_d', 20.0, '20.00'), ('own_fmt_d', 200.0, '200.0'), ('own_fmt_d', 2000.0, '2000'),
+            ('own_fmt_d', 20000.0, '20000'),
+            ('own_fmt_q', 1.9999, '1.9999'), ('own_fmt_q', 2.0, '2.000'), ('own_fmt_q', 20.0, '20.00'),
+            ('own_fmt_q', 20000.0, '20000')]
     for name, v, want in rows:
         t = fmt(rig, name, v, 1000)[0]
         check(t == want, '%s(%g): %r, expected %r' % (name, v, t, want))
     # revision 12 (MEASUREMENT_FIX_DESIGN S2.4): C in the vendor's "%0.1f" uF range above 19,999 counts goes
     # to mF with 3 decimals (a text without '.' lies over the unit picture, fn_0800d14c), and no byte of the
     # vendor's longer text is left after the terminating 0 (fmt() clears the buffer, the vendor writes it);
-    # the negative C of this list (-6.9163e6 nF) is 0 since revision 13 (S2.2) and is a row of f21
+    # the negative C of this list (-6.9163e6 nF) is OL in series and 0 in parallel since revision 14 (rule
+    # 1) and is a row of f21
     units = [('own_fmt_c', 1.9999e6, '1999.9', 'uF', 3), ('own_fmt_c', 2.0e6, '2.000', 'mF', 4),
              ('own_fmt_c', 6.9163e6, '6.916', 'mF', 4), ('own_fmt_c', 7.9999e6, '8.000', 'mF', 4),
              ('own_fmt_c', 8.0e6, '8.00', 'mF', 4),
-             ('own_fmt_dq', 2000.0, '2000', '', None), ('own_fmt_dq', 7000.0, '7000', '', None)]
+             ('own_fmt_d', 2000.0, '2000', '', None), ('own_fmt_q', 7000.0, '7000', '', None)]
     for name, v, want, wunit, widx in units:
         t, u, i, _ = fmt(rig, name, v, 1000)
         raw = rig.rd(TXT, 8)
@@ -920,6 +958,148 @@ def f30_marked_value_amber_digits():
         check(not diff, 'under the blank glyph, step %d against step 1: %d of %d differ, first %r'
               % (k, len(diff), len(same), diff[:4]))
         NOTES.append('f30: under the blank glyph %d pixels of step %d as unmarked' % (len(same), k))
+    return True
+
+
+# ---------------------------------------------------------------- f31 revision 14 through the rows and the record
+
+BUF = 0x20014440                      # rec_measure's 66 bytes, after the text buffers of fmt() (0x20014400..1F)
+
+
+@case
+def f31_low_frequency_ol_and_call_sites():
+    """MEASUREMENT_FIX_DESIGN revision 14 through the display rows (fn_0800d3d8 row 0 by the byte 0x200011E4,
+    fn_0800d294 row 1 by the word 0x200011E8, called directly in the stopped base rig; the text taken at the
+    entry of own_row_draw, r1) and the host record (rec_measure called directly into BUF, hold 0x200011A4 and
+    the no-reading counter 0x2000120C written 0 first, so validity 1 can only come from "0L"):
+    (a) rule 2: at 60, 100 and 120 Hz with |Z| 0x200050C4 = 1.0001e7 (above fmt_spec's 1e7) every text of
+        main rows 1..4 and secondary rows 0..4 is "0L  " and unmarked (MF_ROW0 / MF_ROW1 0 after the draw),
+        and every value block of rec_measure has validity 1, text "0L  " and unit code 0, the marker byte 0.
+        With |Z| = 1.0e7 (not above) at the same frequencies, and at 1 kHz with |Z| = 2e7, every text is the
+        one the same wrapper gives for the same word at 1 kHz with |Z| 1000 (the reference, through fmt(),
+        which only the rule could change), and the record's texts equal the display's. The other words hold
+        values inside the measurement range (input check: no reference text of them is "0L  "), so only rule
+        2 can make them OL: R 5000, C 0.1 nF, L 1000 uH, X -5000, theta -89, D 0.01, Q 100. Row 4 shows
+        |Z| itself: 1e7 is inside the R row's range; 2e7 at 1 kHz is OL by S2.1 (fmt_hard), as its
+        reference.
+    (b) rule 1 at the call sites, at 1 kHz with |Z| 1000 (except row 4), 0x200011EC = 0 and = 1: main row 1
+        R -5 (series "0.0000", parallel OL), 2 C -0.5 nF (series OL, parallel "0.0"), 3 L -100 uH (series
+        "0.0", parallel OL), 4 |Z| = -5 (0x200050C4 itself: "0.0000" in both modes, so the `addw` at
+        0x0800D406 hands own_fmt_rz the |Z| word); secondary 0 R -5 (as main 1), 1 X -12.3456 ("-12.346"),
+        2 D -0.5 ("0.0000" in both, `addw` at 0x0800D340), 3 Q -0.5 (OL in both, `addw` at 0x0800D34C);
+        rec_measure's text equals the display's and its validity is 1 exactly for OL; its value field keeps
+        the negative word. Expected texts as derived in f21 (ui_42.s headers)."""
+    rig = base_rig()
+    seen = []
+    a = rig.s['own_row_draw'] & ~1
+
+    def rowdraw(uc, addr, size, user):
+        seen.append((uc.reg_read(UC_ARM_REG_R0),
+                     bytes(uc.mem_read(uc.reg_read(UC_ARM_REG_R1), 8)).split(b'\x00')[0].decode('latin-1')))
+    h = rig.m.uc.hook_add(UC_HOOK_CODE, rowdraw, begin=a, end=a)
+
+    def draw(row, sel):
+        """(text, MF_ROW of the row after the draw) of row `row` with the selector sel."""
+        del seen[:]
+        if row == 0:
+            rig.wr(V_MAIN_ROW, bytes([sel]))
+            fcall(rig, 'fn_0800d3d8')
+        else:
+            rig.wr(V_SECONDARY, sel)
+            fcall(rig, 'fn_0800d294')
+        check(len(seen) == 1 and seen[0][0] == row, 'row %d selector %d: own_row_draw calls %r' % (row, sel, seen))
+        return seen[0][1], mf(rig, 'ROW0' if row == 0 else 'ROW1')
+
+    def record(main, sec):
+        """rec_measure with main row `main` and secondary `sec`: (record, (text, unit, validity) main, secondary)."""
+        rig.wr(V_MAIN_ROW, bytes([main]))
+        rig.wr(V_SECONDARY, sec)
+        rig.wr(V_HOLD, 0)
+        rig.wr(V_NO_READ_CNT, 0)
+        rig.wr(BUF, bytes(66))
+        fcall(rig, 'rec_measure', BUF)
+        d = rig.rd(BUF, 66)
+
+        def blk(o):
+            return d[o + 7:o + 15].split(b'\x00')[0].decode('latin-1'), d[o + 4], d[o + 6]
+        return d, blk(9), blk(25)
+
+    pairs = [(1, 0), (2, 1), (3, 2), (4, 3), (1, 4)]          # every main row and every secondary once
+    mains = {1: ('own_fmt_r', V_R), 2: ('own_fmt_c', V_C), 3: ('own_fmt_l', V_L), 4: ('own_fmt_z', V_Z)}
+    secs = {0: ('own_fmt_r', V_R), 1: ('own_fmt_x', V_X), 2: ('own_fmt_d', V_D), 3: ('own_fmt_q', V_Q),
+            4: ('own_fmt_th', V_TH)}
+    # (a) rule 2
+    vals = {V_R: 5000.0, V_C: 0.1, V_L: 1000.0, V_X: -5000.0, V_TH: -89.0, V_D: 0.01, V_Q: 100.0}
+    rig.wr(V_SERPAR, 0)
+    for w, v in vals.items():
+        wf(rig, w, v)
+    wf(rig, V_Z, 1000.0)
+    ref = {(0, m): fmt(rig, n, vals[w], 1000)[0] for m, (n, w) in mains.items() if m != 4}
+    ref.update({(1, s): fmt(rig, n, vals[w], 1000)[0] for s, (n, w) in secs.items()})
+    check(all(t != '0L  ' for t in ref.values()), 'f31: reference texts %r (input: none OL)' % ref)
+    steps = [(f, 1.0001e7, True) for f in (60, 100, 120)] + [(f, 1.0e7, False) for f in (60, 100, 120)] + \
+        [(1000, 2.0e7, False)]
+    for f, z, ol in steps:
+        wf(rig, V_Z, z)
+        ref[(0, 4)] = fmt(rig, 'own_fmt_z', z, 1000)[0]       # |Z| row: the word itself (fmt sets 1 kHz)
+        wf(rig, V_Z, z)
+        rig.wr(V_FREQ, f)
+        shown = {}
+        for row, sels in ((0, mains), (1, secs)):
+            for sel in sels:
+                t, rowmark = draw(row, sel)
+                shown[(row, sel)] = t
+                if ol:
+                    check(t == '0L  ' and rowmark == 0, 'f31 %d Hz |Z| %g: row %d selector %d %r, MF_ROW %d (expected '
+                          'OL, unmarked)' % (f, z, row, sel, t, rowmark))
+                else:
+                    check(t == ref[(row, sel)], 'f31 %d Hz |Z| %g: row %d selector %d %r, expected %r' % (
+                        f, z, row, sel, t, ref[(row, sel)]))
+        for m, s in pairs:
+            d, bm, bs = record(m, s)
+            if ol:
+                check(bm == ('0L  ', 0, 1) and bs == ('0L  ', 0, 1) and d[64] == 0,
+                      'f31 %d Hz |Z| %g: record main %d %r secondary %d %r markers %d (expected OL, unit 0, '
+                      'validity 1)' % (f, z, m, bm, s, bs, d[64]))
+            else:
+                check(bm[0] == shown[(0, m)] and bs[0] == shown[(1, s)] and bm[2] == int(bm[0] == '0L  ')
+                      and bs[2] == int(bs[0] == '0L  '), 'f31 %d Hz |Z| %g: record main %d %r secondary %d %r, '
+                      'display %r / %r' % (f, z, m, bm, s, bs, shown[(0, m)], shown[(1, s)]))
+    # (b) rule 1 at the call sites
+    zero_r, zero_c, zero_l, ol_t = '0.0000', '0.0', '0.0', '0L  '
+    neg = {V_R: -5.0, V_C: -0.5, V_L: -100.0, V_X: -12.3456, V_TH: -45.0, V_D: -0.5, V_Q: -0.5}
+    for w, v in neg.items():
+        wf(rig, w, v)
+    rig.wr(V_FREQ, 1000)
+    for sp in (0, 1):
+        rig.wr(V_SERPAR, sp)
+        wf(rig, V_Z, 1000.0)
+        want = {(0, 1): zero_r if sp == 0 else ol_t, (0, 2): ol_t if sp == 0 else zero_c,
+                (0, 3): zero_l if sp == 0 else ol_t, (1, 0): zero_r if sp == 0 else ol_t, (1, 1): '-12.346',
+                (1, 2): '0.0000', (1, 3): ol_t}
+        shown = {}
+        for (row, sel), w_ in sorted(want.items()):
+            t, _ = draw(row, sel)
+            shown[(row, sel)] = t
+            check(t == w_, 'f31 0x200011EC = %d: row %d selector %d %r, expected %r' % (sp, row, sel, t, w_))
+        for m, s in ((1, 0), (2, 1), (3, 2), (1, 3)):
+            d, bm, bs = record(m, s)
+            check(bm[0] == shown[(0, m)] and bm[2] == int(bm[0] == ol_t) and bs[0] == shown[(1, s)]
+                  and bs[2] == int(bs[0] == ol_t), 'f31 0x200011EC = %d: record main %d %r secondary %d %r, display '
+                  '%r / %r' % (sp, m, bm, s, bs, shown[(0, m)], shown[(1, s)]))
+            check(struct.unpack_from('<f', d, 9)[0] == u32f(f2u(neg[mains[m][1]])) and d[40] == sp,
+                  'f31: record value %r, series / parallel %d' % (struct.unpack_from('<f', d, 9)[0], d[40]))
+        wf(rig, V_Z, -5.0)                                    # row 4: the |Z| word itself, below 0
+        t, _ = draw(0, 4)
+        d, bm, _ = record(4, 1)
+        check(t == zero_r and bm[0] == zero_r and bm[2] == 0, 'f31 0x200011EC = %d: |Z| -5 shown %r, record %r '
+              '(expected 0.0000: own_fmt_z, not R)' % (sp, t, bm))
+    rig.m.uc.hook_del(h)
+    rig.wr(V_SERPAR, 0)
+    wf(rig, V_Z, 1000.0)
+    NOTES.append('f31: %d rule-2 steps, rule 1 in both modes through fn_0800d3d8 / fn_0800d294 and rec_measure'
+                 % len(steps))
+    rig.watch.check(what='f31')
     return True
 
 

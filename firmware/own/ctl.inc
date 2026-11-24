@@ -217,7 +217,6 @@
         .equ    V_DIGIT,        0x200011B8      @ sorting editor digit index
         .equ    V_EDIT,         0x2000000C      @ byte: editing mode of the dialog
         .equ    V_SIGN_MODE,    0x20001198      @ ohm formatter sign mode (2 = keep the sign)
-        .equ    V_SERPAR,       0x200011EC      @ 0 series, 1 parallel values in use
         .equ    V_MEAS_NEW,     0x20001200      @ new averaged result for 0x0800A068
         .equ    V_TICK,         0x20000480      @ GUI tick, +10 per SysTick (fn_080277a0)
         .equ    V_ROOT_MEAS,    0x200001D8      @ root object of the measure screens

@@ -92,6 +92,8 @@
                                                 @ at power-on
         .equ    V_MAIN_ROW,     0x200011E4      @ byte: main row of the display
         .equ    V_SECONDARY,    0x200011E8      @ 0 R/ESR, 1 X, 2 D, 3 Q, 4 theta
+        .equ    V_SERPAR,       0x200011EC      @ 0 series, 1 parallel values in use (written by
+                                                @ meas.s meas_publish; read by fmt.s, cmd.s)
         .equ    V_AVERAGING,    0x200011F0      @ averaging count (0x08009F10)
         .equ    V_NO_READING,   0x20001208      @ 1 after 200 ticks without a reading
         .equ    V_NO_READ_CNT,  0x2000120C      @ its tick counter

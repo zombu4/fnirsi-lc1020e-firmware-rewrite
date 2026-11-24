@@ -230,11 +230,17 @@ its key that lands on the value; the key is named for reference, it is not press
   its 20-s limit. Its result is the mean of the windows' open admittances (each window's |Z| and
   phase, less the point's short), stored in the entry's form (|Zo| minus the short, phase of Zo)
   when the mean stands clear of the windows' scatter (2 or more windows and n (n - 1) |mean|^2 /
-  sum |Y - mean|^2 above the 0.999 quantile of F(2, 2n - 2)); otherwise, and with fewer than 2
-  usable windows, it is stored "not resolved" (|Z| 1e10, phase entry +400), and the measurement
-  applies no open correction at that point (the short only). With leads open at 100 and 120 Hz
-  the window scatter is far above the fixture's stray admittance, so those points are normally
-  "not resolved". The sweep goes on in either case; an open point never fails by its time. The results stay in RAM and are written to the user table only after all 15
+  sum |Y - mean|^2 above the 0.999 quantile of F(2, 2n - 2)) and (revision 14) when it is a lead
+  stray: the mean admittance G + jB has B >= |G| and B > 0 (its phase from +45 to +135
+  degrees: capacitive, G of either sign by noise) and B / (2 pi f) at most 50 pF; a mean below 100 kohm is kept (it fails the sweep,
+  reason 3). Otherwise, and with fewer than 2 usable windows, it is stored "not resolved" (|Z|
+  1e10, phase entry +400), and the measurement applies no open correction at that point (the
+  short only). With leads open at 100 and 120 Hz the window scatter is far above the fixture's
+  stray admittance, so those points are normally "not resolved"; after the 15th point (revision
+  14) each 100 / 120 Hz open point "not resolved" takes the capacitance of the first resolved
+  point of: the same level at 1 kHz, the same level at 10 kHz, the other 1 kHz levels ascending,
+  stored as a pure susceptance at its own frequency (none resolved: it stays "not resolved"); 60
+  Hz uses the 100 Hz entry. The sweep goes on in either case; an open point never fails by its time. The results stay in RAM and are written to the user table only after all 15
   points (a save during the sweep, by the power key or a host command, holds the old table and the
   settings of before the sweep). The finish restores the frequency, level, bias, speed and type of
   before the sweep, then saves once. The factory table is never written.
@@ -431,11 +437,11 @@ Value block (15 bytes):
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | f32 | the value the display formats, as read before formatting, in the base unit of its quantity: R, Z and X in ohm, C in nF, L in uH, D and Q without unit, theta in degrees. A negative R, C, L, D or Q keeps its sign here while its text (offset 7) is 0 |
+| 0 | f32 | the value the display formats, as read before formatting, in the base unit of its quantity: R, Z and X in ohm, C in nF, L in uH, D and Q without unit, theta in degrees. A negative R, C, L, D or Q keeps its sign here while its text (offset 7) is 0 or "0L" |
 | 4 | u8 | unit code of the display text: 0 none, 1 ohm, 2 kohm, 3 Mohm, 4 pF, 5 nF, 6 uF, 7 mF, 8 uH, 9 mH, 10 H, 11 degree |
 | 5 | u8 | decimals: digits after the point in the display text |
 | 6 | u8 | validity: 0 valid, 1 overload ("0L" from the formatter), 2 no reading (the meter's no-reading counter 0x2000120C above 200), 3 held. Checked in the order 3, 2, 1 |
-| 7 | 8 | display text, ASCII, zero padded: the text the display shows (firmware/own/fmt.s on the meter's formatters 0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L, 0x0800DD44 D / Q, 0x0800DFC4 theta): "0L" above the measurement range (R, Z, X above 10 Mohm, C above 100 mF, L above 100 H, or not finite), a negative R (main or secondary) or C shown as 0 ("0.0000" with unit code 1 and 4 decimals, "0.0" with unit code 4 and 1 decimal; marker bit set; firmware before MEASUREMENT_FIX_DESIGN revision 13 sent it with a '-'), a negative L shown as "0.0" (unit code 8, 1 decimal, marked) and a negative D or Q as "0.0000", a '-' in front of a negative X or theta, at most 19,999 counts (one decimal less above; C 2000.0 .. 7999.9 uF is sent in mF with 3 decimals, unit code 7; D and Q from 20,000 have no decimal to drop and keep 5 digits). Every byte after the terminating 0 is 0 (firmware before MEASUREMENT_FIX_DESIGN revision 12 could leave bytes of the vendor's longer text there: read the text up to its first 0) |
+| 7 | 8 | display text, ASCII, zero padded: the text the display shows (firmware/own/fmt.s on the meter's formatters 0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L, 0x0800DD44 D / Q, 0x0800DFC4 theta): "0L" above the measurement range (R, Z, X above 10 Mohm, C above 100 mF, L above 100 H, or not finite); "0L" in every value block at 60, 100 and 120 Hz when \|Z\| (offset 41) is above 1e7 ohm, the highest impedance the manual specifies at 100 Hz (MEASUREMENT_FIX_DESIGN revision 14; 1, 10 and 100 kHz unchanged); a negative value by its quantity (revision 14, by offset 40): series R (main or secondary), parallel C and series L shown as 0 ("0.0000" with unit code 1 and 4 decimals, "0.0" with unit code 4 and 1 decimal, "0.0" with unit code 8 and 1 decimal; marker bit set), parallel R, series C and parallel L shown as "0L" (validity 1, unit code 0, marker bit clear), a negative D as "0.0000" and a negative Q as "0L" (the meter stores D and Q as magnitudes, so neither comes negative today); revision 13 showed all of them as 0, firmware before it sent them with a '-'; a '-' in front of a negative X or theta, at most 19,999 counts (one decimal less above; C 2000.0 .. 7999.9 uF is sent in mF with 3 decimals, unit code 7; D and Q from 20,000 have no decimal to drop and keep 5 digits). Every byte after the terminating 0 is 0 (firmware before MEASUREMENT_FIX_DESIGN revision 12 could leave bytes of the vendor's longer text there: read the text up to its first 0) |
 
 Sources: main row 1 R 0x200050B8, 2 C 0x200050BC, 3 L 0x200050C0, 4 Z 0x200050C4; secondary 0 R
 (0x200050B8, the signed word the display formats), 1 X 0x200050C8 (sign kept), 2 D 0x200050D4, 3 Q

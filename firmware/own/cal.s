@@ -30,9 +30,16 @@
 @   of the n windows' open admittances Y_i = 1 / (Zo_i - Zs), stored as Zo = 1 / Ybar + Zs in the
 @   entry's form (|Zo| minus the short, arg Zo), when the mean is resolved: n >= 2 and n (n - 1)
 @   |Ybar|^2 / sum |Y_i - Ybar|^2 above the 0.999 quantile of F(2, 2n - 2) (the chance that
-@   windows of noise around no admittance at all pass is 1e-3). Otherwise the point is stored
-@   "not resolved": |Z| 1e10 and theta +400 (S4.1 then uses the short only at that point, meas.s
-@   meas_comp). An open point never fails by its time;
+@   windows of noise around no admittance at all pass is 1e-3), and (revision 14) when it is a lead
+@   stray: Ybar = G + jB with B >= |G|, B > 0 (arg Ybar +45 .. +135 degrees: capacitive, G
+@   allowed either sign by the noise, a real 1 kHz stray averaged +91.2 degrees) and C = B / (2
+@   pi f) <= 50 pF; a mean below 100 kohm is kept for the open validity check below. Otherwise the
+@   point is stored "not resolved": |Z| 1e10 and theta +400 (S4.1 then uses the short only at
+@   that point, meas.s meas_comp). An open point never fails by its time;
+@ - the low-frequency fill (revision 14), after the 15th point of an open sweep and before the
+@   store: a 100 Hz or 120 Hz point "not resolved" takes the capacitance of the first resolved
+@   point of: the same level at 1 kHz, at 10 kHz, the other 1 kHz levels (cal_ofill), as a pure
+@   susceptance at its own frequency; with none it stays "not resolved";
 @ - open validity: an open point needs |Zo| = |Z| + the point's short entry >= 100 kohm ([S10]
 @   p.5), else the sweep fails naming the point;
 @ - results stay in OWN_CAL; the table is written only at the end (item 4), point by point
@@ -596,10 +603,14 @@ cal_oend:
 @   Im Y_i); Ybar = sum Y_i / n, S = sum |Y_i - Ybar|^2 (two passes). Resolved when n >= 2 and
 @   |Ybar|^2 > cal_rk[n - 2] x S, cal_rk[n - 2] = F(2, 2n - 2; 0.999) / (n (n - 1)): then r0 = |Zo|
 @   - |t0| and r1 = arg Zo in degrees (meas_deg), Zo = Zs + conj(Ybar) / |Ybar|^2, the form
-@   meas_comp reads back (Zo = (t11 + |t0|) e^(j theta11), Yo = 1 / (Zo - Zs) = Ybar). Else, and
-@   when some D_i is 0 or |Zo| - |t0| is not finite (a NaN fails the compare as well): "not
-@   resolved", r0 = 1e10 (F_1E10) and r1 = +400 (F_P400). CAO_OWIN is read by nothing after it.
-@   Keeps r4..r11, s16..s31; changes r0..r3, r12, s0..s15.
+@   meas_comp reads back (Zo = (t11 + |t0|) e^(j theta11), Yo = 1 / (Zo - Zs) = Ybar), when
+@   |Zo| is below 1e5 (cal_accept then fails the sweep "open low", reason 3, as in revision 11) or
+@   when the mean passes the gate of revision 14 (a lead stray): B = Im Ybar >= |G| (G = Re
+@   Ybar), B > 0 (arg Ybar from +45 to +135 degrees) and B <= 2 pi f 50 pF (cal_cmax x the
+@   point's frequency cal_freqs[point / 3]). Else, and when some D_i is 0 or |Zo| - |t0| is not
+@   finite (a NaN fails the compares as well): "not resolved", r0 = 1e10 (F_1E10) and r1 = +400
+@   (F_P400). CAO_OWIN is read by nothing after it. Keeps r4..r11, s16..s31; changes r0..r3, r12,
+@   s0..s15.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	cal_ores, %function
@@ -612,24 +623,10 @@ cal_ores:
 	cmp	r5, #2
 	blo	.Lor_none		@ fewer than 2 windows: no scatter to judge the mean by
 	ldr	r0, [r7, #CAO_PT]
-	bl	cal_entry		@ r0 = the point's short (type 0) entry
-	mov	r8, r0
-	vldr	s0, [r8]
-	vabs.f32	s21, s0		@ s21 = |t0|
-	vldr	s0, [r8, #0x2D0]	@ theta0
-	bl	meas_angok
-	cmp	r0, #0
-	beq	.Lor_zs
-	vldr	s0, [r8, #0x2D0]
-	bl	meas_cis		@ s0 / s1 = cos / sin theta0
-	vmul.f32	s16, s21, s0	@ s16 = Re Zs
-	vmul.f32	s17, s21, s1	@ s17 = Im Zs
-	b	.Lor_sum
-.Lor_zs:
-	vmov.f32	s16, s21	@ theta0 unusable: Zs = |t0|
-	movs	r0, #0
-	vmov	s17, r0
-.Lor_sum:
+	bl	cal_zs			@ s0 / s1 = Zs of the point's short entry, s2 = |t0|
+	vmov.f32	s16, s0		@ s16 = Re Zs
+	vmov.f32	s17, s1		@ s17 = Im Zs
+	vmov.f32	s21, s2		@ s21 = |t0|
 	movs	r0, #0
 	vmov	s18, r0			@ s18 = sum Re Y_i
 	vmov	s19, r0			@ s19 = sum Im Y_i
@@ -695,6 +692,32 @@ cal_ores:
 	vmul.f32	s4, s2, s2
 	vmla.f32	s4, s3, s3
 	vsqrt.f32	s23, s4		@ |Zo|
+	ldr	r0, =F_1E5
+	vmov	s4, r0
+	vcmpe.f32	s23, s4
+	vmrs	APSR_nzcv, fpscr
+	blt	.Lor_keep		@ below 1e5: cal_accept fails the sweep (open low)
+	vabs.f32	s4, s18		@ the gate (revision 14): a lead stray; s4 = |G|
+	vcmpe.f32	s19, s4
+	vmrs	APSR_nzcv, fpscr
+	blt	.Lor_none		@ B < |G| (or unordered): arg Ybar outside +45 .. +135 degrees
+	vcmpe.f32	s19, #0
+	vmrs	APSR_nzcv, fpscr
+	ble	.Lor_none		@ B = G = 0: no susceptance
+	ldr	r0, [r7, #CAO_PT]
+	movs	r1, #3
+	udiv	r0, r0, r1		@ frequency index
+	ldr	r1, =cal_freqs
+	ldr	r0, [r1, r0, lsl #2]
+	vmov	s4, r0
+	vcvt.f32.u32	s4, s4		@ f
+	ldr	r0, =cal_cmax
+	vldr	s5, [r0]		@ 2 pi 50 pF
+	vmul.f32	s4, s4, s5	@ the susceptance of 50 pF at f
+	vcmpe.f32	s19, s4
+	vmrs	APSR_nzcv, fpscr
+	bgt	.Lor_none		@ C above 50 pF: no lead stray
+.Lor_keep:
 	vsub.f32	s23, s23, s21	@ s23 = |Zo| - |t0|, the entry's form
 	vmov	r0, s23
 	and	r0, r0, #EXPM
@@ -710,6 +733,151 @@ cal_ores:
 	ldr	r0, =F_1E10		@ "not resolved"
 	ldr	r1, =F_P400
 .Lor_ret:
+	vpop	{d8, d9, d10, d11}
+	pop	{r4, r5, r6, r7, r8, pc}
+
+@ ----------------------------------------------------------------------------
+@ cal_zs - r0 = point: s0 / s1 = Re / Im Zs and s2 = |t0| of its short (type 0) entry in the user
+@   table (cal_entry, read only): Zs = |t0| e^(j theta0), or |t0| when theta0 is not a finite angle
+@   within +-180 (meas_angok), as meas_comp forms it. Keeps r4..r11, s16..s31; changes r0..r3,
+@   r12, s0..s15.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	cal_zs, %function
+cal_zs:
+	push	{r4, lr}
+	vpush	{d8}			@ 16 bytes: the stack stays 8-aligned
+	bl	cal_entry		@ r0 = the point's short entry
+	mov	r4, r0
+	vldr	s0, [r4]
+	vabs.f32	s16, s0		@ s16 = |t0|
+	vldr	s0, [r4, #0x2D0]	@ theta0
+	bl	meas_angok
+	cbz	r0, .Lzs_real		@ theta0 unusable: Zs = |t0|
+	vldr	s0, [r4, #0x2D0]
+	bl	meas_cis		@ s0 / s1 = cos / sin theta0
+	vmul.f32	s0, s16, s0	@ Re Zs
+	vmul.f32	s1, s16, s1	@ Im Zs
+	b	.Lzs_ret
+.Lzs_real:
+	vmov.f32	s0, s16
+	movs	r0, #0
+	vmov	s1, r0
+.Lzs_ret:
+	vmov.f32	s2, s16
+	vpop	{d8}
+	pop	{r4, pc}
+
+@ ----------------------------------------------------------------------------
+@ cal_ofill - the low-frequency fill of an open sweep (MEASUREMENT_FIX_DESIGN revision 14 rule 3
+@   (b)), from cal_accept after the 15th result and before cal_commit: every 100 Hz and 120 Hz
+@   point (0..5) whose result in CAO_RES is "not resolved" (theta +400) takes the first resolved
+@   source of cal_fsrc for its level (the same level at 1 kHz, at 10 kHz, then the other 1 kHz
+@   levels ascending). A source passed cal_ores's gate, so it is a capacitive stray of at most 50
+@   pF. Source: D = Zo_src - Zs_src, Zo_src = (|Z|_src + |t0_src|) e^(j theta_src) from its result,
+@   Zs_src by cal_zs; its susceptance B_src = -Im D / |D|^2, its C = B_src / (2 pi f_src) kept at
+@   f_low with no conductance: B_low = B_src f_low / f_src, so 1 / B_low = |D|^2 f_src / (-Im D
+@   f_low). Target: Zo_low = Zs_low + 1 / (j B_low) = Zs_low - j / B_low (Zs_low by cal_zs), its
+@   result |Zo_low| - |t0_low| and arg Zo_low in degrees (meas_deg), the form meas_comp reads back
+@   (Yo = 1 / (Zo_low - Zs_low) = j B_low). 1 / B_low not above 0 or a non-finite result: the point
+@   stays "not resolved". Writes only CAO_RES (the table is written by cal_commit). Keeps r4..r11,
+@   s16..s31; changes r0..r3, r12, s0..s15.
+@   Registers: r4 OWN_CAL, r5 target point, r6 source slot 0..3, r7 source point, r8 the level's
+@   cal_fsrc row; s16 / s17 Zs_src, then Re / Im Zo_low, s18 |t0_src|, s19 1 / B_low.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	cal_ofill, %function
+cal_ofill:
+	push	{r4, r5, r6, r7, r8, lr}
+	vpush	{d8, d9, d10, d11}	@ 56 bytes in all: the stack stays 8-aligned
+	ldr	r4, =OWN_CAL
+	movs	r5, #0			@ r5 = target point
+.Lof_pt:
+	add	r0, r4, #CAO_RES
+	add	r0, r0, r5, lsl #3
+	ldr	r1, [r0, #4]
+	ldr	r2, =F_P400
+	cmp	r1, r2
+	bne	.Lof_next		@ resolved (passed the gate): kept
+	movs	r1, #3
+	udiv	r2, r5, r1
+	mls	r3, r2, r1, r5		@ r3 = level index
+	ldr	r8, =cal_fsrc
+	add	r8, r8, r3, lsl #2	@ r8 = the 4 sources of this level
+	movs	r6, #0
+.Lof_src:
+	ldrb	r7, [r8, r6]		@ r7 = source point
+	add	r0, r4, #CAO_RES
+	add	r0, r0, r7, lsl #3
+	ldr	r1, [r0, #4]
+	ldr	r2, =F_P400
+	cmp	r1, r2
+	bne	.Lof_have		@ the first resolved source
+	adds	r6, r6, #1
+	cmp	r6, #4
+	blo	.Lof_src
+	b	.Lof_next		@ none resolved: stays "not resolved"
+.Lof_have:
+	mov	r0, r7
+	bl	cal_zs			@ the source's Zs and |t0|
+	vmov.f32	s16, s0
+	vmov.f32	s17, s1
+	vmov.f32	s18, s2
+	add	r0, r4, #CAO_RES
+	add	r0, r0, r7, lsl #3
+	vldr	s0, [r0, #4]		@ theta_src (a meas_deg angle within +-180)
+	bl	meas_cis		@ s0 / s1 = cos / sin theta_src
+	add	r0, r4, #CAO_RES
+	add	r0, r0, r7, lsl #3
+	vldr	s2, [r0]		@ |Z|_src = |Zo_src| - |t0_src|
+	vadd.f32	s2, s2, s18	@ |Zo_src|
+	vmul.f32	s3, s2, s0
+	vsub.f32	s3, s3, s16	@ s3 = Re D
+	vmul.f32	s4, s2, s1
+	vsub.f32	s4, s4, s17	@ s4 = Im D
+	vmul.f32	s5, s3, s3
+	vmla.f32	s5, s4, s4	@ s5 = |D|^2
+	vneg.f32	s4, s4		@ s4 = -Im D (B_src |D|^2)
+	ldr	r2, =cal_freqs
+	movs	r1, #3
+	udiv	r0, r7, r1
+	ldr	r0, [r2, r0, lsl #2]
+	vmov	s6, r0
+	vcvt.f32.u32	s6, s6		@ f_src
+	udiv	r0, r5, r1
+	ldr	r0, [r2, r0, lsl #2]
+	vmov	s7, r0
+	vcvt.f32.u32	s7, s7		@ f_low
+	vmul.f32	s5, s5, s6
+	vmul.f32	s4, s4, s7
+	vdiv.f32	s19, s5, s4	@ s19 = 1 / B_low = |D|^2 f_src / (-Im D f_low)
+	vcmpe.f32	s19, #0
+	vmrs	APSR_nzcv, fpscr
+	ble	.Lof_next		@ no positive susceptance (or unordered): stays
+	mov	r0, r5
+	bl	cal_zs			@ s0 / s1 = Zs_low, s2 = |t0_low|
+	vmov.f32	s16, s0		@ s16 = Re Zo_low = Re Zs_low
+	vsub.f32	s17, s1, s19	@ s17 = Im Zo_low = Im Zs_low - 1 / B_low
+	vmov.f32	s18, s2		@ s18 = |t0_low|
+	vmul.f32	s0, s16, s16
+	vmla.f32	s0, s17, s17
+	vsqrt.f32	s0, s0
+	vsub.f32	s20, s0, s18	@ s20 = |Zo_low| - |t0_low|, the entry's form
+	vmov	r0, s20
+	and	r0, r0, #EXPM
+	cmp	r0, #EXPM
+	beq	.Lof_next		@ not finite: stays
+	vmov.f32	s0, s17
+	vmov.f32	s1, s16
+	bl	meas_deg		@ s0 = arg Zo_low, degrees
+	add	r0, r4, #CAO_RES
+	add	r0, r0, r5, lsl #3
+	vstr	s20, [r0]
+	vstr	s0, [r0, #4]		@ the point's result: the filled open
+.Lof_next:
+	adds	r5, r5, #1
+	cmp	r5, #6
+	blo	.Lof_pt
 	vpop	{d8, d9, d10, d11}
 	pop	{r4, r5, r6, r7, r8, pc}
 
@@ -787,8 +955,9 @@ cal_judge:
 @ ----------------------------------------------------------------------------
 @ cal_accept - r0 = |Z| bits, r1 = theta bits: the result of the point in progress. An open
 @   (type 11) needs |Z| + the point's short entry (cal_entry) >= 1e5, else cal_fail(CAL_R_OPEN).
-@   The result is kept in CAO_RES; then the next point, or the store at the last (cal_commit).
-@   Changes r0..r3, r12, s0, s1.
+@   The result is kept in CAO_RES; then the next point, or the store at the last (cal_commit),
+@   for an open sweep after cal_ofill (revision 14: the 100 / 120 Hz points "not resolved" filled
+@   from 1 / 10 kHz). Changes r0..r3, r12, s0..s15.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	cal_accept, %function
@@ -825,6 +994,12 @@ cal_accept:
 	bl	cal_point		@ the next point
 	pop	{r4, r5, r6, pc}
 .Lac_store:
+	ldr	r0, =V_CAL_TYPE
+	ldr	r0, [r0]
+	cmp	r0, #11
+	bne	.Lac_commit
+	bl	cal_ofill		@ an open sweep: 100 / 120 Hz "not resolved" from 1 / 10 kHz
+.Lac_commit:
 	bl	cal_commit		@ all 15: the table, then the finish
 	pop	{r4, r5, r6, pc}
 
@@ -1181,6 +1356,16 @@ cal_rk:
 	.word	0x3F6CB801		@ n = 5: 0.92468268
 	.word	0x3EFE6281		@ n = 6: 0.49684528
 	.word	0x3E9E27B9		@ n = 7: 0.30889681
+@ cal_cmax - the gate's bound of cal_ores (revision 14, the owner's 50 pF): 2 pi x 50e-12 =
+@   3.1415925e-10 (float 0x2FACB5FC); B <= f cal_cmax is C = B / (2 pi f) <= 50 pF
+cal_cmax:
+	.word	0x2FACB5FC
+@ cal_fsrc - the sources of cal_ofill by level index 0 / 1 / 2 (points: 6..8 1 kHz, 9..11 10 kHz):
+@   the same level at 1 kHz, the same level at 10 kHz, the other 1 kHz levels ascending
+cal_fsrc:
+	.byte	6, 9, 7, 8		@ 0.1 V
+	.byte	7, 10, 6, 8		@ 0.3 V
+	.byte	8, 11, 6, 7		@ 0.6 V
 @ the names of the 15 points (second line of the progress text): frequency in Hz, k for 1000, then
 @ the level in V; each at most 73 pixels wide in F1 (cal.s header, revision 10 item 6)
 cal_names:

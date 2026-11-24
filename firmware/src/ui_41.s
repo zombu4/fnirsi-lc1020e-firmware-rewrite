@@ -1310,6 +1310,9 @@ fn_0800d14c:
 @ 0x08023050(0x20000220, 1); otherwise, when the word 0x20001168 (screen state)
 @ equals 1,
 @ 0x08023558(0x20000220, 1).
+@ Our build (.ifdef OWN): the formatter calls go to the wrappers of own/fmt.s; cases 2 and 3
+@ load r3 = the address of D 0x200050D4 / Q 0x200050D0 (`addw` at 0x0800D340 / 0x0800D34C, the
+@ size of the vldr) for own_fmt_dqs at 0x0800D356 (MEASUREMENT_FIX_DESIGN.md revision 14).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800d294,"ax",%progbits
 	.p2align 2
@@ -1404,18 +1407,26 @@ fn_0800d294:
 .L0800d33a:
 	ldr	r1, .L0800d3c8
 	bl	fn_08021c14
+.ifdef OWN
+	addw	r3, r5, #0x358		@ 0x0800D340: r3 = 0x200050D4, D (own_fmt_dqs loads it)
+.else
 	vldr	s0, [r5, #0x358]
+.endif
 	b.n	.L0800d350
 .L0800d346:
 	ldr	r1, .L0800d3cc
 	bl	fn_08021c14
+.ifdef OWN
+	addw	r3, r5, #0x354		@ 0x0800D34C: r3 = 0x200050D0, Q (own_fmt_dqs loads it)
+.else
 	vldr	s0, [r5, #0x354]
+.endif
 .L0800d350:
 	mov	r2, sp
 	add	r1, sp, #0xc
 	add	r0, sp, #4
 .ifdef OWN
-	bl	own_fmt_dq		@ 0x0800D356: D / Q (own/fmt.s, S2.4)
+	bl	own_fmt_dqs		@ 0x0800D356: D (0) or Q (OL) below 0 by r3 (own/fmt.s, revision 14)
 .else
 	bl	fn_0800dd44
 .endif
@@ -1501,6 +1512,9 @@ fn_0800d294:
 @ The chosen image is set on the object 0x2000021c with 0x08021c14, then
 @ fn_0800d14c(0, text at sp+4) is called, and 0x08023050(object, 1) when the
 @ unit index is 0, otherwise 0x08023558(object, 1).
+@ Our build (.ifdef OWN): the formatter calls go to the wrappers of own/fmt.s; cases 4 and 1
+@ load r3 = the address of |Z| 0x200050C4 / R 0x200050B8 (`addw` at 0x0800D406 / 0x0800D432, the
+@ size of the vldr) for own_fmt_rz at 0x0800D43C (MEASUREMENT_FIX_DESIGN.md revision 14).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800d3d8,"ax",%progbits
 	.p2align 2
@@ -1530,7 +1544,11 @@ fn_0800d3d8:
 	beq.n	.L0800d482
 	b.n	.L0800d4b4
 .L0800d406:
+.ifdef OWN
+	addw	r3, r0, #0x348		@ 0x0800D406: r3 = 0x200050C4, |Z| (own_fmt_rz loads it)
+.else
 	vldr	s0, [r0, #0x348]
+.endif
 	b.n	.L0800d436
 .L0800d40c:
 	ldr	r1, .L0800d4e0
@@ -1557,13 +1575,17 @@ fn_0800d3d8:
 	ldr	r0, [r4]
 	b.n	.L0800d4b0
 .L0800d432:
+.ifdef OWN
+	addw	r3, r0, #0x33c		@ 0x0800D432: r3 = 0x200050B8, R (own_fmt_rz loads it)
+.else
 	vldr	s0, [r0, #0x33c]
+.endif
 .L0800d436:
 	mov	r2, sp
 	add	r1, sp, #0xc
 	add	r0, sp, #4
 .ifdef OWN
-	bl	own_fmt_r		@ 0x0800D43C: R or |Z| (own/fmt.s, S2.1 / S2.2 / S2.4)
+	bl	own_fmt_rz		@ 0x0800D43C: R or |Z| by r3 (own/fmt.s, S2.1 / S2.4, revision 14)
 .else
 	bl	fn_0800e028
 .endif

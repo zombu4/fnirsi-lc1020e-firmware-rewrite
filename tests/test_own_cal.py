@@ -22,11 +22,16 @@ float64 from the float32 words). Resolved (n >= 2, n (n - 1) |Ybar|^2 / sum |Y_i
 quantile of F(2, 2n - 2)): the entry is |Zo| - |t0| and arg Zo of Zo = 1 / Ybar + Zs, within 1e-5 relative of
 |Zo| and 0.01 degree [J: float32 sums of 7 terms and the vendor's single-precision sine / cosine]; else |Z|
 1e10, theta +400 ("not resolved") bit for bit. A set whose ratio lies within 1e-3 of the limit may give
-either (float32 against float64 at the edge).
+either (float32 against float64 at the edge). Revision 14 (MEASUREMENT_FIX_DESIGN 14.4): a resolved mean with
+|Zo| >= 1e5 is kept only when Ybar = G + jB has B >= |G|, B > 0 and B <= 2 pi f 50 pF (the gate; else
+"not resolved", kind 'gate'; a gate margin within 1e-6 of 0 may give either); after the 15th point every 100 /
+120 Hz point "not resolved" is filled from the first resolved source (stored words) of FSRC: B_src = -Im D /
+|D|^2 of D = Zo_src - Zs_src, B_low = B_src f_low / f_src, Zo_low = Zs_low - j / B_low (open_fill), matched as
+a resolved entry.
 
 Sources: measure_model.DutSource / test_own_measure.TDut; the counts per volt are chosen per case so that both
 channels lie in band at a range and gain code the ranging reaches (the model's source is ideal; revision 5 row
-18). RUN LIMIT: one run of this file per case prefix, 25 cases.
+18). RUN LIMIT: one run of this file per case prefix, 23 cases.
 """
 
 import cmath
@@ -219,15 +224,31 @@ def f_quantile(n, alpha=1e-3):
     return (m / 2) * (alpha ** (-2 / m) - 1)
 
 
-def open_rule(zth, t0, th0):
-    """cal.s cal_ores (revision 11) in float64 for windows zth = [(|Z|, theta)] (floats of the published words)
-    and the short entry t0 / th0: ('nr', None) not resolved, or (kind, (|Zo| - |t0|, arg Zo in degrees), q)
-    with kind 'res' or 'edge' (q = n (n - 1) |Ybar|^2 / (x S) within 1e-3 of 1)."""
+GATE_C = 50e-12                 # cal.s cal_cmax / (2 pi): the gate's 50 pF (revision 14)
+GATE_EDGE = 1e-6                # a gate margin (relative) this close to 0 may go either way (float32)
+FSRC = ((6, 9, 7, 8), (7, 10, 6, 8), (8, 11, 6, 7))     # cal.s cal_fsrc: the fill's sources by level index
+
+
+def short_zs(t0, th0):
+    """Zs of a short entry as meas_comp / cal.s cal_zs form it: |t0| e^(j theta0), or |t0| when theta0 is not a
+    finite angle within +-180 (meas_angok)."""
+    a0 = abs(t0)
+    return a0 * cmath.exp(1j * math.radians(th0)) if math.isfinite(th0) and abs(th0) <= 180 else complex(a0, 0)
+
+
+def open_rule(zth, t0, th0, f):
+    """cal.s cal_ores (revisions 11 and 14) in float64 for windows zth = [(|Z|, theta)] (floats of the published
+    words), the short entry t0 / th0 and the point's frequency f: ('nr', None, q) not resolved by the F test
+    (or n < 2, or a window at Zs), ('gate', None, q) resolved by the F test with |Zo| >= 1e5 but no lead stray
+    (B < |G| or B above 2 pi f 50 pF: "not resolved" too), or (kind, (|Zo| - |t0|, arg Zo in degrees), q)
+    with kind 'res' or 'edge' (q = n (n - 1) |Ybar|^2 / (x S) within 1e-3 of 1, |Zo| within 1e-6 of 1e5, or a
+    gate margin within GATE_EDGE: the value or "not resolved"). A mean with |Zo| below 1e5 is returned as it
+    is (cal_accept then fails the sweep, reason 3)."""
     n = len(zth)
     if n < 2:
         return 'nr', None, None
     a0 = abs(t0)
-    zs = a0 * cmath.exp(1j * math.radians(th0)) if math.isfinite(th0) and abs(th0) <= 180 else complex(a0, 0)
+    zs = short_zs(t0, th0)
     ys = []
     for z, th in zth:
         d = (z + a0) * cmath.exp(1j * math.radians(th)) - zs
@@ -241,14 +262,46 @@ def open_rule(zth, t0, th0):
     if q < 1 - 1e-3:
         return 'nr', None, q
     zo = 1 / yb + zs
-    return ('res' if q > 1 + 1e-3 else 'edge'), (abs(zo) - a0, math.degrees(cmath.phase(zo))), q
+    edge = q <= 1 + 1e-3
+    if abs(zo) >= 1e5 * (1 + GATE_EDGE):
+        bmax = 2 * math.pi * f * GATE_C
+        m = min((yb.imag - abs(yb.real)) / abs(yb), (bmax - yb.imag) / bmax)   # B >= |G|, B <= 2 pi f 50 pF
+        if m < -GATE_EDGE:
+            return 'gate', None, q
+        edge = edge or m <= GATE_EDGE
+    elif abs(zo) > 1e5 * (1 - GATE_EDGE):
+        edge = True                                   # at 1e5: the gate may or may not apply
+    return ('edge' if edge else 'res'), (abs(zo) - a0, math.degrees(cmath.phase(zo))), q
+
+
+def open_fill(src_words, src_short, low_short, f_src, f_low):
+    """cal.s cal_ofill for one target in float64: the source's stored words (|Z| bits, theta bits) and short
+    entries (t0, theta0) of source and target: ('res', (|Zo_low| - |t0_low|, arg Zo_low), inf), or ('nr', None,
+    None) when B_low is not above 0."""
+    zs = short_zs(*src_short)
+    zo = (u32f(src_words[0]) + abs(src_short[0])) * cmath.exp(1j * math.radians(u32f(src_words[1])))
+    d = zo - zs
+    b_low = -d.imag / abs(d) ** 2 * f_low / f_src
+    if not b_low > 0:
+        return 'nr', None, None
+    zl = short_zs(*low_short) - 1j / b_low
+    return 'res', (abs(zl) - abs(low_short[0]), math.degrees(cmath.phase(zl))), math.inf
+
+
+def fill_expect(words, shorts, p):
+    """The fill of target p (0..5) from the stored words {point: (|Z| bits, theta bits)} and shorts {point: (t0,
+    theta0)}: (rule, the source point or None)."""
+    for s in FSRC[p % 3]:
+        if words[s][1] != F_P400:
+            return open_fill(words[s], shorts[s], shorts[p], FREQS[s // 3], FREQS[p // 3]), s
+    return ('nr', None, None), None
 
 
 def open_match(got_z, got_t, rule, t0, what):
-    """The stored words got_z / got_t against open_rule's result (module docstring bounds)."""
+    """The stored words got_z / got_t against open_rule's or open_fill's result (module docstring bounds)."""
     kind, val, q = rule
     nr = got_z == F_1E10 and got_t == F_P400
-    if kind == 'nr':
+    if kind in ('nr', 'gate'):
         check(nr, '%s: stored %08X / %08X, the rule gives "not resolved" (q %r)' % (what, got_z, got_t, q))
         return
     if kind == 'edge' and nr:
@@ -259,14 +312,16 @@ def open_match(got_z, got_t, rule, t0, what):
           '(%s, q %.4g)' % (what, u32f(got_z), u32f(got_t), val[0], val[1], kind, q))
 
 
-def expect_point(wins, typ, short=None):
+def expect_point(wins, typ, short=None, f=None):
     """(|Z| bits, theta bits, the windows used) the specification of cal.s gives for the windows of one point,
     or None when they give no result. An open point (type 11) always gives one: (open_rule's result, None,
-    the windows used), short = (t0, theta0) of the point's short entry (revision 11)."""
+    the windows used), short = (t0, theta0) of the point's short entry (revision 11), f its frequency (the
+    gate of revision 14). The fill of revision 14 is not part of it (check_sweep_result applies it)."""
     if typ == 11:
         used = [w for w in wins if usable(w)][:CA_NO_OPEN]
         t0, th0 = short if short is not None else (0.0, 0.0)
-        return open_rule([(u32f(w['Z']), u32f(w['TH'])) for w in used], t0, th0), None, used
+        check(f is not None, 'expect_point: an open point needs its frequency (revision 14 gate)')
+        return open_rule([(u32f(w['Z']), u32f(w['TH'])) for w in used], t0, th0, f), None, used
     held, nt = [], 0
     for w in wins:
         z, th = w['Z'], w['TH']
@@ -292,20 +347,24 @@ def expect_point(wins, typ, short=None):
 def check_sweep_result(rig, typ, before, what, since=0.0):
     """Every point's stored |Z| and theta entry equal expect_point of its windows, each window used only of
     acquisitions after the point's fn_08009f10 (cal_point), the other types' entries unchanged; no store before
-    the commit (fn_0800bb64's writes all after the last point's last window)."""
+    the commit (fn_0800bb64's writes all after the last point's last window). An open sweep (type 11): points
+    6..14 and every point the rule resolves by open_match of its own rule; a 100 / 120 Hz point (0..5) whose
+    rule is 'nr' / 'gate' by the fill from the stored words (fill_expect); one whose rule is 'edge' by either
+    its own value or the fill (revision 14). Returns the table after the sweep."""
     after = table(rig)
     last_win = 0.0
+    rules, shorts, words = {}, {}, {}
     for p in range(15):
         wins, t0 = windows_of(rig, p, since)
         s0 = struct.unpack_from('<f', before, entry(p, 0) - USR_LO)[0]      # the short entry (not stored by an
         s0t = struct.unpack_from('<f', before, entry(p, 0) - USR_LO + 0x2D0)[0]  # open sweep: as before it)
-        exp = expect_point(wins, typ, (s0, s0t))
+        exp = expect_point(wins, typ, (s0, s0t), FREQS[p // 3])
         check(exp is not None, '%s: point %d: the windows give no result (%d windows)' % (what, p, len(wins)))
         zb, tb, used = exp
         got_z = struct.unpack_from('<I', after, entry(p, typ) - USR_LO)[0]
         got_t = struct.unpack_from('<I', after, entry(p, typ) - USR_LO + 0x2D0)[0]
         if typ == 11:
-            open_match(got_z, got_t, zb, s0, '%s: point %d' % (what, p))
+            rules[p], shorts[p], words[p] = zb, (s0, s0t), (got_z, got_t)
         else:
             check(got_z == zb and got_t == tb, '%s: point %d stored %08X / %08X, expected %08X / %08X (%r)' % (
                 what, p, got_z, got_t, zb, tb, [(hex(w['Z']), hex(w['TH'])) for w in wins[-4:]]))
@@ -314,6 +373,21 @@ def check_sweep_result(rig, typ, before, what, since=0.0):
                   'its fn_08009f10' % (what, p))
         if used:                                     # an open "not resolved" uses no window
             last_win = max(last_win, used[-1]['t'])
+    if typ == 11:
+        for p in range(15):
+            rule, gz, gt = rules[p], words[p][0], words[p][1]
+            label = '%s: point %d' % (what, p)
+            if p >= 6 or rule[0] == 'res':
+                open_match(gz, gt, rule, shorts[p][0], label)
+                continue
+            fill, src = fill_expect(words, shorts, p)
+            if rule[0] in ('nr', 'gate'):
+                open_match(gz, gt, fill, shorts[p][0], '%s (filled from %r)' % (label, src))
+                continue
+            try:                                     # 'edge': its own value, else the fill
+                open_match(gz, gt, ('res',) + rule[1:], shorts[p][0], label)
+            except AssertionError:
+                open_match(gz, gt, fill, shorts[p][0], '%s (edge; filled from %r)' % (label, src))
     for p in range(15):
         for t in range(12):
             if t == typ:
@@ -842,7 +916,7 @@ def c16_open_point_keeps_its_windows():
     check(early, 'c16: no usable window before the first no-reading publish (input)')
     t0, t1 = point_span(rig, 13)
     check(t1 - t0 <= CA_POINT_S + 0.5, 'c16: point 13 took %.2f s' % (t1 - t0))
-    exp = expect_point(wins, 11)
+    exp = expect_point(wins, 11, None, FREQS[13 // 3])     # the windows used (exp[2]) need no short entry
     check(early[0] in exp[2], 'c16: the window before the gap was not used (a restart)')
     check_sweep_result(rig, 11, before, 'c16')
     NOTES.append('c16: point 13 %.2f s, %d publishes, %d no-reading, %d used' % (
@@ -884,13 +958,19 @@ def c17_open_point_without_a_window():
 
 @case
 def c18_open_time_limit_takes_its_windows():
-    """Revisions 10 / 11, the limit path of an open point: in point 3 (120 Hz / 0.1 V, an open of 1 Mohm) three
-    windows are planted in CAO_OWIN (|Z| 1.00e6, 1.02e6, 0.98e6 at theta 0.5, -0.3, 0.1; the step word with
-    them) and CAO_TPT moved 21 s back. Input checks at the entry of cal_oend for point 3: CAO_NO below 7 (the
-    limit, not the 7th window) with the planted three first, and open_rule gives "resolved" for what CAO_OWIN
-    holds there. Expected: the result of point 3 (CAO_RES) is open_rule's mean of those windows (open_match),
-    the sweep goes on to point 4, no fail."""
-    rig = cal_rig(DutSource('R', 1e6), block=pre_block())
+    """Revisions 10 / 11, the limit path of an open point: in point 3 (120 Hz / 0.1 V) three windows are planted
+    in CAO_OWIN (|Z| 6.6315e7 x 1.00 / 1.01 / 0.99 at theta -89.6, -89.8, -89.7; the step word with them) and
+    CAO_TPT moved 21 s back. Revision 14: the open must be a lead stray to be kept (the gate), so the source and
+    the planted windows are one: below 500 Hz the admittance 1e-10 S + j 2 pi f 20 pF (at 120 Hz 1.508e-8 S at
+    +89.6 degrees, |Z| 6.63e7 ohm at -89.6: a window the DUT publishes between the planting and cal_oend agrees
+    with the planted three), from 500 Hz 1 Mohm (points 6.. are not reached before the case ends). Input checks
+    at the entry of cal_oend for point 3: CAO_NO below 7 (the limit, not the 7th window) with the planted three
+    first, and open_rule gives "resolved" for what CAO_OWIN holds there (C about 20 pF, below the gate's 50 pF;
+    arg Ybar about +89.7, inside +45 .. +135). Expected: the result of point 3 (CAO_RES) is open_rule's mean of
+    those windows (open_match), the sweep goes on to point 4, no fail."""
+    w = 2 * math.pi
+    rig = cal_rig(DutSource(z=lambda f: 1 / complex(1e-10, w * f * 20e-12) if f < 500 else complex(1e6, 0.0)),
+                  block=pre_block())
     rig.run(1.0)
     start(rig, typ=11)
     wait_point(rig, 3)
@@ -903,7 +983,7 @@ def c18_open_time_limit_takes_its_windows():
                                                     rig.rd(OWN_CAL + CAO_OWIN + 8 * i + 4)) for i in range(n)]))
     a = rig.s['cal_oend'] & ~1
     rig.m.uc.hook_add(UC_HOOK_CODE, at_oend, begin=a, end=a)
-    planted = [(f2u(1.00e6), f2u(0.5)), (f2u(1.02e6), f2u(-0.3)), (f2u(0.98e6), f2u(0.1))]
+    planted = [(f2u(6.6315e7), f2u(-89.6)), (f2u(6.6315e7 * 1.01), f2u(-89.8)), (f2u(6.6315e7 * 0.99), f2u(-89.7))]
     for i, (z, th) in enumerate(planted):
         rig.wr(OWN_CAL + CAO_OWIN + 8 * i, z)
         rig.wr(OWN_CAL + CAO_OWIN + 8 * i + 4, th)
@@ -914,7 +994,7 @@ def c18_open_time_limit_takes_its_windows():
     _, n, held = [s for s in seen if s[0] == 3][0]
     check(n < CA_NO_OPEN and held[:3] == planted, 'c18: at cal_oend %d windows %r (input)' % (n, held))
     t0, th0 = u32f(rig.rd(entry(3, 0))), u32f(rig.rd(entry(3, 0) + 0x2D0))
-    rule = open_rule([(u32f(z), u32f(th)) for z, th in held], t0, th0)
+    rule = open_rule([(u32f(z), u32f(th)) for z, th in held], t0, th0, FREQS[1])
     check(rule[0] == 'res', 'c18: the rule gives %r for %r (input: resolved)' % (rule, held))
     rig.run(0.3)
     got = (rig.rd(OWN_CAL + CAO_RES + 8 * 3), rig.rd(OWN_CAL + CAO_RES + 8 * 3 + 4))
@@ -1245,7 +1325,6 @@ def c22_host_drives_the_calibration_menu():
     return True
 
 
-@case
 def windows_of_admittances(ys, t0, th0):
     """The screen-3 windows (|Z| = |Zo| - |t0|, theta = arg Zo) of open admittances ys: Zo = 1 / Y + Zs."""
     zs = abs(t0) * cmath.exp(1j * math.radians(th0))
@@ -1260,7 +1339,10 @@ def windows_of_admittances(ys, t0, th0):
 # frequency the point, its short entry (t0, theta0) and the first 7 readings after the first, turned back into
 # the screen-3 windows of an open calibration through the stored table (scratchpad opencal/r11/wins.py:
 # |Zdut| from the decade interpolation inverted, Y = 1 / Zdut + Yo, Zo = 1 / Y + Zs), with the result the
-# revision-11 rule gives (MEASUREMENT_FIX_DESIGN revision 11.2)
+# revision-11 rule gives (MEASUREMENT_FIX_DESIGN revision 11.2) and the revision-14 gate after it: the 1 kHz set's
+# mean is G -2.909e-10 S, B 1.372e-8 S, arg Ybar +91.215 degrees (scratchpad rev14/u02gate.py): B >= |G| and C
+# 2.18 pF, so the gate keeps it ('res'; the first revision-14 gate, G >= 0, refused this real stray); 10 kHz
+# +85.909 degrees, C 1.954 pF and 100 kHz +73.675 degrees, C 1.982 pF pass
 METER_OPEN = [
     (100, 1, 0.000395802, -171.588, [(5.93615e+07, -141.579), (5.59751e+07, 171.7), (7.59358e+07, -56.4039),
                                      (8.86626e+07, -53.7679), (5.24748e+07, 71.9602), (1.48162e+08, 58.1453),
@@ -1282,16 +1364,27 @@ METER_OPEN = [
 
 @case
 def u02_open_rule_unit():
-    """cal_ores (revision 11: the vector mean of the open admittances when resolved, else "not resolved" 1e10 /
-    +400) called directly on a rig at the main loop, with the point's short entry written into the RAM table,
-    on sets of 0..7 windows with the expected kind written out: none and one window (not resolved), three equal
-    windows (resolved, the sum of squares 0), a 2 pF stray at 10 kHz with a scatter of 3e-9 S (resolved), the
-    same stray at 100 Hz (1.26e-9 S) with a scatter of 2e-8 S spread around it (not resolved), and METER_OPEN.
-    Input check: open_rule gives the written kind for every set (not 'edge'). Expected: open_match."""
+    """cal_ores (revision 11: the vector mean of the open admittances when resolved by the F test, else "not
+    resolved" 1e10 / +400; revision 14: kept only as a lead stray, B >= |G|, B > 0, B <= 2 pi f 50 pF, when
+    |Zo| >= 1e5) called directly on a rig at the main loop, with the point's short entry written into the RAM
+    table, on sets of 0..7 windows with the expected kind written out: none and one window (not resolved), three
+    equal windows (resolved, the sum of squares 0; at 10 kHz arg Ybar +88 degrees, C 1.99 pF), a 2 pF stray at
+    10 kHz with G 5e-9 S (the stored 10 kHz opens of three backups: G 5.2e-9 .. 1.32e-8 S, scratchpad
+    rev14/opens.py) and a scatter of 3e-9 S (resolved; without G its mean lay at +89.999 degrees, on the
+    gate's edge), the same stray at 100 Hz (1.26e-9 S) with a scatter of 2e-8 S spread around it (not
+    resolved), METER_OPEN, and the gate sets, each three equal windows (S = 0, resolved by the F test) at
+    point 4 (120 Hz, 0.3 V) with METER_OPEN's short entry there: the stored 120 Hz opens of backup
+    20261123-233542 at 0.1 V (Y = -2.87e-7 + j2.92e-8 S, arg Ybar +174.2, C 38.8 pF: B < |G|) and of backup
+    20261123-204351 at 0.3 V (Y = 3.9e-8 - j2.78e-8 S: B < 0), 60 pF with G 1e-10 S (above 50 pF), all
+    'gate'; 20 pF with G 1e-10 S (arg Ybar +89.6, below 50 pF: 'res'); 20 pF with G -1e-10 S (arg Ybar +90.4,
+    B >= |G|: 'res', a noise-negative G of a real stray); and 50 kohm resistive at 10 kHz (point
+    10; |Zo| below 1e5: returned as it is, 'res', for cal_accept's open-low fail). Input check: open_rule gives
+    the written kind for every set (not 'edge'). Expected: open_match."""
     rig = own_rig(DutSource())
     w = 2 * math.pi
-    y10k = 1j * w * 1e4 * 2e-12
+    y10k = 5e-9 + 1j * w * 1e4 * 2e-12
     y100 = 1j * w * 100 * 2e-12
+    t120, th120 = METER_OPEN[1][2], METER_OPEN[1][3]
     sets = [('none', 1, 0.0004, -170.0, [], 'nr'),
             ('one', 10, 0.009, 81.0, [(8.0e6, -88.0)], 'nr'),
             ('equal', 10, 0.009, 81.0, [(8.0e6, -88.0)] * 3, 'res'),
@@ -1301,10 +1394,18 @@ def u02_open_rule_unit():
                 [y100 + 2e-8 * cmath.exp(1j * math.radians(17.0 + 360.0 * i / 7)) for i in range(7)],
                 0.0004, -170.0), 'nr')]
     sets += [('meter %d Hz' % f, p, t0, th0, wins, kind) for f, p, t0, th0, wins, kind in METER_OPEN]
+    for what, y, kind in (('120 Hz open of 2026-11-23 23:35, 0.1 V', complex(-2.87e-7, 2.92e-8), 'gate'),
+                          ('120 Hz open of 2026-11-23 20:43, 0.3 V', complex(3.9e-8, -2.78e-8), 'gate'),
+                          ('60 pF at 120 Hz', complex(1e-10, w * 120 * 60e-12), 'gate'),
+                          ('20 pF at 120 Hz', complex(1e-10, w * 120 * 20e-12), 'res'),
+                          ('20 pF at 120 Hz, G below 0', complex(-1e-10, w * 120 * 20e-12), 'res')):
+        sets.append((what, 4, t120, th120, windows_of_admittances([y] * 3, t120, th120), kind))
+    sets.append(('50 kohm at 10 kHz', 10, 0.009, 81.0, windows_of_admittances([complex(2e-5, 0)] * 3, 0.009, 81.0),
+                 'res'))
     for what, p, t0, th0, wins, kind in sets:
         t0f, th0f = u32f(f2u(t0)), u32f(f2u(th0))
         wf = [(u32f(f2u(z)), u32f(f2u(th))) for z, th in wins]
-        rule = open_rule(wf, t0f, th0f)
+        rule = open_rule(wf, t0f, th0f, FREQS[p // 3])
         check(rule[0] == kind, 'u2 %s: the rule gives %r, written %s (input)' % (what, rule, kind))
         rig.wr(entry(p, 0), f2u(t0))
         rig.wr(entry(p, 0) + 0x2D0, f2u(th0))
@@ -1318,6 +1419,127 @@ def u02_open_rule_unit():
         open_match(r0, r1, rule, t0f, 'u2 %s' % what)
         NOTES.append('u2 %s: %s, q %s, stored %.6g / %.4f' % (what, rule[0], 'none' if rule[2] is None else
                                                               '%.4g' % rule[2], u32f(r0), u32f(r1)))
+    return True
+
+
+@case
+def u03_open_fill_unit():
+    """cal_ofill (revision 14 rule 3 b) called directly on a rig at the main loop, with the 15 results in CAO_RES
+    and the short entries of points 0..11 written into the RAM table. A resolved source result is the stored form
+    of Y = G + j 2 pi f C over its short: Zo = 1 / Y + Zs, words |Zo| - |t0| and arg Zo (windows_of_admittances);
+    "not resolved" is 1e10 / +400.
+    Set A: sources 6 (1 kHz 0.1 V) 2.0 pF with G 1e-9 S, 9 (10 kHz 0.1 V) 2.5 pF, 10 (10 kHz 0.3 V) 3.0 pF with
+    G 5e-9 S, 12..14 (100 kHz) 1.8 pF; 7, 8, 11 not resolved; targets 0, 1, 2, 4, 5 not resolved, 3 (120 Hz,
+    0.1 V) a resolved 20 pF open. Expected by cal_fsrc: 0 from 6 (2.0 pF), 1 from 10 (7 not resolved), 2 from 6
+    (8 and 11 not resolved), 3 kept bit for bit, 4 from 10, 5 from 6; G dropped. By hand: Zo_low = Zs_low - j /
+    (2 pi f_low C) with Zs of milliohms, so |Zo_low| - |t0| is 1 / (2 pi f_low C) and arg Zo_low -90 degrees:
+    0 and 2: 1 / (2 pi 100 Hz 2e-12 F) = 7.957747e8 ohm; 1: 1 / (2 pi 100 3e-12) = 5.305165e8; 4: 1 / (2 pi
+    120 3e-12) = 4.420971e8; 5: 1 / (2 pi 120 2e-12) = 6.631456e8 (input check: open_fill of the planted float32
+    words within 1e-6 relative of these and 1e-4 degree of -90). Point 2's short has theta0 +400 (not an angle:
+    Zs = |t0|, the other path of cal_zs). Set B: every source 6..11 not resolved: the targets stay 1e10 / +400
+    bit for bit. Both sets: points 3 and 6..14 unchanged bit for bit. Expected: open_match (module bounds)."""
+    rig = own_rig(DutSource())
+    w = 2 * math.pi
+    shorts = {p: (0.0004 + 0.0001 * p, -170.0 if p < 6 else (118.0 if p < 9 else 81.0)) for p in range(12)}
+    shorts[2] = (0.0006, 400.0)
+    nr = (F_1E10, F_P400)
+
+    def stored(p, c, g=0.0):
+        t0, th0 = shorts.get(p, (0.08, 78.0))
+        (z, th), = windows_of_admittances([complex(g, w * FREQS[p // 3] * c)], t0, th0)
+        return f2u(z), f2u(th)
+    hand = {0: 7.957747e8, 1: 5.305165e8, 2: 7.957747e8, 4: 4.420971e8, 5: 6.631456e8}
+    base = {p: nr for p in range(15)}
+    base[3] = stored(3, 20e-12, 1e-10)
+    base.update({12: stored(12, 1.8e-12), 13: stored(13, 1.8e-12), 14: stored(14, 1.8e-12)})
+    set_a = dict(base)
+    set_a.update({6: stored(6, 2.0e-12, 1e-9), 9: stored(9, 2.5e-12), 10: stored(10, 3.0e-12, 5e-9)})
+    src_a = {0: 6, 1: 10, 2: 6, 4: 10, 5: 6}
+    for p, (t0, th0) in shorts.items():
+        rig.wr(entry(p, 0), f2u(t0))
+        rig.wr(entry(p, 0) + 0x2D0, f2u(th0))
+    sh = {p: (u32f(f2u(t0)), u32f(f2u(th0))) for p, (t0, th0) in shorts.items()}
+    for what, res, srcs in (('A', set_a, src_a), ('B', base, {})):
+        for p in range(15):
+            rig.wr(OWN_CAL + CAO_RES + 8 * p, res[p][0])
+            rig.wr(OWN_CAL + CAO_RES + 8 * p + 4, res[p][1])
+        rig.m.call(rig.s['cal_ofill'])
+        got = {p: (rig.rd(OWN_CAL + CAO_RES + 8 * p), rig.rd(OWN_CAL + CAO_RES + 8 * p + 4)) for p in range(15)}
+        for p in [3] + list(range(6, 15)):
+            check(got[p] == res[p], 'u3 %s: point %d changed %08X / %08X -> %08X / %08X' % (
+                what, p, res[p][0], res[p][1], got[p][0], got[p][1]))
+        for p in (0, 1, 2, 4, 5):
+            rule, src = fill_expect(res, sh, p)
+            check(src == srcs.get(p), 'u3 %s: point %d fill source %r, expected %r (input)' % (what, p, src,
+                                                                                            srcs.get(p)))
+            if src is not None:
+                zv, tv = rule[1]
+                check(abs(zv - hand[p]) <= 1e-6 * hand[p] and abs(tv + 90.0) <= 1e-4,
+                      'u3 %s: point %d fill %.7g / %.6f, by hand %.7g / -90 (input)' % (what, p, zv, tv, hand[p]))
+            open_match(got[p][0], got[p][1], rule, sh[p][0], 'u3 %s: point %d' % (what, p))
+            NOTES.append('u3 %s: point %d from %r: %.7g / %.5f' % (what, p, src, u32f(got[p][0]), u32f(got[p][1])))
+    return True
+
+
+def open_c23():
+    """c23's open: 100 Hz (f < 110) 40 pF with G 2e-8 S (arg Y +51.5 degrees, |Z| 3.11e7 ohm); 120 Hz (110 .. 500)
+    3e7 ohm at -170 degrees (its admittance at +170: G < 0, no lead stray, coherent: the model has no noise);
+    1 kHz and 10 kHz (500 .. 5e4) 40 pF with G 2e-8 S (+85.45 degrees, 3.97e6 ohm; +89.54 degrees, 3.98e5 ohm);
+    100 kHz (above 5e4, c20's note on the model's 100 kHz word) 1 Mohm resistive (refused by the gate, |Zo| >=
+    1e5, so no open-low fail)."""
+    w = 2 * math.pi
+
+    def z(f):
+        if f < 110 or 500 <= f < 5e4:
+            return 1 / complex(2e-8, w * f * 40e-12)
+        if f < 500:
+            return 3e7 * cmath.exp(1j * math.radians(-170.0))
+        return complex(1e6, 0.0)
+    return DutSource(z=z)
+
+
+@case
+def c23_open_gate_and_fill():
+    """Revision 14 on a whole open sweep (open_c23). Input checks (open_rule of each point's windows with its
+    short entry): the three 120 Hz points are 'gate' (the F test resolves them, the gate refuses them) and the
+    three 1 kHz points 'res'. Expected: the sweep finishes (status 2) with one save (SAVE_COUNT + 1); every point
+    by check_sweep_result (the fill included); each 120 Hz point filled from the 1 kHz point of its level
+    (fill_expect's source 6 + level, its stored theta not +400), |Zo| - |t0| within 1e-2 of 1 / (2 pi 120 Hz 40
+    pF) = 3.315728e7 ohm [J: the model's 12-bit codes of the 1 kHz windows] and theta within 0.1 degree of
+    -90; the 100 kHz points "not resolved" (refused by the gate, not filled: only 100 / 120 Hz are)."""
+    rig = cal_rig(open_c23(), block=pre_block())
+    rig.run(1.0)
+    before, saves0 = table(rig), rig.rd(SAVE_COUNT)
+    start(rig, typ=11)
+    wait_end(rig)
+    check(rig.rd(V_CAL_STATUS) == 2, 'c23: status %d (reason %d at %d)' % (
+        rig.rd(V_CAL_STATUS), rig.rd(OWN_CAL + CAO_WHY), rig.rd(OWN_CAL + CAO_FAILP)))
+    check(rig.rd(SAVE_COUNT) == saves0 + 1, 'c23: saves %d -> %d' % (saves0, rig.rd(SAVE_COUNT)))
+    kinds = {}
+    for p in range(15):
+        wins, _ = windows_of(rig, p)
+        s0 = struct.unpack_from('<f', before, entry(p, 0) - USR_LO)[0]
+        s0t = struct.unpack_from('<f', before, entry(p, 0) - USR_LO + 0x2D0)[0]
+        kinds[p] = expect_point(wins, 11, (s0, s0t), FREQS[p // 3])[0][0]
+    check(all(kinds[p] == 'gate' for p in (3, 4, 5)) and all(kinds[p] == 'res' for p in (6, 7, 8)),
+          'c23: rule kinds %r (input: 120 Hz gate, 1 kHz resolved)' % kinds)
+    after = check_sweep_result(rig, 11, before, 'c23')
+    words = {p: (struct.unpack_from('<I', after, entry(p, 11) - USR_LO)[0],
+                 struct.unpack_from('<I', after, entry(p, 11) - USR_LO + 0x2D0)[0]) for p in range(15)}
+    shorts = {p: (struct.unpack_from('<f', before, entry(p, 0) - USR_LO)[0],
+                  struct.unpack_from('<f', before, entry(p, 0) - USR_LO + 0x2D0)[0]) for p in range(15)}
+    hand = 1 / (2 * math.pi * 120 * 40e-12)
+    for p in (3, 4, 5):
+        _, src = fill_expect(words, shorts, p)
+        z, th = u32f(words[p][0]), u32f(words[p][1])
+        check(src == 6 + p % 3 and words[p][1] != F_P400 and abs(z - hand) <= 1e-2 * hand and abs(th + 90.0) <= 0.1,
+              'c23: point %d stored %.7g / %.4f from %r, expected the fill of point %d, %.7g / -90' % (
+                  p, z, th, src, 6 + p % 3, hand))
+    check(all(words[p] == (F_1E10, F_P400) for p in (12, 13, 14)), 'c23: 100 kHz words %r' % (
+        [(hex(a), hex(b)) for a, b in (words[p] for p in (12, 13, 14))],))
+    NOTES.append('c23: kinds %s' % ' '.join('%d:%s' % (p, kinds[p]) for p in range(15)))
+    check_restored(rig, 'c23', typ=11)
+    rig.watch.check(what='c23')
     return True
 
 

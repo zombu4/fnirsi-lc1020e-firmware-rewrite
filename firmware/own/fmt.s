@@ -7,37 +7,49 @@
 @ 0x0800D452 C, 0x0800D48C L) and the host's table fmt_fn (own/cmd.s) call the wrappers here; the
 @ two row draws (0x0800D380 row 1, 0x0800D4B8 row 0) call own_row_draw. Each wrapper has the
 @ vendor formatter's interface: s0 = value, r0 = text buffer (8 bytes), r1 = unit text buffer, r2 =
-@ address of the unit index word; it writes the same three outputs:
+@ address of the unit index word; it writes the same three outputs. The two shared calls get the
+@ address of their value word in r3 instead of s0, set by the case that chose it (own_fmt_rz: |Z|
+@ 0x200050C4 or R 0x200050B8; own_fmt_dqs: D 0x200050D4 or Q 0x200050D0; the `addw` of ui_41.s),
+@ so the quantity is told by the call site, not by a RAM word. The outputs:
+@ - every wrapper: OL (the vendor's text "0L  ", unit text empty, index 0, MF_MARK 0) at the test
+@   frequencies 60, 100 and 120 Hz when the published |Z| 0x200050C4 lies above 1e7 ohm, the
+@   highest impedance the manual specifies in its 100 Hz column (design revision 14 rule 2,
+@   fmt_lowz);
 @ - R, |Z|, X (ohm), C (nF) and L (uH):
-@   - OL (the vendor's text "0L  ", unit text empty, index 0) when the value is not finite or its
-@     magnitude lies above the manual's measurement range (UM 1543: R 0..10 Mohm, C 0..100 mF,
-@     L 0..100 H; |Z| and X by the R row, design S2.1 "The other quantities");
-@   - R (main row and secondary R) and C (S2.2 revision 13, owner 2026-11-23): a finite negative
-@     value is shown as 0, the vendor formatter's own text of 0 ("0.0000" ohm, index 5; "0.0" pF,
-@     index 1), and marked (0 lies below every lower limit of the accuracy table); |Z| takes the
-@     same path and is never negative (revision 10). X keeps its sign: it has its own wrapper
-@     own_fmt_x (the X call 0x0800D32A and fmt_fn's FK_OHM_X), so the rule is told by the call
-@     site, not by a RAM word; L the same as R and C (owner 2026-11-23, "i don't think any neg
-@     numbers should be possible": "0.0" uH, index 3, from 0x0800DE2C "%0.1f" below 100);
+@   - OL when the value is not finite or its magnitude lies above the manual's measurement range
+@     (UM 1543: R 0..10 Mohm, C 0..100 mF, L 0..100 H; |Z| and X by the R row, design S2.1 "The
+@     other quantities");
+@   - a finite negative value by its quantity (revision 14 rule 1, owner 2026-11-24; it corrects
+@     revision 13, which showed every negative as 0): the true value lies at one end of its range.
+@     Quantities proportional to a near-zero component, series R (Rs = Re Z), parallel C (Cp = Im
+@     Y / w), series L (Ls = Xs / w): 0, the vendor formatter's own text of 0 ("0.0000" ohm, index
+@     5; "0.0" pF, index 1; "0.0" uH, index 3), marked (0 lies below every lower limit of the
+@     accuracy table). Reciprocals of a near-zero component, parallel R (Rp = 1 / Re Y), series C
+@     (Cs = -1 / (w Xs)), parallel L (Lp = -1 / (w Bp)): OL. Series or parallel is the word
+@     0x200011EC (0 / 1), which meas_publish writes in the same block as R, C and L (its only
+@     writer besides the start-up zero fill; design revision 14.1). |Z| (own_fmt_z) takes 0 and is
+@     never negative (revision 10). X (own_fmt_x) keeps its sign;
 @   - else the vendor formatter (0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L) on the magnitude, one
 @     decimal less where its text would exceed 19,999 counts (S2.4, D5; C 2000.0 .. 7999.9 uF
-@     goes to mF with 3 decimals instead, fmt_reduce), and a '-' in front for a
-@     negative X or L (S2.2; X, which the vendor formats signed itself only with 0x20001198 = 2,
-@     is signed once, as the vendor gets the magnitude); a text of more than 7 characters with
-@     its sign is OL (never reached by the vendor formats: at most 6 characters);
+@     goes to mF with 3 decimals instead, fmt_reduce), and a '-' in front for a negative X (S2.2;
+@     X, which the vendor formats signed itself only with 0x20001198 = 2, is signed once, as the
+@     vendor gets the magnitude); a text of more than 7 characters with its sign is OL (never
+@     reached by the vendor formats: at most 6 characters);
 @   - MF_MARK = 1 when the magnitude lies outside the accuracy table of the manual for the
 @     frequency now (UM 1596-1646 as read in design S2.1; 120 Hz in the 100 Hz column; 60 Hz has no
 @     column: always marked), else 0 (design D6: the value is shown, with a marker);
 @ - D, Q (0x0800DD44) and theta (0x0800DFC4): the vendor formatter on the value, the S2.4 decimal
-@   rule, MF_MARK = 0 (no table entry, design S2.1); a D or Q below 0 is given to it as +0
-@   ("0.0000", "%0.4f" below 10; owner 2026-11-23); theta keeps its sign.
+@   rule, MF_MARK = 0 (no table entry, design S2.1); a D below 0 is given to it as +0 ("0.0000",
+@   "%0.4f" below 10), a Q below 0 is OL (revision 14 rule 1; meas_publish stores both as
+@   magnitudes, so neither is negative there today); theta keeps its sign.
 @ own_row_draw draws the row's text with the vendor's fn_0800d14c and then, when MF_MARK is 1, puts
 @ an amber multiply cover over each of the row's seven glyph objects (0x200059A8 + 32 row + 4 i,
 @ i = 0..6; ui_41.s 1111, 274), so the digits are drawn amber with their shapes; an unmarked row
 @ hides the covers again (own_row_draw below: why the image recolour cannot do it).
 @
-@ RAM: only MF_MARK, MF_ROW0, MF_ROW1 (OWN_FUNC, own.inc); the covers are GUI objects on the GUI
-@ heap. Never-brick: no flash, no save.
+@ RAM: only MF_MARK, MF_ROW0, MF_ROW1 (OWN_FUNC, own.inc) written; read: 0x20001144 (frequency),
+@ 0x200050C4 (|Z|), 0x200011EC (series / parallel), 0x200050B8 (R, own_fmt_rs); the covers are GUI
+@ objects on the GUI heap. Never-brick: no flash, no save.
 
 	.syntax unified
 	.arch armv7e-m
@@ -52,7 +64,11 @@
 	.equ	K_DQ,		3		@ D, Q
 	.equ	K_TH,		4		@ theta, degrees
 	.equ	K_MASK,		7		@ the kind bits of fmt_core's r3
-	.equ	F_ZERO,		8		@ r3 flag: a negative value is shown as 0 (R, C, L, D, Q)
+	.equ	F_ZERO,		8		@ r3 flag: a finite negative value is shown as 0
+	.equ	F_OL,		16		@ r3 flag: a finite negative value is shown as OL
+	.equ	F_NEG,		F_ZERO + F_OL	@ the two rules for a negative value
+	.equ	F_SP,		32		@ r3 flag: F_ZERO / F_OL is the series rule; swapped when
+						@ 0x200011EC is not 0 (parallel values in use)
 	.equ	EXP_MASK,	0x7F800000	@ exponent field: all ones = Inf or NaN
 	.equ	GLYPHS,		0x200059A8	@ 2 rows x 8 glyph objects (ui_41.s 274)
 	.equ	MAX_COUNT,	19999		@ D5: 4 1/2 digits
@@ -61,16 +77,39 @@
 	.p2align 2
 
 @ ----------------------------------------------------------------------------
-@ own_fmt_r - ohm: R or |Z| in s0, a finite negative value shown as 0 (S2.2 revision 13).
-@   own_fmt_rs - the secondary R: the value from 0x200050B8 (the caller at 0x0800D2E4 made s0
-@   absolute, ui_41.s 1350-1352; S2.2 takes the signed word), then as own_fmt_r. own_fmt_x - X
-@   in ohm, signed (called only at 0x0800D32A, case 1 of 0x200011E8 with s0 = 0x200050C8, and
-@   by fmt_fn's FK_OHM_X, own/cmd.s). own_fmt_c - C in nF, a finite negative value shown as 0.
-@   own_fmt_l - L in uH, the same. own_fmt_dq - D or Q, a negative shown as 0. own_fmt_th -
-@   theta, signed. All: r0 = text, r1 =
-@   unit text, r2 = index word address (the vendor interface). AAPCS: r0..r3, r12, s0..s15
+@ The wrappers (file header; design revision 14.2). All: r0 = text, r1 = unit text, r2 = index
+@   word address (the vendor interface); s0 = the value, except own_fmt_rz / own_fmt_dqs (r3 =
+@   the address of the value word) and own_fmt_rs (0x200050B8). AAPCS: r0..r3, r12, s0..s15
 @   changed.
+@   own_fmt_rz - 0x0800D43C, the call row 0's cases 4 and 1 share (fn_0800d3d8): r3 = 0x200050C4
+@     (|Z|, `addw` at 0x0800D406) or 0x200050B8 (R, `addw` at 0x0800D432): s0 = the word, then
+@     own_fmt_z for 0x200050C4, else own_fmt_r.
+@   own_fmt_rs - 0x0800D2E4, the secondary R: s0 = 0x200050B8 (the caller made s0 absolute,
+@     ui_41.s 1350-1352; S2.2 takes the signed word), then own_fmt_r.
+@   own_fmt_r - R in ohm (main row by own_fmt_rz, secondary, fmt_fn FK_OHM): a finite negative
+@     value 0 in series, OL in parallel (0x200011EC).
+@   own_fmt_z - |Z| in ohm (own_fmt_rz, fmt_fn FK_Z): a finite negative value 0 (never negative
+@     on screens 1 and 2, revision 10).
+@   own_fmt_x - X in ohm, signed (called only at 0x0800D32A, case 1 of 0x200011E8 with s0 =
+@     0x200050C8, and by fmt_fn's FK_OHM_X, own/cmd.s).
+@   own_fmt_c - C in nF: a finite negative value OL in series (Cs), 0 in parallel (Cp).
+@   own_fmt_l - L in uH: a finite negative value 0 in series (Ls), OL in parallel (Lp).
+@   own_fmt_dqs - 0x0800D356, the call row 1's cases 2 and 3 share (fn_0800d294): r3 = 0x200050D4
+@     (D, `addw` at 0x0800D340) or 0x200050D0 (Q, `addw` at 0x0800D34C): s0 = the word, then
+@     own_fmt_d for 0x200050D4, else own_fmt_q.
+@   own_fmt_d - D: a negative value 0. own_fmt_q - Q: a negative value OL. own_fmt_th - theta,
+@     signed.
 @ ----------------------------------------------------------------------------
+	.global	own_fmt_rz
+	.thumb_func
+	.type	own_fmt_rz, %function
+own_fmt_rz:
+	vldr	s0, [r3]		@ the word the case chose
+	ldr	r12, =V_Z
+	cmp	r3, r12
+	beq	own_fmt_z		@ case 4: |Z|
+	b	own_fmt_r		@ case 1: R
+
 	.global	own_fmt_rs
 	.thumb_func
 	.type	own_fmt_rs, %function
@@ -81,7 +120,14 @@ own_fmt_rs:
 	.thumb_func
 	.type	own_fmt_r, %function
 own_fmt_r:
-	movs	r3, #K_R + F_ZERO	@ R, |Z|: a negative shown as 0
+	movs	r3, #K_R + F_ZERO + F_SP	@ Rs below 0: 0; Rp below 0: OL
+	b	fmt_core
+
+	.global	own_fmt_z
+	.thumb_func
+	.type	own_fmt_z, %function
+own_fmt_z:
+	movs	r3, #K_R + F_ZERO	@ |Z|: a negative shown as 0
 	b	fmt_core
 
 	.global	own_fmt_x
@@ -95,21 +141,36 @@ own_fmt_x:
 	.thumb_func
 	.type	own_fmt_c, %function
 own_fmt_c:
-	movs	r3, #K_C + F_ZERO	@ C: a negative shown as 0
+	movs	r3, #K_C + F_OL + F_SP	@ Cs below 0: OL; Cp below 0: 0
 	b	fmt_core
 
 	.global	own_fmt_l
 	.thumb_func
 	.type	own_fmt_l, %function
 own_fmt_l:
-	movs	r3, #K_L + F_ZERO	@ L: a negative shown as 0 (owner 2026-11-23)
+	movs	r3, #K_L + F_ZERO + F_SP	@ Ls below 0: 0; Lp below 0: OL
 	b	fmt_core
 
-	.global	own_fmt_dq
+	.global	own_fmt_dqs
 	.thumb_func
-	.type	own_fmt_dq, %function
-own_fmt_dq:
-	movs	r3, #K_DQ + F_ZERO	@ D, Q: a negative shown as 0 (owner 2026-11-23)
+	.type	own_fmt_dqs, %function
+own_fmt_dqs:
+	vldr	s0, [r3]		@ the word the case chose
+	ldr	r12, =V_D
+	cmp	r3, r12
+	bne	own_fmt_q		@ case 3: Q
+	.global	own_fmt_d		@ case 2: D
+	.thumb_func
+	.type	own_fmt_d, %function
+own_fmt_d:
+	movs	r3, #K_DQ + F_ZERO	@ D below 0: 0
+	b	fmt_core
+
+	.global	own_fmt_q
+	.thumb_func
+	.type	own_fmt_q, %function
+own_fmt_q:
+	movs	r3, #K_DQ + F_OL	@ Q below 0: OL
 	b	fmt_core
 
 	.global	own_fmt_th
@@ -121,16 +182,20 @@ own_fmt_th:
 
 @ ----------------------------------------------------------------------------
 @ fmt_core - the wrappers' work (file header): s0 = value, r0 = text, r1 = unit text, r2 = index
-@   word address, r3 = kind K_* plus F_ZERO for R, C, L (here) and D, Q (at .Lfc_plain, the
-@   vendor's text of 0 "0.0000"; L: "0.0" uH index 3). Register use: r4 text, r5 unit, r6 index
-@   address, r7 kind, r8 OWN_FUNC, r9 marker, r10 F_ZERO (until the vendor call; fmt_reduce
-@   changes r10); s16 the value, s17 its magnitude. With F_ZERO a finite value below 0 is
-@   replaced by +0 in s16 and s17 before the range test, so all that follows sees 0: not OL
-@   (0 <= fmt_hard), marked (0 lies below every fmt_spec lower limit, and 60 Hz is always
-@   marked), the vendor's text of 0 (0x0800E028: 0 < 0x40ffff97, "%0.4f", "0.0000", index 5;
-@   0x0800DB24: 0 <= 0xbb03126f and 0 < 0x3f4ccccd, 0 * 1000 with "%0.1f", "0.0", "pF", index
-@   1), fmt_reduce keeps it (0 counts), and no '-' (s16 = 0 is not below 0). -0.0 is not below 0
-@   either way: it was already shown without a sign. Not finite stays OL (no number to show).
+@   word address, r3 = kind K_* plus the rule for a negative value, F_ZERO (0) or F_OL (OL) or
+@   none (X, theta), plus F_SP for R, C, L (the rule is the series one; with 0x200011EC not 0 the
+@   two are swapped). Register use: r4 text, r5 unit, r6 index address, r7 kind, r8 OWN_FUNC, r9
+@   marker, r10 the rule F_ZERO / F_OL / 0 (until the vendor call; fmt_reduce changes r10); s16
+@   the value, s17 its magnitude. First fmt_lowz (revision 14 rule 2): OL for every kind at 60 /
+@   100 / 120 Hz with |Z| above 1e7. Then, for R, C, L: not finite is OL (no number to show); a
+@   finite value below 0 is OL with F_OL; with F_ZERO it is replaced by +0 in s16 and s17 before
+@   the range test, so all that follows sees 0: not OL (0 <= fmt_hard), marked (0 lies below every
+@   fmt_spec lower limit, and 60 Hz is always marked), the vendor's text of 0 (0x0800E028: 0 <
+@   0x40ffff97, "%0.4f", "0.0000", index 5; 0x0800DB24: 0 <= 0xbb03126f and 0 < 0x3f4ccccd, 0 *
+@   1000 with "%0.1f", "0.0", "pF", index 1; 0x0800DE2C: 0 below 80, "%0.1f", "0.0", "uH", index
+@   3), fmt_reduce keeps it (0 counts), and no '-' (s16 = 0 is not below 0). D, Q at .Lfc_plain
+@   the same with the vendor's text of 0 "0.0000". -0.0 is not below 0 either way: it was already
+@   shown without a sign.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	fmt_core, %function
@@ -141,12 +206,22 @@ fmt_core:
 	mov	r5, r1
 	mov	r6, r2
 	and	r7, r3, #K_MASK		@ r7 = kind
-	and	r10, r3, #F_ZERO	@ r10 = F_ZERO or 0
+	and	r10, r3, #F_NEG		@ r10 = F_ZERO, F_OL or 0
+	tst	r3, #F_SP
+	beq	.Lfc_rule		@ no series / parallel pair (|Z|, X, D, Q, theta)
+	ldr	r0, =V_SERPAR
+	ldr	r0, [r0]
+	cbz	r0, .Lfc_rule		@ series values in use: the rule as given
+	eor	r10, r10, #F_NEG	@ parallel (Rp, Cp, Lp): 0 and OL swapped
+.Lfc_rule:
 	ldr	r8, =OWN_FUNC
 	movs	r9, #0			@ r9 = marker
 	str	r9, [r8, #MF_MARK]
 	vmov.f32	s16, s0
 	vabs.f32	s17, s0
+	bl	fmt_lowz		@ r0 = 1: 60 / 100 / 120 Hz and |Z| above 1e7
+	cmp	r0, #0
+	bne	.Lfc_ol			@ beyond the specified impedance: OL (revision 14 rule 2)
 	cmp	r7, #K_L
 	bhi	.Lfc_plain		@ D, Q, theta: the vendor formatter as it is
 	vmov	r0, s16
@@ -158,8 +233,10 @@ fmt_core:
 	vcmpe.f32	s16, #0
 	vmrs	APSR_nzcv, fpscr
 	bge	.Lfc_range		@ R, C, L not below 0: as they are
+	tst	r10, #F_OL
+	bne	.Lfc_ol			@ Rp, Cs, Lp below 0: OL (revision 14 rule 1)
 	movs	r0, #0
-	vmov	s16, r0			@ R, C, L below 0: shown as +0 (S2.2 revision 13)
+	vmov	s16, r0			@ Rs, Cp, Ls, |Z| below 0: shown as +0
 	vmov	s17, r0
 .Lfc_range:
 	ldr	r1, =fmt_hard
@@ -193,8 +270,10 @@ fmt_core:
 	vcmpe.f32	s16, #0
 	vmrs	APSR_nzcv, fpscr
 	bpl	.Lfc_plainv		@ D, Q not below 0 (or NaN: N clear): as they are
+	tst	r10, #F_OL
+	bne	.Lfc_ol			@ Q below 0: OL (revision 14 rule 1)
 	movs	r0, #0
-	vmov	s16, r0			@ D, Q below 0: shown as +0 ("0.0000", fn_0800dd44 "%0.4f")
+	vmov	s16, r0			@ D below 0: shown as +0 ("0.0000", fn_0800dd44 "%0.4f")
 .Lfc_plainv:
 	vmov.f32	s0, s16
 .Lfc_call:
@@ -216,7 +295,7 @@ fmt_core:
 	bhi	.Lfc_mark		@ D, Q, theta: no sign of ours (theta keeps the vendor's)
 	vcmpe.f32	s16, #0
 	vmrs	APSR_nzcv, fpscr
-	bge	.Lfc_mark		@ not negative (R and C always, revision 13): no sign
+	bge	.Lfc_mark		@ not negative (R, C, L, |Z| always: 0 or OL above): no sign
 	mov	r0, r4
 	bl	fmt_len			@ r0 = length
 	cmp	r0, #7
@@ -248,6 +327,37 @@ fmt_core:
 .Lfc_ret:
 	vpop	{d8, d9}
 	pop	{r4, r5, r6, r7, r8, r9, r10, pc}
+
+@ ----------------------------------------------------------------------------
+@ fmt_lowz - revision 14 rule 2: r0 = 1 when the frequency word 0x20001144 is 60, 100 or 120 and
+@   the published |Z| 0x200050C4 lies above 1e7 ohm (fmt_spec's R upper limit of the 100 Hz
+@   column, the highest impedance the manual specifies at 100 Hz; 120 Hz takes that column and 60
+@   Hz has none), else 0 (an unordered compare, a NaN |Z|, gives 0). A leaf; changes r0, r1, s1,
+@   s2.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	fmt_lowz, %function
+fmt_lowz:
+	ldr	r1, =V_FREQ
+	ldr	r1, [r1]
+	movs	r0, #0
+	cmp	r1, #60
+	beq	.Llz_z
+	cmp	r1, #100
+	beq	.Llz_z
+	cmp	r1, #120
+	bne	.Llz_ret		@ 1 kHz .. 100 kHz: the manual specifies down to 1 pF
+.Llz_z:
+	ldr	r1, =V_Z
+	vldr	s1, [r1]
+	ldr	r1, =fmt_spec
+	vldr	s2, [r1, #4]		@ 1e7: R upper limit, 100 Hz column
+	vcmpe.f32	s1, s2
+	vmrs	APSR_nzcv, fpscr
+	it	gt
+	movgt	r0, #1
+.Llz_ret:
+	bx	lr
 
 @ ----------------------------------------------------------------------------
 @ fmt_column - r0 = the accuracy-table column of the frequency word 0x20001144: 0 for 100 and
@@ -604,7 +714,8 @@ fmt_hard:
 	.word	0x4B189680, 0x4CBEBC20, 0x4CBEBC20
 
 @ the accuracy table (design S2.1, from UM 1596-1646): {lower, upper} per kind and column
-@ (columns 100 / 1k / 10k / 100k Hz; units ohm, nF, uH)
+@ (columns 100 / 1k / 10k / 100k Hz; units ohm, nF, uH); the R upper limit of the 100 Hz column
+@ (fmt_spec + 4) is also fmt_lowz's limit of |Z|
 fmt_spec:
 	.word	0x3C23D70A, 0x4B189680		@ R  100 Hz: 10 mohm .. 10 Mohm
 	.word	0x3C23D70A, 0x4B189680		@ R  1 kHz:  10 mohm .. 10 Mohm

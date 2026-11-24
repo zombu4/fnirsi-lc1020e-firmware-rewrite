@@ -41,15 +41,18 @@
 @   OCAL_LOCK active, bit 3 OF_RETAKE; ocal.s ocal_meas_flags, OWN_CAL_DESIGN.md 2.8).
 @   Value block (15 bytes): value f32, the word the display formats, as read (R ohm, C nF, L
 @   uH, Z / X ohm, D / Q none, theta degree; fmt_value stores it before the formatter runs, so
-@   a negative R, C, L, D or Q keeps its sign here while its text is 0, S2.2 revision 13), unit code u8
-@   of the display text (0 none, 1 ohm, 2 kohm,
+@   a negative R, C, L, D or Q keeps its sign here while its text is 0 or OL, MEASUREMENT_FIX_DESIGN
+@   revision 14), unit code u8 of the display text (0 none, 1 ohm, 2 kohm,
 @   3 Mohm, 4 pF, 5 nF, 6 uF, 7 mF, 8 uH, 9 mH, 10 H, 11 degree), decimals u8 (digits after
 @   the point of the text), validity u8 (0 valid, 1 "0L" from the formatter, 2 no reading:
 @   tick counter 0x2000120C above 200, 3 held), display text 8 bytes (the formatter's text,
 @   zero padded). The texts come from the display's formatters, our wrappers of fmt.s
-@   (own_fmt_r ohm, own_fmt_x X, own_fmt_c C, own_fmt_l L, own_fmt_dq D / Q, own_fmt_th theta:
-@   OL, sign and digits as the display shows them; a negative R, C, L, D or Q is the text of 0) with the
-@   inputs 0x0800D3D8 / 0x0800D294 give them; the secondary R is the signed 0x200050B8 (S2.2).
+@   (own_fmt_r R, own_fmt_z |Z|, own_fmt_x X, own_fmt_c C, own_fmt_l L, own_fmt_d D, own_fmt_q Q,
+@   own_fmt_th theta: OL, sign and digits as the display shows them; a negative series R,
+@   parallel C, series L or D is the text of 0, a negative parallel R, series C, parallel L or Q
+@   is OL, by 0x200011EC; every text OL at 60 / 100 / 120 Hz with |Z| above 1e7, revision 14)
+@   with the inputs 0x0800D3D8 / 0x0800D294 give them; the secondary R is the signed 0x200050B8
+@   (S2.2).
 @ COMPARE (50 bytes): quantity u8 (0x20001178), nominal f32 (0x20001184), tolerance f32
 @   (0x20001188), deviation f32 (0x200050D8), OK u8 (1 when the judgement is IN, cmp.s),
 @   pass u32 (0x200050F0), fail u32 (0x200050F4), compare value f32 (0x200050DC), warn type
@@ -76,11 +79,13 @@
 	.equ	FK_OHM,		0
 	.equ	FK_C,		1
 	.equ	FK_L,		2
-	.equ	FK_PLAIN,	3
+	.equ	FK_D,		3		@ D (no unit; a negative 0)
 	.equ	FK_DEG,		4
 	.equ	FK_NONE,	5
 	.equ	FK_OHM_X,	6		@ ohm with 0x20001198 = 2 around the call (as
 						@ 0x0800D294 formats X: the sign is kept)
+	.equ	FK_Z,		7		@ |Z| in ohm (the main row's case 4; a negative 0)
+	.equ	FK_Q,		8		@ Q (no unit; a negative OL)
 	.equ	VB_SIZE,	15		@ value block of MEASURE
 	.equ	STATE_SIZE,	32
 	.equ	MEASURE_SIZE,	66		@ 64 + the marker byte (S2.1) + the OCAL flags byte
@@ -1891,11 +1896,12 @@ rec_state:
 
 @ ----------------------------------------------------------------------------
 @ rec_measure - r0 = destination -> r0 = MEASURE_SIZE (layout in the file header).
-@   Main row by byte 0x200011E4 (0x0800D3D8): 1 R 0x200050B8 / 4 Z 0x200050C4 (ohm), 2 C
-@   0x200050BC, 3 L 0x200050C0. Secondary by 0x200011E8 (0x0800D294): 0 R (ohm, the signed word
-@   the display's own_fmt_rs formats, S2.2), 1 X 0x200050C8 (ohm, sign kept), 2 D 0x200050D4,
-@   3 Q 0x200050D0, 4 theta 0x200050CC. Byte 64: the two markers fmt_value returns (bit 0
-@   main, 1 secondary).
+@   Main row by byte 0x200011E4 (0x0800D3D8): 1 R 0x200050B8 (FK_OHM) / 4 Z 0x200050C4 (FK_Z),
+@   2 C 0x200050BC, 3 L 0x200050C0. Secondary by 0x200011E8 (0x0800D294): 0 R (FK_OHM, the
+@   signed word the display's own_fmt_rs formats, S2.2), 1 X 0x200050C8 (ohm, sign kept), 2 D
+@   0x200050D4 (FK_D), 3 Q 0x200050D0 (FK_Q), 4 theta 0x200050CC. Each kind calls the wrapper
+@   the display row uses for the same word (fmt_fn), so the texts agree. Byte 64: the two
+@   markers fmt_value returns (bit 0 main, 1 secondary).
 @ ----------------------------------------------------------------------------
 	.global	rec_measure
 	.thumb_func
@@ -1921,7 +1927,7 @@ rec_measure:
 	beq	.Lrm_l
 	cmp	r6, #4
 	bne	.Lrm_main
-	movs	r1, #FK_OHM
+	movs	r1, #FK_Z		@ |Z|: the display's own_fmt_z (own_fmt_rz, case 4)
 	ldr	r2, =V_Z
 	b	.Lrm_main_ld
 .Lrm_r:
@@ -1969,11 +1975,11 @@ rec_measure:
 	ldr	r2, =V_X
 	b	.Lrm_sec_ld
 .Lrm_sd:
-	movs	r1, #FK_PLAIN
+	movs	r1, #FK_D		@ the display's own_fmt_d (own_fmt_dqs, case 2)
 	ldr	r2, =V_D
 	b	.Lrm_sec_ld
 .Lrm_sq:
-	movs	r1, #FK_PLAIN
+	movs	r1, #FK_Q		@ the display's own_fmt_q (own_fmt_dqs, case 3)
 	ldr	r2, =V_Q
 .Lrm_sec_ld:
 	ldr	r2, [r2]
@@ -2798,21 +2804,25 @@ mem_ranges:
 
 @ display formatters by FK_* kind (FK_NONE has none): the wrappers of fmt.s, which the display
 @ rows call too (S2.1 / S2.2 / S2.4: the host text equals the display text); FK_OHM_X is X:
-@ own_fmt_x keeps the sign, own_fmt_r shows a negative R as 0 (S2.2 revision 13)
+@ own_fmt_x keeps the sign; a negative value by its quantity (revision 14): own_fmt_r R 0 in
+@ series / OL in parallel, own_fmt_z |Z| 0, own_fmt_c, own_fmt_l by 0x200011EC, own_fmt_d D 0,
+@ own_fmt_q Q OL
 fmt_fn:
-	.word	own_fmt_r, own_fmt_c, own_fmt_l, own_fmt_dq, own_fmt_th, 0
-	.word	own_fmt_x
+	.word	own_fmt_r, own_fmt_c, own_fmt_l, own_fmt_d, own_fmt_th, 0
+	.word	own_fmt_x, own_fmt_z, own_fmt_q
 @ unit codes by kind: {first index, last index, added to the index, 0}: ohm 5..7 -> 1..3,
 @ C 1..4 -> 4..7, L 3..5 -> 8..10, D / Q none, theta 1 -> 11 (the indices the formatters
-@ store, 0x0800E028 / 0x0800DB24 / 0x0800DE2C / 0x0800DFC4)
+@ store, 0x0800E028 / 0x0800DB24 / 0x0800DE2C / 0x0800DFC4); by FK_* kind 0..8
 fmt_units:
-	.byte	5, 7, -4, 0
-	.byte	1, 4, 3, 0
-	.byte	3, 5, 5, 0
-	.byte	1, 0, 0, 0
-	.byte	1, 1, 10, 0
-	.byte	1, 0, 0, 0
-	.byte	5, 7, -4, 0
+	.byte	5, 7, -4, 0		@ FK_OHM
+	.byte	1, 4, 3, 0		@ FK_C
+	.byte	3, 5, 5, 0		@ FK_L
+	.byte	1, 0, 0, 0		@ FK_D: no index in range, unit code 0
+	.byte	1, 1, 10, 0		@ FK_DEG
+	.byte	1, 0, 0, 0		@ FK_NONE
+	.byte	5, 7, -4, 0		@ FK_OHM_X
+	.byte	5, 7, -4, 0		@ FK_Z
+	.byte	1, 0, 0, 0		@ FK_Q: unit code 0
 
 @ LCR_TABLES lists, 20 bytes each: {count, value type, name kind (0 own text, 1 table),
 @ entry kind (0 own texts, 1 table)}, name (own text, or the English table entry), entries

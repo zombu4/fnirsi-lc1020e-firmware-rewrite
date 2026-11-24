@@ -105,10 +105,16 @@ PATCHES = [
     # (S2.1, S2.2, S2.4), the AUTO block and the compare block of fn_0800f854 (S2.5, S2.8, S2.9),
     # the frequency key, the 60 Hz OL group (S2.12), the vendor compare call (S2.8)
     (0x0800D2E4, 4, 'bl own_fmt_rs for bl fn_0800e028'), (0x0800D32A, 4, 'bl own_fmt_x for bl fn_0800e028'),
-    (0x0800D356, 4, 'bl own_fmt_dq for bl fn_0800dd44'), (0x0800D378, 4, 'bl own_fmt_th for bl fn_0800dfc4'),
-    (0x0800D380, 4, 'bl own_row_draw for bl fn_0800d14c'), (0x0800D43C, 4, 'bl own_fmt_r for bl fn_0800e028'),
+    (0x0800D356, 4, 'bl own_fmt_dqs for bl fn_0800dd44'), (0x0800D378, 4, 'bl own_fmt_th for bl fn_0800dfc4'),
+    (0x0800D380, 4, 'bl own_row_draw for bl fn_0800d14c'), (0x0800D43C, 4, 'bl own_fmt_rz for bl fn_0800e028'),
     (0x0800D452, 4, 'bl own_fmt_c for bl fn_0800db24'), (0x0800D48C, 4, 'bl own_fmt_l for bl fn_0800de2c'),
     (0x0800D4B8, 4, 'bl own_row_draw for bl fn_0800d14c'),
+    # MEASUREMENT_FIX_DESIGN.md revision 14: the value-word address for the two shared formatter calls
+    # (r3 instead of s0)
+    (0x0800D340, 4, 'addw r3, r5, #0x358 for vldr s0, [r5, #0x358] (D)'),
+    (0x0800D34C, 4, 'addw r3, r5, #0x354 for vldr s0, [r5, #0x354] (Q)'),
+    (0x0800D406, 4, 'addw r3, r0, #0x348 for vldr s0, [r0, #0x348] (|Z|)'),
+    (0x0800D432, 4, 'addw r3, r0, #0x33c for vldr s0, [r0, #0x33c] (R)'),
     (0x0800F874, 0x78, 'bl own_auto_class, b.n, nop.n, the kept .L0800f8d6 b.n (AUTO block)'),
     (0x0800F8FC, 0x108, 'bl own_cmp_show, b.n, nop.n, the kept .L0800f94a b.n (compare block)'),
     (0x0800D97A, 4, 'b.w own_freq_step for ldr r1 / movs r5'), (0x0800A03A, 2, 'bls.n for beq.n .L0800a050'),
@@ -136,7 +142,11 @@ PATCH_BYTES = {0x08009B08: b'(FACT)' + bytes(6), 0x0800D844: b'(FACT)' + bytes(6
                # stage 2F / 2G: bls.n T1 (cond 9, the offset 9 of the beq.n it replaces), nop.w
                0x0800A03A: struct.pack('<H', 0xD909), 0x080281E2: bytes.fromhex('aff30080'),
                # stage 3: movs T1 r0, #0 (0x2000), nop T1 (0xBF00)
-               0x0800BDBA: struct.pack('<HH', 0x2000, 0xBF00)}
+               0x0800BDBA: struct.pack('<HH', 0x2000, 0xBF00),
+               # revision 14: addw T4 (0xF200 | i << 10 | Rn, imm3 << 12 | Rd << 8 | imm8; imm12 0x358 /
+               # 0x354 / 0x348 / 0x33C: i 0, imm3 3, Rd r3)
+               0x0800D340: struct.pack('<HH', 0xF205, 0x3358), 0x0800D34C: struct.pack('<HH', 0xF205, 0x3354),
+               0x0800D406: struct.pack('<HH', 0xF200, 0x3348), 0x0800D432: struct.pack('<HH', 0xF200, 0x333C)}
 
 # 4-aligned V1.1 words with a value in 0x0802B703..0x08051757 that are data, not addresses
 # (RESOURCE_FACTS.md 1b, 2f): V1.1 address -> what
