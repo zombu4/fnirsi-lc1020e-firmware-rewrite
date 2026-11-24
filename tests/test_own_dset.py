@@ -134,7 +134,21 @@ IMAGE_REC = (0x200080B0, 0x200080D8)
 # 2026-11-21 (SCREEN 3 -> 1 entered from 2): 0x2000044C 0x47 / 0x6E after the key path / the
 # direct change, the panel equal.
 GLYPH_CACHE = (0x20000444, 0x2000045C)
-TIMER_TICK_STORE = 0x78                         # fn_08027830 + 0x78: str r0, [r6, #4] (the record's
+# the amber covers of fmt.s own_row_draw: a glyph object of row r (word GLYPHS + 32 r + 4 i, i 0..6)
+# gets its cover (a child object, fn_08023678, with its style keys) at its first marked draw, and the
+# cover stays, hidden, when the row is drawn unmarked again (fmt.s: "covers made once"). A key path
+# through a marked intermediate value therefore leaves covers that a direct change to an unmarked
+# value never makes. Run of 2026-11-24 (d01a Func 0 -> 2 through 1 with the flat source, scratchpad
+# dsdiag/func3.py): 6 covers of row 1, all hidden, 42 heap blocks (glyph attribute block, cover and
+# style blocks) only in the key path's capture, none only in the direct one, 0x20000460 (the count
+# of fn_0802318c's data blocks, gui_21.s 403-410) higher by 2 per cover (writers LR 0x0802346D in
+# fn_08023678 and 0x08025E3F in the style set), the panel equal. key_only_covers() finds them and
+# compare() allows exactly that and nothing more.
+GLYPHS = 0x200059A8
+OBJ_ATTR, OBJ_FLAGS = 0x08, 0x1C                 # fmt.s: attribute block word, flag word (bit 0 hidden)
+DATA_COUNT = 0x20000460
+COVER_DATA_BLOCKS = 2
+TIMER_TICK_STORE = 0x78                        # fn_08027830 + 0x78: str r0, [r6, #4] (the record's
                                                 # last run tick, guilib_30.s 780..; writer measured)
 # words only the key path writes (expected differences of every direct change, 2.4 item 6)
 KEY_ONLY = {0x20001190: 'busy halfword (long presses 1, the 0xFF release 0)',
@@ -450,19 +464,79 @@ def press(rig, mask, hold=0):
     check(st == S_OK, 'KEY 0x%04X hold %d: status %d' % (mask, hold, st))
 
 
+def cover_of(c, g):
+    """The cover of glyph object g in capture c (fmt.s row_cover_of: the first child), or 0."""
+    at = word(c, g + OBJ_ATTR) if g else 0
+    if not at or not word(c, at + 4):
+        return 0
+    return word(c, word(c, at))
+
+
+def key_only_covers(ref, direct):
+    """[(glyph, its attribute block, cover)] of the glyphs (the same object in both captures) that have
+    a cover in the key path's capture and none in the direct one (GLYPHS comment)."""
+    out = []
+    for row in (0, 1):
+        for i in range(7):
+            a = GLYPHS + 32 * row + 4 * i
+            g = word(ref, a)
+            if not g or word(direct, a) != g:
+                continue
+            cr = cover_of(ref, g)
+            if cr and not cover_of(direct, g):
+                out.append((g, word(ref, g + OBJ_ATTR), cr))
+    return out
+
+
+def cover_blocks_out(what, ref, direct, hr, hd, covers):
+    """Checks the key-path-only covers: each hidden, 0x20000460 higher by COVER_DATA_BLOCKS per cover,
+    no used block only in the direct capture, and the blocks only in the key path's capture exactly
+    those reached from the covers' attribute blocks and objects by pointers (within those blocks).
+    Returns hr without them."""
+    for g, at, cr in covers:
+        check(word(ref, cr + OBJ_FLAGS) & 1, '%s: cover 0x%08X of glyph 0x%08X shown' % (what, cr, g))
+    n = word(ref, DATA_COUNT) - word(direct, DATA_COUNT)
+    check(n == COVER_DATA_BLOCKS * len(covers), '%s: 0x%08X higher by %d for %d covers'
+          % (what, DATA_COUNT, n, len(covers)))
+    only, extra = set(hr) - set(hd), set(hd) - set(hr)
+    check(not extra, '%s: %d used heap blocks only in the direct capture' % (what, len(extra)))
+
+    def inside(q):
+        return [(b, z) for b, z in only if b <= q < b + z]
+    reach, todo = set(), [blk for g, at, cr in covers for p in (at, cr) for blk in inside(p)]
+    while todo:
+        b, z = todo.pop()
+        if (b, z) in reach:
+            continue
+        reach.add((b, z))
+        for w in range(b, b + z - z % 4, 4):
+            todo.extend(inside(word(ref, w)))
+    check(reach == only, '%s: %d heap blocks only in the key path, %d of them reached from its %d covers'
+          % (what, len(only), len(reach), len(covers)))
+    NOTES.append('%s: %d covers only after the key path (%d heap blocks, all hidden)'
+                 % (what, len(covers), len(reach)))
+    return [x for x in hr if x not in reach]
+
+
 def compare(what, ref, direct, expected=()):
     """ref / direct: the two captures. expected: {address: reason} of the case (2.4). Checks the
     comparison of the file header; returns the differing words (all allowed)."""
     allowed = dict(KEY_ONLY)
     allowed.update(dict(expected))
+    covers = key_only_covers(ref, direct)
+    if covers:
+        allowed[DATA_COUNT] = 'data blocks of the covers only the key path made (GLYPHS comment)'
     diff = ram_diff(ref, direct, ref['timer_words'] | direct['timer_words'])
     bad = [a for a in diff if a not in allowed]
     check(not bad, '%s: RAM words differ from the key path: %s' % (
         what, ', '.join('0x%08X %08X/%08X' % (a, word(ref, a), word(direct, a)) for a in bad[:16])))
     hr, hd = heap_walk(ref), heap_walk(direct)
+    tw = ref['timer_words'] | direct['timer_words']        # timer records live in the heap
+    if covers:
+        hr = cover_blocks_out(what, ref, direct, hr, hd, covers)
+        tw = tw | {g + OBJ_ATTR for g, at, cr in covers}    # the glyph's attribute block word
     check(hr == hd, '%s: GUI heap blocks differ: %d / %d used, %d / %d bytes' % (
         what, len(hr), len(hd), sum(s for a, s in hr), sum(s for a, s in hd)))
-    tw = ref['timer_words'] | direct['timer_words']        # timer records live in the heap
     objs = [k[1] for k in allowed if isinstance(k, tuple) and k[0] == 'obj']
     for o in objs:              # an expected object: its heap block and the blocks its words point
         p = word(ref, o)        # to (its data block +8, fn_0802318c, gui_21.s 403-410, and the like)

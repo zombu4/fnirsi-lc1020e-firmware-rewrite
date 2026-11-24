@@ -2,7 +2,7 @@
 """test_uf2.py - the slot bootloader's UF2 update path by direct calls, in the emulator.
 
 Usage (from the repository root, after `make -C starter` and `make -C bootloader slot`):
-    <python with unicorn 2.1.4> tests/test_uf2.py
+    <python with unicorn 2.1.4> tests/test_uf2.py [case-name-prefix ...]
 
 The test makes a real .uf2 with tools/bin2uf2.py from vendor/LC1020E_V1.1_250702.bin (309,080 bytes,
 1208 blocks) in a temporary folder. Slot A (build/slot/BOOT_A.bin at 0x0806F000) is started at its
@@ -551,8 +551,12 @@ def u16_update_path_feeds_the_watchdog():
 
 
 def main():
-    bad = 0
+    sel = sys.argv[1:]
+    bad = run = 0
     for fn in CASES:
+        if sel and not any(fn.__name__.startswith(p) for p in sel):
+            continue
+        run += 1
         try:
             ok = fn()
             msg = ''
@@ -564,7 +568,7 @@ def main():
         bad += not ok
     for n in NOTES:
         print('  note:', n)
-    print('%d tests, %d failed' % (len(CASES), bad))
+    print('%d tests, %d failed' % (run, bad))
     sys.exit(1 if bad else 0)
 
 

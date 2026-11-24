@@ -1001,6 +1001,8 @@ key_step:
 	str	r0, [r4, #CT_SAVES_SEEN]
 	bl	fn_08009400
 	movs	r0, #0
+	bl	own_sec_pick		@ the secondary-key mark of own_cmp_key ends (cmp.s)
+	movs	r0, #0
 	str	r0, [r4, #CTO_INJECTED]	@ guard off
 	ldr	r0, =own_save_count
 	ldr	r0, [r0]

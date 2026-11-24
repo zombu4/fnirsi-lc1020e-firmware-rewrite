@@ -426,13 +426,21 @@ func_text:
 	ldr	r0, [r0, #OB_FUNC_TXT]	@ the Func text object
 	b.w	fn_080228d0		@ the text set (tail call)
 
-@ ds_secondary - secondary 0x200011E8 = r0; fn_0800f854 (tail call; app_01.s 604-613).
+@ ds_secondary - secondary 0x200011E8 = r0; fn_0800f854 (app_01.s 604-613) with MF_SECPICK 1
+@   (cmp.s own_sec_pick: own_auto_class keeps the value, as for the key), then MF_SECPICK 0
+@   (tail call). Stack: 8 bytes.
 	.thumb_func
 	.type	ds_secondary, %function
 ds_secondary:
+	push	{r4, lr}		@ keep the return address (r4 for the alignment)
 	ldr	r1, =V_SECONDARY	@ the word
 	str	r0, [r1]		@ secondary = value
-	b.w	fn_0800f854		@ the result display
+	movs	r0, #1
+	bl	own_sec_pick		@ a value the user picks
+	bl	fn_0800f854		@ the result display
+	movs	r0, #0
+	pop	{r4, lr}
+	b.w	own_sec_pick		@ the mark ends (tail call)
 
 @ ds_freq - cursor 0x200011A8 = 0, frequency 0x20001144 = r0, fn_08009f10, fn_0800da6c (tail
 @   call; app_01.s 696 + fn_0800d940 mode 0, ui_42.s 541).

@@ -592,7 +592,11 @@
         .equ    MF_RHI,         0x90            @ meas.s: the same for I (0x90 current, 0x92 previous)
         .equ    MF_RHT,         0x94            @ meas.s: tick word 0x20000480 at the bucket's start
         .equ    MF_RHN,         0x98            @ meas.s: settled acquisitions in the current bucket
-        .equ    MF_END,         0x9C
+        .equ    MF_SECPICK,     0x9C            @ cmp.s own_sec_pick (callers: own_cmp_key, key_step
+                                                @ after fn_08009400, dset.s ds_secondary): 1 while
+                                                @ the secondary key or LCR_SET secondary is handled
+                                                @ (own_auto_class keeps that secondary), else 0
+        .equ    MF_END,         0xA0
         .if     MF_END > FUNC_SIZE
         .error  "own.inc: the OWN_FUNC words do not fit O_FUNC"
         .endif
