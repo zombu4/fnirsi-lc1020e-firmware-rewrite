@@ -148,6 +148,19 @@ GLYPHS = 0x200059A8
 OBJ_ATTR, OBJ_FLAGS = 0x08, 0x1C                 # fmt.s: attribute block word, flag word (bit 0 hidden)
 DATA_COUNT = 0x20000460
 COVER_DATA_BLOCKS = 2
+# The glyph slots keep their pointers when a screen without the rows is shown (Run of 2026-11-24,
+# d03 / d05: a slot word pointing below the RAM); a pointer is followed only into the GUI heap.
+# The unit picture of row 1 (object pointer at 0x20000220, ui_41.s fn_0800d294): its image is set
+# (fn_08021c14) only by the cases that show it (R / X with a unit index 4..7, theta), and the other
+# cases hide it (fn_08023050) and leave the last image. Every path that shows it sets the image first
+# (R / X: index 0 hides it, 4..7 set the image, fmt.s fmt_scale names 5..7 as the ohm indices;
+# theta sets it before its formatter), so a hidden unit picture's image words
+# are what an earlier, unseen value left. Run of 2026-11-24 (d01a Func 0 -> 2, d01c secondary 4 ->
+# 2, scratchpad dsdiag/func4.py): hidden in both, words +0x14 +0x18 (rectangle), +0x24 (image),
+# +0x2C +0x30 +0x34 (image size and header) d_08036cd8 / d_08040a28, the panel equal. compare()
+# leaves those six words out only while the picture is hidden in both captures.
+UNIT_PIC = 0x20000220
+UNIT_PIC_IMAGE_WORDS = (0x14, 0x18, 0x24, 0x2C, 0x30, 0x34)
 TIMER_TICK_STORE = 0x78                        # fn_08027830 + 0x78: str r0, [r6, #4] (the record's
                                                 # last run tick, guilib_30.s 780..; writer measured)
 # words only the key path writes (expected differences of every direct change, 2.4 item 6)
@@ -464,12 +477,18 @@ def press(rig, mask, hold=0):
     check(st == S_OK, 'KEY 0x%04X hold %d: status %d' % (mask, hold, st))
 
 
+def in_heap(p):
+    return HEAP[0] <= p < HEAP[0] + HEAP[1] - 4 and not p & 3
+
+
 def cover_of(c, g):
-    """The cover of glyph object g in capture c (fmt.s row_cover_of: the first child), or 0."""
-    at = word(c, g + OBJ_ATTR) if g else 0
-    if not at or not word(c, at + 4):
+    """The cover of glyph object g in capture c (fmt.s row_cover_of: the first child), or 0; every
+    pointer on the way is followed only into the GUI heap (UNIT_PIC comment)."""
+    at = word(c, g + OBJ_ATTR) if in_heap(g) else 0
+    if not in_heap(at) or not word(c, at + 4) or not in_heap(word(c, at)):
         return 0
-    return word(c, word(c, at))
+    cr = word(c, word(c, at))
+    return cr if in_heap(cr) else 0
 
 
 def key_only_covers(ref, direct):
@@ -535,6 +554,13 @@ def compare(what, ref, direct, expected=()):
     if covers:
         hr = cover_blocks_out(what, ref, direct, hr, hd, covers)
         tw = tw | {g + OBJ_ATTR for g, at, cr in covers}    # the glyph's attribute block word
+    u = word(ref, UNIT_PIC)
+    if (u == word(direct, UNIT_PIC) and in_heap(u) and word(ref, u + OBJ_FLAGS) & 1
+            and word(direct, u + OBJ_FLAGS) & 1):
+        uw = {u + o for o in UNIT_PIC_IMAGE_WORDS}
+        if any(word(ref, w) != word(direct, w) for w in uw):
+            NOTES.append('%s: image words of the hidden unit picture differ (UNIT_PIC comment)' % what)
+        tw = tw | uw
     check(hr == hd, '%s: GUI heap blocks differ: %d / %d used, %d / %d bytes' % (
         what, len(hr), len(hd), sum(s for a, s in hr), sum(s for a, s in hd)))
     objs = [k[1] for k in allowed if isinstance(k, tuple) and k[0] == 'obj']
@@ -662,12 +688,10 @@ def lcr_pairs(lid, states, targets, what, expected_of=lambda s, t: ()):
     return runs
 
 
-# The second row's unit picture 0x20000220 (ui_41.s 1290-1312, fn_0800d294): with the secondary
-# theta (Func Z) it gets the theta picture; with a unit index 0 later it is only hidden, its source
-# stays. A key path that passes theta on its way (2.4 item 5, intermediate values) leaves that
-# source in the hidden object, the direct change the one before: the object's heap block differs,
-# the panel not (measured 2026-11-21, Func 1 -> 0: sources 0x0803E354 / 0x08034DA8 of our build).
-UNIT_PIC = {('obj', 0x20000220): 'hidden unit picture of row 2 left at theta by the key path'}
+# The second row's unit picture 0x20000220 left hidden with an earlier image by a key path through
+# intermediate values (2.4 item 5): compare() leaves its image words out (UNIT_PIC comment at the top;
+# it replaces the earlier rule of 2026-11-21 that allowed the object only for paths through theta,
+# which missed paths through R, Run of 2026-11-24: Func 0 -> 2, secondary 4 -> 2).
 
 
 def passes_theta(s, t):
@@ -683,7 +707,7 @@ def _lcr_case(lid, name):
     addr, mask, hold, values = LCR[lid]
     states = lcr_states(lid)
     check(sorted(states) == sorted(values), '%s: key path reached %r of %r' % (name, sorted(states), values))
-    exp = (lambda s, t: UNIT_PIC if passes_theta(s, t) else {}) if lid in (0, 1) else (lambda s, t: {})
+    exp = lambda s, t: {}
     if lid == 5:
         # range: with the flat source (no signal) the ADC gain bytes 0x200011C5 / 0x200011C6 of the
         # word 0x200011C4 step on about every 0.5 s once the range is fixed (fn_0800b000 /

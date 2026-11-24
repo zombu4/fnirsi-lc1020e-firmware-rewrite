@@ -168,6 +168,8 @@ IMAGE = open(VENDOR_APP, 'rb').read()
 BLOCKS = make_uf2(IMAGE)
 N = len(BLOCKS)
 CRC = zlib.crc32(IMAGE)
+# u01's operation log, which u15 replays (u15 runs u01 itself when the selection left it out)
+INORDER_OPS = INORDER_INITIAL = None
 
 
 @case
@@ -463,6 +465,8 @@ def u15_power_cut_then_start():
     """Flash replayed from u01's operation log up to each sampled cut, then a start through the
     starter (records: OK A): before the last operation the slot must refuse the application and
     enter update mode; after all operations V1.1's reset vector must be reached."""
+    if INORDER_OPS is None:
+        u01_in_order_and_cut_property()
     ops, init = INORDER_OPS, INORDER_INITIAL
     blk_last = {}
     for k, x in enumerate(ops):
