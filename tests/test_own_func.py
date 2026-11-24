@@ -339,7 +339,21 @@ def f23_digits():
     for name, v, want in rows:
         t = fmt(rig, name, v, 1000)[0]
         check(t == want, '%s(%g): %r, expected %r' % (name, v, t, want))
-    NOTES.append('f23: %d texts at 19,999 / 20,000 counts' % len(rows))
+    # revision 12 (MEASUREMENT_FIX_DESIGN S2.4): C in the vendor's "%0.1f" uF range above 19,999 counts goes
+    # to mF with 3 decimals (a text without '.' lies over the unit picture, fn_0800d14c), and no byte of the
+    # vendor's longer text is left after the terminating 0 (fmt() clears the buffer, the vendor writes it)
+    units = [('own_fmt_c', 1.9999e6, '1999.9', 'uF', 3), ('own_fmt_c', 2.0e6, '2.000', 'mF', 4),
+             ('own_fmt_c', 6.9163e6, '6.916', 'mF', 4), ('own_fmt_c', 7.9999e6, '8.000', 'mF', 4),
+             ('own_fmt_c', -6.9163e6, '-6.916', 'mF', 4), ('own_fmt_c', 8.0e6, '8.00', 'mF', 4),
+             ('own_fmt_dq', 2000.0, '2000', '', None), ('own_fmt_dq', 7000.0, '7000', '', None)]
+    for name, v, want, wunit, widx in units:
+        t, u, i, _ = fmt(rig, name, v, 1000)
+        raw = rig.rd(TXT, 8)
+        check(t == want and raw == t.encode() + bytes(8 - len(t)),
+              '%s(%g): %r (8 bytes %s), expected %r and zeros' % (name, v, t, raw.hex(), want))
+        if widx is not None:
+            check(u == wunit and i == widx, '%s(%g): unit %r index %d, expected %r %d' % (name, v, u, i, wunit, widx))
+    NOTES.append('f23: %d texts at 19,999 / 20,000 counts, %d unit / padding rows' % (len(rows), len(units)))
     rig.watch.check(what='f23')
     return True
 

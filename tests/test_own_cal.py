@@ -14,16 +14,22 @@ The expected result of a point comes from the specification of cal.s applied to 
 published on screen 3 between the point's cal_point and the next (expect_point). Short and reference points:
 a no-reading / overload set or a non-finite window empties the held windows; the last 3 held are judged: the
 median |Z| (signed compare) and the theta of the same window, accepted when every |Zi| <= 2 |Zm| and 2 |Zi| >=
-|Zm|. Open points (type 11, MEASUREMENT_FIX_DESIGN revision 10): such a window is skipped and the others kept;
-the first 7 usable windows (or all of them when the point's 20 s ended it first) give the window of the k-th
-smallest |Z|, k = (n - 1) / 2, with its theta; no usable window: |Z| 1e10, theta +400 ("not resolved"). The
-stored table entries must equal these bit for bit (fn_0800bb64 copies the words).
+|Zm|. The stored table entries must equal these bit for bit (fn_0800bb64 copies the words). Open points (type
+11, MEASUREMENT_FIX_DESIGN revisions 10 and 11): such a window is skipped and the others kept; the first 7
+usable windows (or all of them when the point's 20 s ended it first) give the open admittances Y_i = 1 / (Zo_i
+- Zs), Zo_i = (|Z|_i + |t0|) e^(j theta_i), Zs = |t0| e^(j theta0) from the point's short entry (open_rule,
+float64 from the float32 words). Resolved (n >= 2, n (n - 1) |Ybar|^2 / sum |Y_i - Ybar|^2 above the 0.999
+quantile of F(2, 2n - 2)): the entry is |Zo| - |t0| and arg Zo of Zo = 1 / Ybar + Zs, within 1e-5 relative of
+|Zo| and 0.01 degree [J: float32 sums of 7 terms and the vendor's single-precision sine / cosine]; else |Z|
+1e10, theta +400 ("not resolved") bit for bit. A set whose ratio lies within 1e-3 of the limit may give
+either (float32 against float64 at the edge).
 
 Sources: measure_model.DutSource / test_own_measure.TDut; the counts per volt are chosen per case so that both
 channels lie in band at a range and gain code the ranging reaches (the model's source is ideal; revision 5 row
 18). RUN LIMIT: one run of this file per case prefix, 25 cases.
 """
 
+import cmath
 import math
 import os
 import struct
@@ -207,25 +213,60 @@ def usable(w):
     return not (w['TH'] == F_M400 or w['Z'] == F_1E10 or not finite(w['Z']) or not finite(w['TH']))
 
 
-def omed(zs):
-    """cal.s cal_omed: the index of the k-th smallest of zs, k = (n - 1) / 2 (below <= k < at or below; of
-    equal values the first)."""
-    k = (len(zs) - 1) // 2
-    for i, z in enumerate(zs):
-        if sum(1 for y in zs if y < z) <= k < sum(1 for y in zs if y <= z):
-            return i
-    return 0
+def f_quantile(n, alpha=1e-3):
+    """The 1 - alpha quantile x of F(2, m), m = 2n - 2: P(F(2, m) > x) = (1 + 2x / m)^(-m / 2) = alpha."""
+    m = 2 * n - 2
+    return (m / 2) * (alpha ** (-2 / m) - 1)
 
 
-def expect_point(wins, typ):
+def open_rule(zth, t0, th0):
+    """cal.s cal_ores (revision 11) in float64 for windows zth = [(|Z|, theta)] (floats of the published words)
+    and the short entry t0 / th0: ('nr', None) not resolved, or (kind, (|Zo| - |t0|, arg Zo in degrees), q)
+    with kind 'res' or 'edge' (q = n (n - 1) |Ybar|^2 / (x S) within 1e-3 of 1)."""
+    n = len(zth)
+    if n < 2:
+        return 'nr', None, None
+    a0 = abs(t0)
+    zs = a0 * cmath.exp(1j * math.radians(th0)) if math.isfinite(th0) and abs(th0) <= 180 else complex(a0, 0)
+    ys = []
+    for z, th in zth:
+        d = (z + a0) * cmath.exp(1j * math.radians(th)) - zs
+        if d == 0:
+            return 'nr', None, None
+        ys.append(1 / d)
+    yb = sum(ys) / n
+    s = sum(abs(y - yb) ** 2 for y in ys)
+    lim = f_quantile(n) / (n * (n - 1)) * s
+    q = abs(yb) ** 2 / lim if lim > 0 else (math.inf if yb != 0 else 0.0)
+    if q < 1 - 1e-3:
+        return 'nr', None, q
+    zo = 1 / yb + zs
+    return ('res' if q > 1 + 1e-3 else 'edge'), (abs(zo) - a0, math.degrees(cmath.phase(zo))), q
+
+
+def open_match(got_z, got_t, rule, t0, what):
+    """The stored words got_z / got_t against open_rule's result (module docstring bounds)."""
+    kind, val, q = rule
+    nr = got_z == F_1E10 and got_t == F_P400
+    if kind == 'nr':
+        check(nr, '%s: stored %08X / %08X, the rule gives "not resolved" (q %r)' % (what, got_z, got_t, q))
+        return
+    if kind == 'edge' and nr:
+        return
+    zo, gz = val[0] + abs(t0), u32f(got_z) + abs(t0)
+    dt = (u32f(got_t) - val[1] + 180.0) % 360.0 - 180.0
+    check(abs(gz - zo) <= 1e-5 * abs(zo) and abs(dt) <= 0.01, '%s: stored %.7g / %.5f, the rule gives %.7g / %.5f '
+          '(%s, q %.4g)' % (what, u32f(got_z), u32f(got_t), val[0], val[1], kind, q))
+
+
+def expect_point(wins, typ, short=None):
     """(|Z| bits, theta bits, the windows used) the specification of cal.s gives for the windows of one point,
-    or None when they give no result. An open point (type 11) always gives one (revision 10)."""
+    or None when they give no result. An open point (type 11) always gives one: (open_rule's result, None,
+    the windows used), short = (t0, theta0) of the point's short entry (revision 11)."""
     if typ == 11:
         used = [w for w in wins if usable(w)][:CA_NO_OPEN]
-        if not used:
-            return F_1E10, F_P400, []
-        m = omed([u32f(w['Z']) for w in used])
-        return used[m]['Z'], used[m]['TH'], used
+        t0, th0 = short if short is not None else (0.0, 0.0)
+        return open_rule([(u32f(w['Z']), u32f(w['TH'])) for w in used], t0, th0), None, used
     held, nt = [], 0
     for w in wins:
         z, th = w['Z'], w['TH']
@@ -256,13 +297,18 @@ def check_sweep_result(rig, typ, before, what, since=0.0):
     last_win = 0.0
     for p in range(15):
         wins, t0 = windows_of(rig, p, since)
-        exp = expect_point(wins, typ)
+        s0 = struct.unpack_from('<f', before, entry(p, 0) - USR_LO)[0]      # the short entry (not stored by an
+        s0t = struct.unpack_from('<f', before, entry(p, 0) - USR_LO + 0x2D0)[0]  # open sweep: as before it)
+        exp = expect_point(wins, typ, (s0, s0t))
         check(exp is not None, '%s: point %d: the windows give no result (%d windows)' % (what, p, len(wins)))
         zb, tb, used = exp
         got_z = struct.unpack_from('<I', after, entry(p, typ) - USR_LO)[0]
         got_t = struct.unpack_from('<I', after, entry(p, typ) - USR_LO + 0x2D0)[0]
-        check(got_z == zb and got_t == tb, '%s: point %d stored %08X / %08X, expected %08X / %08X (%r)' % (
-            what, p, got_z, got_t, zb, tb, [(hex(w['Z']), hex(w['TH'])) for w in wins[-4:]]))
+        if typ == 11:
+            open_match(got_z, got_t, zb, s0, '%s: point %d' % (what, p))
+        else:
+            check(got_z == zb and got_t == tb, '%s: point %d stored %08X / %08X, expected %08X / %08X (%r)' % (
+                what, p, got_z, got_t, zb, tb, [(hex(w['Z']), hex(w['TH'])) for w in wins[-4:]]))
         for w in used:
             check(all(a['t'] > t0 for a in w['adds']), '%s: point %d: a window holds an acquisition from before '
                   'its fn_08009f10' % (what, p))
@@ -656,8 +702,8 @@ def c11_power_key_mid_sweep():
 def c13_noise_limited_open():
     """Critique item 11: an open (type 11) of 5e7 ohm with noise +-400 counts on both channels, so that the
     current channel is noise-limited at every point: the sweep completes, every point stored by the open rule
-    of revision 10 (the median window of its first 7 usable windows or of those its 20 s gave, "not resolved"
-    1e10 / +400 only without any), every |Zo| >= 1e5."""
+    of revision 11 (open_rule over its first 7 usable windows or those its 20 s gave: the resolved mean, else
+    "not resolved" 1e10 / +400), every |Zo| >= 1e5."""
     rig = cal_rig(DutSource('R', 5e7, noise_lsb=400.0), block=pre_block())
     rig.run(1.0)
     before = table(rig)
@@ -769,8 +815,8 @@ def c16_open_point_keeps_its_windows():
     current channel reads mid-scale for 3 s twice inside point 13 (1.5 .. 4.5 s and 6.5 .. 9.5 s after its
     cal_point). Input checks: point 13 has at least 2 no-reading publishes and a usable window before the
     first of them. Expected: the sweep finishes; point 13 ends within its 20 s (plus 0.5 s for the pass); its
-    result is expect_point's (the first 7 usable windows, the median window) and uses the window from before
-    the first gap (no restart); every point stored by expect_point."""
+    result is expect_point's (open_rule over the first 7 usable windows) and uses the window from before the
+    first gap (no restart); every point stored by expect_point."""
     t13 = {'t': None}
 
     def gaps(t):
@@ -837,12 +883,13 @@ def c17_open_point_without_a_window():
 
 
 @case
-def c18_open_time_limit_takes_the_median():
-    """Revision 10 item 1, the limit path of an open point: in point 3 three windows are planted in CAO_OWIN
-    (|Z| 3e6, 1e6, 2e6 at theta 10, 20, 30; the step word with them) and CAO_TPT moved 21 s back. Input check
-    at the entry of cal_oend for point 3: CAO_NO below 7 (the limit, not the 7th window) with the planted
-    three first. Expected: the result of point 3 (CAO_RES) is the window cal_omed's rule picks from what
-    CAO_OWIN held there, the sweep goes on to point 4, no fail."""
+def c18_open_time_limit_takes_its_windows():
+    """Revisions 10 / 11, the limit path of an open point: in point 3 (120 Hz / 0.1 V, an open of 1 Mohm) three
+    windows are planted in CAO_OWIN (|Z| 1.00e6, 1.02e6, 0.98e6 at theta 0.5, -0.3, 0.1; the step word with
+    them) and CAO_TPT moved 21 s back. Input checks at the entry of cal_oend for point 3: CAO_NO below 7 (the
+    limit, not the 7th window) with the planted three first, and open_rule gives "resolved" for what CAO_OWIN
+    holds there. Expected: the result of point 3 (CAO_RES) is open_rule's mean of those windows (open_match),
+    the sweep goes on to point 4, no fail."""
     rig = cal_rig(DutSource('R', 1e6), block=pre_block())
     rig.run(1.0)
     start(rig, typ=11)
@@ -856,7 +903,7 @@ def c18_open_time_limit_takes_the_median():
                                                     rig.rd(OWN_CAL + CAO_OWIN + 8 * i + 4)) for i in range(n)]))
     a = rig.s['cal_oend'] & ~1
     rig.m.uc.hook_add(UC_HOOK_CODE, at_oend, begin=a, end=a)
-    planted = [(f2u(3e6), f2u(10.0)), (f2u(1e6), f2u(20.0)), (f2u(2e6), f2u(30.0))]
+    planted = [(f2u(1.00e6), f2u(0.5)), (f2u(1.02e6), f2u(-0.3)), (f2u(0.98e6), f2u(0.1))]
     for i, (z, th) in enumerate(planted):
         rig.wr(OWN_CAL + CAO_OWIN + 8 * i, z)
         rig.wr(OWN_CAL + CAO_OWIN + 8 * i + 4, th)
@@ -866,10 +913,12 @@ def c18_open_time_limit_takes_the_median():
     wait_until(rig, lambda: any(s[0] == 3 for s in seen), 1.0, 'c18: cal_oend of point 3')
     _, n, held = [s for s in seen if s[0] == 3][0]
     check(n < CA_NO_OPEN and held[:3] == planted, 'c18: at cal_oend %d windows %r (input)' % (n, held))
+    t0, th0 = u32f(rig.rd(entry(3, 0))), u32f(rig.rd(entry(3, 0) + 0x2D0))
+    rule = open_rule([(u32f(z), u32f(th)) for z, th in held], t0, th0)
+    check(rule[0] == 'res', 'c18: the rule gives %r for %r (input: resolved)' % (rule, held))
     rig.run(0.3)
-    m = omed([u32f(z) for z, _ in held])
     got = (rig.rd(OWN_CAL + CAO_RES + 8 * 3), rig.rd(OWN_CAL + CAO_RES + 8 * 3 + 4))
-    check(got == held[m], 'c18: result %r, the rule gives %r of %r' % (got, held[m], held))
+    open_match(got[0], got[1], rule, t0, 'c18: result')
     check(any(q == 4 for _, q in rig.cal.points) and not rig.cal.fails, 'c18: point 4 not reached or a fail')
     rig.watch.check(what='c18')
     return True
@@ -1007,7 +1056,8 @@ def c20_open_fail_restores_what_the_start_found():
     rev10/diag_freq.py, 2026-11-23; 10000.0 exactly at 10 kHz, so c14's f == 10000 matched), so the equality
     never held and every point read 1 Mohm: the sweep finished (answer 020b00000000ff00). Input check, by
     cal_accept's criterion, before the answer is judged: point 12 published usable windows on screen 3, and
-    each has |Z| + the point's short entry below 1e5 (so its median window has too)."""
+    each has |Z| + the point's short entry below 1e5 (so the resolved mean of revision 11 has too: the source is
+    noise-free)."""
     words = {'0x%08x' % V_FREQ: 1000, '0x%08x' % V_LEVEL: 0x3F19999A, '0x%08x' % V_SPEED: 0,
              '0x%08x' % V_BIAS: 0}
     b = bytearray(block_with(**words))
@@ -1196,24 +1246,78 @@ def c22_host_drives_the_calibration_menu():
 
 
 @case
-def u02_omed_unit():
-    """cal_omed (revision 10: the k-th smallest |Z|, k = (n - 1) / 2, of the first held of equal ones) on chosen
-    sets of 1..7 windows with the expected index written out, called directly on a rig at the main loop; the
-    meter-like set is the 100 kHz / 0.3 V open stream of 2026-11-23 (2.21e7 .. 4.25e7 with outliers)."""
+def windows_of_admittances(ys, t0, th0):
+    """The screen-3 windows (|Z| = |Zo| - |t0|, theta = arg Zo) of open admittances ys: Zo = 1 / Y + Zs."""
+    zs = abs(t0) * cmath.exp(1j * math.radians(th0))
+    out = []
+    for y in ys:
+        zo = 1 / y + zs
+        out.append((abs(zo) - abs(t0), math.degrees(cmath.phase(zo))))
+    return out
+
+
+# The open sweep of 2026-11-23 (leads open, 0.3 V, the table of backup 20261123-191801-pre-opensweep): per
+# frequency the point, its short entry (t0, theta0) and the first 7 readings after the first, turned back into
+# the screen-3 windows of an open calibration through the stored table (scratchpad opencal/r11/wins.py:
+# |Zdut| from the decade interpolation inverted, Y = 1 / Zdut + Yo, Zo = 1 / Y + Zs), with the result the
+# revision-11 rule gives (MEASUREMENT_FIX_DESIGN revision 11.2)
+METER_OPEN = [
+    (100, 1, 0.000395802, -171.588, [(5.93615e+07, -141.579), (5.59751e+07, 171.7), (7.59358e+07, -56.4039),
+                                     (8.86626e+07, -53.7679), (5.24748e+07, 71.9602), (1.48162e+08, 58.1453),
+                                     (3.28581e+07, -149.559)], 'nr'),
+    (120, 4, 0.000582478, -169.428, [(3.30139e+07, -122.469), (3.88472e+07, 137.39), (2.84043e+07, 115.825),
+                                     (3.14367e+07, 115.817), (4.18069e+07, 165.027), (2.54455e+07, -169.213),
+                                     (2.52606e+07, 169.914)], 'nr'),
+    (1000, 7, 0.000982688, 117.938, [(6.82662e+07, -81.7466), (8.26089e+07, -90.8729), (7.99421e+07, -83.6597),
+                                     (7.20266e+07, -78.9729), (7.79838e+07, -109.604), (6.99867e+07, -101.67),
+                                     (5.77064e+07, -92.6438)], 'res'),
+    (10000, 10, 0.00887205, 80.9322, [(8.09306e+06, -85.997), (8.2361e+06, -86.9464), (8.1528e+06, -86.6762),
+                                      (7.873e+06, -85.4812), (8.13495e+06, -85.875), (8.25829e+06, -84.8955),
+                                      (8.13118e+06, -85.5052)], 'res'),
+    (100000, 13, 0.084615, 78.1223, [(771237, -73.6766), (771252, -73.6653), (769827, -73.6642),
+                                     (771032, -73.6771), (770573, -73.7128), (770309, -73.6144),
+                                     (771391, -73.7179)], 'res'),
+]
+
+
+@case
+def u02_open_rule_unit():
+    """cal_ores (revision 11: the vector mean of the open admittances when resolved, else "not resolved" 1e10 /
+    +400) called directly on a rig at the main loop, with the point's short entry written into the RAM table,
+    on sets of 0..7 windows with the expected kind written out: none and one window (not resolved), three equal
+    windows (resolved, the sum of squares 0), a 2 pF stray at 10 kHz with a scatter of 3e-9 S (resolved), the
+    same stray at 100 Hz (1.26e-9 S) with a scatter of 2e-8 S spread around it (not resolved), and METER_OPEN.
+    Input check: open_rule gives the written kind for every set (not 'edge'). Expected: open_match."""
     rig = own_rig(DutSource())
-    cases = [((1.0,), 0), ((2.0, 1.0), 1), ((1.0, 2.0), 0), ((3.0, 1.0, 2.0), 2), ((5.0, 5.0, 1.0, 9.0), 0),
-             ((2.21e7, 2.24e7, 4.25e7, 2.43e7, 1.74e7, 2.25e7, 3.41e7), 5), ((2.0, 2.0, 2.0), 0),
-             ((-1.0, 3.0, -2.0, 0.0, 5.0, 4.0, 1.0), 6), ((7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0), 3)]
-    for zs, idx in cases:
-        check(omed(list(zs)) == idx, 'u2: the test rule gives %d for %r, written %d' % (omed(list(zs)), zs, idx))
-        for i, z in enumerate(zs):
+    w = 2 * math.pi
+    y10k = 1j * w * 1e4 * 2e-12
+    y100 = 1j * w * 100 * 2e-12
+    sets = [('none', 1, 0.0004, -170.0, [], 'nr'),
+            ('one', 10, 0.009, 81.0, [(8.0e6, -88.0)], 'nr'),
+            ('equal', 10, 0.009, 81.0, [(8.0e6, -88.0)] * 3, 'res'),
+            ('stray 10 kHz', 10, 0.009, 81.0, windows_of_admittances(
+                [y10k + 3e-9 * cmath.exp(1j * math.radians(103.0 * i)) for i in range(7)], 0.009, 81.0), 'res'),
+            ('noise 100 Hz', 1, 0.0004, -170.0, windows_of_admittances(
+                [y100 + 2e-8 * cmath.exp(1j * math.radians(17.0 + 360.0 * i / 7)) for i in range(7)],
+                0.0004, -170.0), 'nr')]
+    sets += [('meter %d Hz' % f, p, t0, th0, wins, kind) for f, p, t0, th0, wins, kind in METER_OPEN]
+    for what, p, t0, th0, wins, kind in sets:
+        t0f, th0f = u32f(f2u(t0)), u32f(f2u(th0))
+        wf = [(u32f(f2u(z)), u32f(f2u(th))) for z, th in wins]
+        rule = open_rule(wf, t0f, th0f)
+        check(rule[0] == kind, 'u2 %s: the rule gives %r, written %s (input)' % (what, rule, kind))
+        rig.wr(entry(p, 0), f2u(t0))
+        rig.wr(entry(p, 0) + 0x2D0, f2u(th0))
+        rig.wr(OWN_CAL + CAO_PT, p)
+        for i, (z, th) in enumerate(wins):
             rig.wr(OWN_CAL + CAO_OWIN + 8 * i, f2u(z))
-            rig.wr(OWN_CAL + CAO_OWIN + 8 * i + 4, f2u(10.0 * i))
-        rig.wr(OWN_CAL + CAO_NO, len(zs))
-        r0 = rig.m.call(rig.s['cal_omed'])
+            rig.wr(OWN_CAL + CAO_OWIN + 8 * i + 4, f2u(th))
+        rig.wr(OWN_CAL + CAO_NO, len(wins))
+        r0 = rig.m.call(rig.s['cal_ores'])
         r1 = rig.m.uc.reg_read(UC_ARM_REG_R1)
-        check(r0 == f2u(zs[idx]) and r1 == f2u(10.0 * idx), 'u2: %r -> %08X / %08X, expected window %d' % (
-            zs, r0, r1, idx))
+        open_match(r0, r1, rule, t0f, 'u2 %s' % what)
+        NOTES.append('u2 %s: %s, q %s, stored %.6g / %.4f' % (what, rule[0], 'none' if rule[2] is None else
+                                                              '%.4g' % rule[2], u32f(r0), u32f(r1)))
     return True
 
 

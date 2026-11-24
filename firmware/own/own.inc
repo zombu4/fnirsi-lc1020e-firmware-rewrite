@@ -622,7 +622,8 @@
         .equ    CAO_REL,        0x148           @ 0x78 bytes: 0x200010C0..0x20001137 before the
                                                 @ sweep (the vendor start clears them)
         .equ    CAO_OWIN,       0x1C0           @ 7 windows of an open point: |Z| bits, theta
-                                                @ bits (cal.s CA_NO_OPEN)
+                                                @ bits (cal.s CA_NO_OPEN); cal_ores overwrites
+                                                @ each with its admittance Re Y, Im Y
         .equ    CAO_END,        0x1F8
         .if     CAO_END > CAL_SIZE
         .error  "own.inc: the OWN_CAL words do not fit O_CAL"

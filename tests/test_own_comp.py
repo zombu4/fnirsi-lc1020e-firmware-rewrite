@@ -421,6 +421,66 @@ def m48_magnitude_never_negative():
     return True
 
 
+# ---------------------------------------------------------------- m49 60 Hz and the 100 Hz entry
+
+def open_at(blk, fis, t11, th11):
+    """blk with the open words (type 11, |Z| and theta) of the entries of the frequency indices fis replaced."""
+    b = bytearray(blk)
+    for fi in fis:
+        for li in range(3):
+            off = 0x5A4 + 0x90 * fi + 0x30 * li + 4 * 11
+            struct.pack_into('<f', b, off, t11)
+            struct.pack_into('<f', b, off + 0x2D0, th11)
+    return bytes(b)
+
+
+@case
+def m49_sixty_hertz_takes_the_100_hz_entry():
+    """S2.12 with MEASUREMENT_FIX_DESIGN revision 11 (an open point stored "not resolved", 1e10 / +400): at 60 Hz
+    (LCR_SET frequency index 5) meas_comp reads the 100 Hz entry of the level. (a) the 100 Hz entries (fi 0,
+    three levels) hold the fixture, the other twelve the fixture with the open "not resolved": every publish at
+    60 Hz equals the specification with the 100 Hz entry, and the DUT 10000 - j5000 ohm is recovered within 1e-3
+    and 0.2 degree (m40's bounds); (b) the 100 Hz entries "not resolved", the other twelve the fixture: every
+    publish equals the short-only specification of the 100 Hz entry (check_pubs, 1e-4); input check per
+    publish: expect() of the same window with the 100 Hz entry of (a) (the open used) differs from it by more
+    than 2e-4, twice that bound, so the match tells the two apart (2026-11-23: the first version compared with
+    the DUT, by a value without the decade interpolation; the firmware's short-only value lay 1.2e-4 from
+    the DUT). Input check: open_usable of the two entries differs."""
+    zd = complex(10000.0, -5000.0)                    # 10x m40: the open moves |Z| by about 1.5e-3
+    full = fixture_block()
+    z100o = struct.unpack_from('<12f', full, 0x5A4)
+    th100o = struct.unpack_from('<12f', full, 0x5A4 + 0x2D0)
+    for what, blk in (('a', open_at(full, (1, 2, 3, 4), 1e10, 400.0)), ('b', open_at(full, (0,), 1e10, 400.0))):
+        z100 = struct.unpack_from('<12f', blk, 0x5A4)
+        th100 = struct.unpack_from('<12f', blk, 0x5A4 + 0x2D0)
+        z1k = struct.unpack_from('<12f', blk, 0x5A4 + 0x90 * 2)
+        th1k = struct.unpack_from('<12f', blk, 0x5A4 + 0x90 * 2 + 0x2D0)
+        u100 = open_usable([f32(v) for v in z100], [f32(v) for v in th100]) is not None
+        u1k = open_usable([f32(v) for v in z1k], [f32(v) for v in th1k]) is not None
+        check(u100 != u1k and u100 == (what == 'a'), 'm49 %s: open usable at 100 Hz %r, 1 kHz %r (input)' % (
+            what, u100, u1k))
+        rig = own_rig(fixture_src(zd), block=blk, usb=True)
+        rig.ask_ok('LCR_SET', bytes([2, 5]))
+        check(rig.rd(M.V_FREQ) == 60, 'm49 %s: frequency %d' % (what, rig.rd(M.V_FREQ)))
+        t0 = rig.m.now()
+        rig.run(4.0)
+        pubs = check_pubs(rig, z100, th100, 'm49 %s' % what, since=t0 + 1.5)
+        gz = u32f(pubs[-1]['Z'])
+        gt = u32f(pubs[-1]['TH'])
+        if what == 'a':
+            check(abs(gz - abs(zd)) <= 1e-3 * abs(zd) and abs(gt - deg(zd)) <= 0.2,
+                  'm49 a: %.6g at %.4f, the DUT %.6g at %.4f' % (gz, gt, abs(zd), deg(zd)))
+        else:
+            for p in pubs:
+                e = expect(zbar_of(p), z100o, th100o)
+                check(e is not None and e != 'ovl' and abs(e[0] - u32f(p['Z'])) > 2e-4 * abs(e[0]),
+                      'm49 b: the value with the open %r is within 2e-4 of the publish %.7g (input)' % (
+                          e, u32f(p['Z'])))
+        rig.watch.check(what='m49 %s' % what)
+        NOTES.append('m49 %s: %d publishes at 60 Hz, the last |Z| %.7g theta %.4f' % (what, len(pubs), gz, gt))
+    return True
+
+
 def main():
     sel = sys.argv[1:]
     bad = run = 0

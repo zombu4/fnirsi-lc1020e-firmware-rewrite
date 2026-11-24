@@ -24,13 +24,15 @@
 @   same window (no unwrap, items 6 / 7). The point is accepted when each of the 3 lies within a
 @   factor 2 of the median (|Zi| <= 2 |Zm| and 2 |Zi| >= |Zm|: CAL_SETTLE_DESIGN 4.2's limit,
 @   design 8.1 for D9); otherwise the oldest is dropped and the next window taken;
-@ - open points (type 11, MEASUREMENT_FIX_DESIGN revision 10): every usable window is kept in
-@   CAO_OWIN; the point ends at its CA_NO_OPEN-th usable window or at its time limit CA_POINT_MS,
-@   whichever comes first, with the lower median window of what it has (cal_omed: |Z| and theta of
-@   one window; the order of |Z| is the reverse order of the admittance |Y| = 1 / (|Z| + the
-@   short), so the median window is the median of the admittance too). An open point never fails
-@   by its time; with no usable window at all it is stored "not resolved": |Z| 1e10 and theta
-@   +400 (S4.1 then uses the short only at that point, meas.s meas_comp);
+@ - open points (type 11, MEASUREMENT_FIX_DESIGN revisions 10 and 11): every usable window is kept
+@   in CAO_OWIN; the point ends at its CA_NO_OPEN-th usable window or at its time limit
+@   CA_POINT_MS, whichever comes first. Its result (cal_ores, revision 11) is the vector mean Ybar
+@   of the n windows' open admittances Y_i = 1 / (Zo_i - Zs), stored as Zo = 1 / Ybar + Zs in the
+@   entry's form (|Zo| minus the short, arg Zo), when the mean is resolved: n >= 2 and n (n - 1)
+@   |Ybar|^2 / sum |Y_i - Ybar|^2 above the 0.999 quantile of F(2, 2n - 2) (the chance that
+@   windows of noise around no admittance at all pass is 1e-3). Otherwise the point is stored
+@   "not resolved": |Z| 1e10 and theta +400 (S4.1 then uses the short only at that point, meas.s
+@   meas_comp). An open point never fails by its time;
 @ - open validity: an open point needs |Zo| = |Z| + the point's short entry >= 100 kohm ([S10]
 @   p.5), else the sweep fails naming the point;
 @ - results stay in OWN_CAL; the table is written only at the end (item 4), point by point
@@ -76,8 +78,8 @@
 	.include "own/own.inc"
 
 	.equ	CA_PTS,		15		@ points of a sweep
-	.equ	CA_NO_OPEN,	7		@ usable windows that end an open point [J]: the median of 7
-						@ stands with up to 3 outliers (own.inc CAO_OWIN holds 7)
+	.equ	CA_NO_OPEN,	7		@ usable windows that end an open point [J] (own.inc CAO_OWIN
+						@ holds 7; cal_rk has the limits of n = 2..7)
 	.if	CAO_OWIN + 8 * CA_NO_OPEN > CAO_END
 	.error	"cal.s: CA_NO_OPEN windows do not fit CAO_OWIN"
 	.endif
@@ -572,75 +574,143 @@ cal_usable:
 
 @ ----------------------------------------------------------------------------
 @ cal_oend - the end of an open point (type 11; at its CA_NO_OPEN-th usable window or at its time
-@   limit): with CAO_NO >= 1 windows the lower median window (cal_omed), with none "not
-@   resolved", |Z| 1e10 and theta +400; then cal_accept (its open validity check, the next point
-@   or the store). Keeps r4..r11; changes r0..r3, r12 and what cal_accept's callees change
-@   (s0..s15 at the store, cal_commit).
+@   limit): the point's result by cal_ores (the resolved mean open, or "not resolved" |Z| 1e10 and
+@   theta +400), then cal_accept (its open validity check, the next point or the store). Keeps
+@   r4..r11, s16..s31; changes r0..r3, r12, s0..s15 and what cal_accept's callees change.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	cal_oend, %function
 cal_oend:
 	push	{r4, lr}
-	ldr	r4, =OWN_CAL
-	ldr	r0, [r4, #CAO_NO]
-	cbz	r0, .Loe_none
-	bl	cal_omed		@ r0 / r1 = the median window
-	b	.Loe_acc
-.Loe_none:
-	ldr	r0, =F_1E10		@ no usable window at all: "not resolved"
-	ldr	r1, =F_P400
-.Loe_acc:
+	bl	cal_ores		@ r0 / r1 = |Z| bits / theta bits of the point's result
 	bl	cal_accept
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
-@ cal_omed - the CAO_NO (1..CA_NO_OPEN) windows in CAO_OWIN, every |Z| finite (cal_usable): r0 /
-@   r1 = |Z| bits / theta bits of the window whose |Z| is the k-th smallest, k = (n - 1) / 2 (the
-@   median for odd n, the lower median for even n; signed compare; of equal |Z| the first held).
-@   Window i is the k-th when (windows below it) <= k < (windows at or below it). Finite floats
-@   are totally ordered, so one i always qualifies; the fall-through to window 0 only keeps the
-@   result defined. Changes r0..r3, s0, s1.
+@ cal_ores - the result of an open point (MEASUREMENT_FIX_DESIGN revision 11) from its n = CAO_NO
+@   (0..CA_NO_OPEN) usable windows in CAO_OWIN (|Z| bits, theta bits as published on screen 3 with
+@   type 11: |Z| = |Zbar| - t0, theta = arg Zbar). The point's short entry (cal_entry): t0 and its
+@   phase theta0; Zs = |t0| e^(j theta0), or |t0| when theta0 is not a finite angle within +-180
+@   (meas_angok; meas_comp then uses no open at that point). Per window Zo_i = (|Z|_i + |t0|) e^(j
+@   theta_i), D_i = Zo_i - Zs, Y_i = conj(D_i) / |D_i|^2 (the window's slot is overwritten with Re /
+@   Im Y_i); Ybar = sum Y_i / n, S = sum |Y_i - Ybar|^2 (two passes). Resolved when n >= 2 and
+@   |Ybar|^2 > cal_rk[n - 2] x S, cal_rk[n - 2] = F(2, 2n - 2; 0.999) / (n (n - 1)): then r0 = |Zo|
+@   - |t0| and r1 = arg Zo in degrees (meas_deg), Zo = Zs + conj(Ybar) / |Ybar|^2, the form
+@   meas_comp reads back (Zo = (t11 + |t0|) e^(j theta11), Yo = 1 / (Zo - Zs) = Ybar). Else, and
+@   when some D_i is 0 or |Zo| - |t0| is not finite (a NaN fails the compare as well): "not
+@   resolved", r0 = 1e10 (F_1E10) and r1 = +400 (F_P400). CAO_OWIN is read by nothing after it.
+@   Keeps r4..r11, s16..s31; changes r0..r3, r12, s0..s15.
 @ ----------------------------------------------------------------------------
 	.thumb_func
-	.type	cal_omed, %function
-cal_omed:
+	.type	cal_ores, %function
+cal_ores:
 	push	{r4, r5, r6, r7, r8, lr}
-	ldr	r5, =OWN_CAL
-	add	r4, r5, #CAO_OWIN	@ r4 = the windows
-	ldr	r5, [r5, #CAO_NO]	@ r5 = n
-	subs	r6, r5, #1
-	lsrs	r6, r6, #1		@ r6 = k
-	movs	r7, #0			@ r7 = i
-.Lom_i:
-	add	r0, r4, r7, lsl #3
-	vldr	s0, [r0]		@ |Z| of window i
-	movs	r1, #0			@ r1 = windows below it
-	movs	r2, #0			@ r2 = windows at or below it
-	movs	r3, #0			@ r3 = j
-.Lom_j:
-	add	r0, r4, r3, lsl #3
-	vldr	s1, [r0]
-	vcmpe.f32	s1, s0
+	vpush	{d8, d9, d10, d11}
+	ldr	r7, =OWN_CAL
+	add	r4, r7, #CAO_OWIN	@ r4 = the windows
+	ldr	r5, [r7, #CAO_NO]	@ r5 = n
+	cmp	r5, #2
+	blo	.Lor_none		@ fewer than 2 windows: no scatter to judge the mean by
+	ldr	r0, [r7, #CAO_PT]
+	bl	cal_entry		@ r0 = the point's short (type 0) entry
+	mov	r8, r0
+	vldr	s0, [r8]
+	vabs.f32	s21, s0		@ s21 = |t0|
+	vldr	s0, [r8, #0x2D0]	@ theta0
+	bl	meas_angok
+	cmp	r0, #0
+	beq	.Lor_zs
+	vldr	s0, [r8, #0x2D0]
+	bl	meas_cis		@ s0 / s1 = cos / sin theta0
+	vmul.f32	s16, s21, s0	@ s16 = Re Zs
+	vmul.f32	s17, s21, s1	@ s17 = Im Zs
+	b	.Lor_sum
+.Lor_zs:
+	vmov.f32	s16, s21	@ theta0 unusable: Zs = |t0|
+	movs	r0, #0
+	vmov	s17, r0
+.Lor_sum:
+	movs	r0, #0
+	vmov	s18, r0			@ s18 = sum Re Y_i
+	vmov	s19, r0			@ s19 = sum Im Y_i
+	movs	r6, #0			@ r6 = i
+.Lor_y:
+	add	r0, r4, r6, lsl #3
+	vldr	s0, [r0, #4]		@ theta_i
+	bl	meas_cis		@ s0 / s1 = cos / sin theta_i
+	add	r0, r4, r6, lsl #3
+	vldr	s2, [r0]		@ |Z|_i
+	vadd.f32	s2, s2, s21	@ |Zo_i| = |Z|_i + |t0|
+	vmul.f32	s3, s2, s0
+	vsub.f32	s3, s3, s16	@ s3 = Re D_i
+	vmul.f32	s4, s2, s1
+	vsub.f32	s4, s4, s17	@ s4 = Im D_i
+	vmul.f32	s5, s3, s3
+	vmla.f32	s5, s4, s4	@ s5 = |D_i|^2
+	vcmp.f32	s5, #0
 	vmrs	APSR_nzcv, fpscr
-	it	lt
-	addlt	r1, r1, #1
-	it	le
-	addle	r2, r2, #1
-	adds	r3, r3, #1
-	cmp	r3, r5
-	blo	.Lom_j
-	cmp	r1, r6
-	bhi	.Lom_next		@ more than k below: above the k-th
-	cmp	r2, r6
-	bhi	.Lom_take		@ k below at most and more than k at or below: the k-th
-.Lom_next:
-	adds	r7, r7, #1
-	cmp	r7, r5
-	blo	.Lom_i
-	movs	r7, #0
-.Lom_take:
-	add	r0, r4, r7, lsl #3
-	ldrd	r0, r1, [r0]
+	beq	.Lor_none		@ Zo_i = Zs: no admittance
+	vdiv.f32	s3, s3, s5	@ Re Y_i
+	vdiv.f32	s4, s4, s5
+	vneg.f32	s4, s4		@ Im Y_i
+	vstr	s3, [r0]		@ the slot now holds Y_i
+	vstr	s4, [r0, #4]
+	vadd.f32	s18, s18, s3
+	vadd.f32	s19, s19, s4
+	adds	r6, r6, #1
+	cmp	r6, r5
+	blo	.Lor_y
+	vmov	s22, r5
+	vcvt.f32.u32	s22, s22	@ s22 = n
+	vdiv.f32	s18, s18, s22	@ s18 = Re Ybar
+	vdiv.f32	s19, s19, s22	@ s19 = Im Ybar
+	movs	r0, #0
+	vmov	s20, r0			@ s20 = S
+	movs	r6, #0
+.Lor_dev:
+	add	r0, r4, r6, lsl #3
+	vldr	s0, [r0]
+	vldr	s1, [r0, #4]
+	vsub.f32	s0, s0, s18
+	vsub.f32	s1, s1, s19
+	vmla.f32	s20, s0, s0
+	vmla.f32	s20, s1, s1	@ S += |Y_i - Ybar|^2
+	adds	r6, r6, #1
+	cmp	r6, r5
+	blo	.Lor_dev
+	vmul.f32	s0, s18, s18
+	vmla.f32	s0, s19, s19	@ s0 = |Ybar|^2
+	ldr	r0, =cal_rk
+	subs	r1, r5, #2
+	add	r0, r0, r1, lsl #2
+	vldr	s1, [r0]		@ F(2, 2n - 2; 0.999) / (n (n - 1))
+	vmul.f32	s1, s1, s20
+	vcmpe.f32	s0, s1
+	vmrs	APSR_nzcv, fpscr
+	ble	.Lor_none		@ not above its scatter's limit (or unordered): not resolved
+	vdiv.f32	s2, s18, s0	@ Re conj(Ybar) / |Ybar|^2
+	vdiv.f32	s3, s19, s0
+	vadd.f32	s2, s2, s16	@ s2 = Re Zo
+	vsub.f32	s3, s17, s3	@ s3 = Im Zo
+	vmul.f32	s4, s2, s2
+	vmla.f32	s4, s3, s3
+	vsqrt.f32	s23, s4		@ |Zo|
+	vsub.f32	s23, s23, s21	@ s23 = |Zo| - |t0|, the entry's form
+	vmov	r0, s23
+	and	r0, r0, #EXPM
+	cmp	r0, #EXPM
+	beq	.Lor_none		@ not finite
+	vmov.f32	s0, s3
+	vmov.f32	s1, s2
+	bl	meas_deg		@ s0 = arg Zo, degrees
+	vmov	r1, s0
+	vmov	r0, s23
+	b	.Lor_ret
+.Lor_none:
+	ldr	r0, =F_1E10		@ "not resolved"
+	ldr	r1, =F_P400
+.Lor_ret:
+	vpop	{d8, d9, d10, d11}
 	pop	{r4, r5, r6, r7, r8, pc}
 
 @ ----------------------------------------------------------------------------
@@ -1098,6 +1168,19 @@ cal_freqs:
 @ literals of fn_0800bd5c)
 cal_levels:
 	.word	0x3DCCCCCD, 0x3E99999A, 0x3F19999A
+@ cal_rk - the limits of cal_ores for n = 2..7 windows: x / (n (n - 1)), x the 0.999 quantile of
+@   F(2, m), m = 2n - 2, x = (m / 2) (1e-3^(-2 / m) - 1) (P(F(2, m) > x) = (1 + 2x / m)^(-m / 2)):
+@   x = 999, 61.24555, 27, 18.49365, 14.90536, 12.97367 (MEASUREMENT_FIX_DESIGN revision 11)
+	.if	CA_NO_OPEN != 7
+	.error	"cal.s: cal_rk holds the limits of n = 2..7"
+	.endif
+cal_rk:
+	.word	0x43F9C000		@ n = 2: 499.5
+	.word	0x4123524C		@ n = 3: 10.207592
+	.word	0x40100000		@ n = 4: 2.25
+	.word	0x3F6CB801		@ n = 5: 0.92468268
+	.word	0x3EFE6281		@ n = 6: 0.49684528
+	.word	0x3E9E27B9		@ n = 7: 0.30889681
 @ the names of the 15 points (second line of the progress text): frequency in Hz, k for 1000, then
 @ the level in V; each at most 73 pixels wide in F1 (cal.s header, revision 10 item 6)
 cal_names:

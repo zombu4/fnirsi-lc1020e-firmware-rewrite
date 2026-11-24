@@ -2300,8 +2300,10 @@ meas_tail:
 @ ----------------------------------------------------------------------------
 @ meas_deg - s0 = atan2(s0, s1) in degrees, as fn_0800a068 forms a phase: the two floats as
 @   doubles, fn_08010700(d0 = y, d1 = x), times 180.0, divided by the double of the float pi
-@   (0x400921FB60000000), back to float. Changes r0..r3, r12, s0..s15.
+@   (0x400921FB60000000), back to float. Changes r0..r3, r12, s0..s15. Also called by cal.s
+@   cal_ores.
 @ ----------------------------------------------------------------------------
+	.global	meas_deg
 	.thumb_func
 	.type	meas_deg, %function
 meas_deg:
@@ -3090,8 +3092,9 @@ meas_cz:
 @ meas_cis - s0 = an angle in degrees: s0 = cos, s1 = sin of it (radians = degrees * pi / 180,
 @   then the vendor's single-precision cosine fn_08010900 and sine fn_08011780, runtime_37.s /
 @   runtime_38.s; the angle is finite, meas_angok). Keeps s16..s31 (s16 / s17 saved around the
-@   calls). Changes r0..r3, r12, s0..s15.
+@   calls). Changes r0..r3, r12, s0..s15. Also called by cal.s cal_ores.
 @ ----------------------------------------------------------------------------
+	.global	meas_cis
 	.thumb_func
 	.type	meas_cis, %function
 meas_cis:
@@ -3112,8 +3115,10 @@ meas_cis:
 
 @ ----------------------------------------------------------------------------
 @ meas_angok - r0 = 1 when s0 is a finite angle with |s0| <= 180 degrees (an ordered compare:
-@   NaN and the infinities give 0), else 0. A leaf; changes r0, s1, s2.
+@   NaN and the infinities give 0), else 0. A leaf; changes r0, s1, s2. Also called by cal.s
+@   cal_ores.
 @ ----------------------------------------------------------------------------
+	.global	meas_angok
 	.thumb_func
 	.type	meas_angok, %function
 meas_angok:

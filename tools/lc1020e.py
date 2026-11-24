@@ -382,7 +382,7 @@ class Value:
     @classmethod
     def parse(cls, d, pos):
         v, unit, dec, val, txt = struct.unpack_from('<fBBB8s', d, pos)
-        return cls(v, unit, dec, val, txt.rstrip(b'\0').decode('ascii', 'replace'))
+        return cls(v, unit, dec, val, txt.split(b'\0')[0].decode('ascii', 'replace'))  # text ends at its 0
 
     def __str__(self):
         if self.validity in (1, 2):

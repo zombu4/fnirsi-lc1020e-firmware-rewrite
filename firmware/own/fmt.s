@@ -13,7 +13,8 @@
 @     magnitude lies above the manual's measurement range (UM 1543: R 0..10 Mohm, C 0..100 mF,
 @     L 0..100 H; |Z| and X by the R row, design S2.1 "The other quantities");
 @   - else the vendor formatter (0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L) on the magnitude, one
-@     decimal less where its text would exceed 19,999 counts (S2.4, D5), and a '-' in front for a
+@     decimal less where its text would exceed 19,999 counts (S2.4, D5; C 2000.0 .. 7999.9 uF
+@     goes to mF with 3 decimals instead, fmt_reduce), and a '-' in front for a
 @     negative value (S2.2: R, L and C signed; X too, which the vendor formats signed itself only
 @     with 0x20001198 = 2, so X is signed once); a text of more than 7 characters with its sign is
 @     OL (never reached by the vendor formats: at most 6 characters);
@@ -246,8 +247,12 @@ fmt_len:
 @   value / magnitude): N = the digits of the text read as one integer, d = the digits after its
 @   point. N > 19,999 and d > 0: the text is printed again with d - 1 decimals from the value in
 @   the unit the vendor formatter chose (its index word: fmt_scale; the magnitude for R, C, L, the
-@   value for D, Q, theta), by fn_08010370 as the vendor formatters print. An index without an
-@   entry (0xFF) leaves the text. Changes r0..r3, r10, r12, s0..s2.
+@   value for D, Q, theta), by fn_08010370 as the vendor formatters print, into the text cleared
+@   to 8 zero bytes first. One exception: C in uF with 1 decimal (the vendor's "%0.1f" range,
+@   2000.0 .. 7999.9 uF above 19,999 counts) would be left without a '.', which fn_0800d14c
+@   places 33 px further right, over the unit picture (meter, 2026-11-23); it is printed in mF
+@   with 3 decimals, unit text "mF" at r5 and index 4 at r6, as the vendor's next range. An
+@   index without an entry (0xFF) leaves the text. Changes r0..r3, r10, r12, s0..s2.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	fmt_reduce, %function
@@ -288,6 +293,23 @@ fmt_reduce:
 	ldrb	r0, [r2, r0]		@ r0 = scale code
 	cmp	r0, #3
 	bhi	.Lrd_ret		@ no entry
+	cmp	r7, #K_C
+	bne	.Lrd_val
+	cmp	r0, #1
+	bne	.Lrd_val
+	cmp	r1, #1
+	bne	.Lrd_val
+	movs	r0, #'m'		@ C in uF with one decimal (2000.0 .. 7999.9 uF, the vendor's
+	strb	r0, [r5, #0]		@ "%0.1f" range): no decimal would be left and the row draw
+	movs	r0, #'F'		@ fn_0800d14c places a text without '.' 33 px further right,
+	strb	r0, [r5, #1]		@ over the unit picture; printed in mF with 3 decimals
+	movs	r0, #0			@ instead (the vendor's next unit: text "mF", index 4)
+	strb	r0, [r5, #2]
+	movs	r0, #4
+	str	r0, [r6]
+	movs	r0, #2			@ scale code 2: / 1e6
+	movs	r1, #4			@ 3 decimals after the decrement below
+.Lrd_val:
 	vmov.f32	s0, s17		@ R, C, L: the magnitude
 	cmp	r7, #K_L
 	bls	.Lrd_scale
@@ -310,6 +332,12 @@ fmt_reduce:
 	bne	.Lrd_print		@ code 0: the base unit
 	vmul.f32	s0, s0, s1	@ * 1000 (pF)
 .Lrd_print:
+	movs	r0, #0			@ all 8 text bytes 0 first: the shorter text leaves no
+	movs	r2, #7			@ bytes of the old one after its terminating 0 (the row
+.Lrd_clr:				@ draw reads all 7 places, the host record sends 8)
+	strb	r0, [r4, r2]
+	subs	r2, r2, #1
+	bpl	.Lrd_clr
 	subs	r1, r1, #1		@ one decimal less
 	ldr	r2, =fmt_formats
 	add	r10, r2, r1, lsl #3	@ r10 = "%0.<d-1>f"
