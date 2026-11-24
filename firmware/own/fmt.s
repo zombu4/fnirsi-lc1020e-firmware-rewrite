@@ -41,14 +41,16 @@
 @ - D, Q (0x0800DD44) and theta (0x0800DFC4): the vendor formatter on the value, the S2.4 decimal
 @   rule, MF_MARK = 0 (no table entry, design S2.1); a D below 0 is given to it as +0 ("0.0000",
 @   "%0.4f" below 10), a Q below 0 is OL (revision 14 rule 1; meas_publish stores both as
-@   magnitudes, so neither is negative there today); theta keeps its sign.
+@   magnitudes, so neither is negative there today); theta keeps its sign. Beside a main row C or L
+@   whose text is 0 ("0.0" pF / uH, fmt_dq), D is OL and Q is "0.0000" (revision 15).
 @ own_row_draw draws the row's text with the vendor's fn_0800d14c and then, when MF_MARK is 1, puts
 @ an amber multiply cover over each of the row's seven glyph objects (0x200059A8 + 32 row + 4 i,
 @ i = 0..6; ui_41.s 1111, 274), so the digits are drawn amber with their shapes; an unmarked row
 @ hides the covers again (own_row_draw below: why the image recolour cannot do it).
 @
 @ RAM: only MF_MARK, MF_ROW0, MF_ROW1 (OWN_FUNC, own.inc) written; read: 0x20001144 (frequency),
-@ 0x200050C4 (|Z|), 0x200011EC (series / parallel), 0x200050B8 (R, own_fmt_rs); the covers are GUI
+@ 0x200050C4 (|Z|), 0x200011EC (series / parallel), 0x200050B8 (R, own_fmt_rs), 0x200011E4 (main
+@ row) and 0x200050BC / 0x200050C0 (C, L; fmt_dq); the covers are GUI
 @ objects on the GUI heap. Never-brick: no flash, no save.
 
 	.syntax unified
@@ -97,8 +99,8 @@
 @   own_fmt_dqs - 0x0800D356, the call row 1's cases 2 and 3 share (fn_0800d294): r3 = 0x200050D4
 @     (D, `addw` at 0x0800D340) or 0x200050D0 (Q, `addw` at 0x0800D34C): s0 = the word, then
 @     own_fmt_d for 0x200050D4, else own_fmt_q.
-@   own_fmt_d - D: a negative value 0. own_fmt_q - Q: a negative value OL. own_fmt_th - theta,
-@     signed.
+@   own_fmt_d - D: a negative value 0. own_fmt_q - Q: a negative value OL. Both through fmt_dq:
+@     beside a main row C or L shown as 0, D OL and Q 0. own_fmt_th - theta, signed.
 @ ----------------------------------------------------------------------------
 	.global	own_fmt_rz
 	.thumb_func
@@ -164,13 +166,81 @@ own_fmt_dqs:
 	.type	own_fmt_d, %function
 own_fmt_d:
 	movs	r3, #K_DQ + F_ZERO	@ D below 0: 0
-	b	fmt_core
+	b	fmt_dq
 
 	.global	own_fmt_q
 	.thumb_func
 	.type	own_fmt_q, %function
 own_fmt_q:
 	movs	r3, #K_DQ + F_OL	@ Q below 0: OL
+					@ fall through to fmt_dq
+
+@ ----------------------------------------------------------------------------
+@ fmt_dq - D and Q beside a C or L shown as 0 (revision 15, owner 2026-11-24): own_fmt_d /
+@   own_fmt_q's registers (s0 = D or Q, r0..r2 the vendor interface, r3 = K_DQ and its rule).
+@   When the main row (byte 0x200011E4, fn_0800d3d8's case: 2 C, 3 L) is C or L, that value
+@   (0x200050BC / 0x200050C0) is formatted by own_fmt_c / own_fmt_l into buffers on the stack;
+@   when its text is a '0' followed only by '0' and '.' (the value shown as 0: a negative one by
+@   the revision 14 rule, or one below the last place), D is given as +Inf and Q as 0, the limits
+@   of D = 1 / Q as C or L goes to 0: the vendor's D / Q formatter 0x0800DD44 makes OL of +Inf
+@   (bits 0x7F800000 >= 0x47C35000, "0L  ") and "0.0000" of 0. Otherwise D or Q as published.
+@   Then fmt_core. The inner own_fmt_c / own_fmt_l call writes MF_MARK, which fmt_core writes
+@   again. Stack: 24 bytes pushed + 24 bytes of buffers (text 8 at sp, unit 8 at sp + 8, index
+@   word at sp + 16, the D / Q value at sp + 20), 8-aligned for fn_08010370.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	fmt_dq, %function
+fmt_dq:
+	push	{r0, r1, r2, r3, r4, lr}
+	sub	sp, sp, #24
+	vstr	s0, [sp, #20]		@ D or Q as published
+	ldr	r0, =V_MAIN_ROW
+	ldrsb	r4, [r0]
+	cmp	r4, #2
+	beq	.Ldq_c
+	cmp	r4, #3
+	bne	.Ldq_own		@ main row R or |Z|: D, Q as published
+	ldr	r0, =V_L
+	vldr	s0, [r0]
+	mov	r0, sp
+	add	r1, sp, #8
+	add	r2, sp, #16
+	bl	own_fmt_l		@ L as the main row shows it
+	b	.Ldq_test
+.Ldq_c:
+	ldr	r0, =V_C
+	vldr	s0, [r0]
+	mov	r0, sp
+	add	r1, sp, #8
+	add	r2, sp, #16
+	bl	own_fmt_c		@ C as the main row shows it
+.Ldq_test:
+	mov	r0, sp
+	ldrb	r1, [r0], #1
+	cmp	r1, #'0'
+	bne	.Ldq_own		@ a digit 1..9 first (or a '-'): not 0
+.Ldq_ch:
+	ldrb	r1, [r0], #1
+	cbz	r1, .Ldq_zero		@ the end: only '0' and '.' met
+	cmp	r1, #'0'
+	beq	.Ldq_ch
+	cmp	r1, #'.'
+	beq	.Ldq_ch
+	b	.Ldq_own		@ another digit, or 'L' (OL): not 0
+.Ldq_zero:
+	ldr	r3, [sp, #36]		@ the pushed r3: K_DQ and its rule
+	movs	r0, #0
+	vmov	s0, r0			@ Q of a C or L shown as 0: 0
+	tst	r3, #F_OL
+	bne	.Ldq_go			@ Q (own_fmt_q's F_OL)
+	mov	r0, #EXP_MASK
+	vmov	s0, r0			@ D: +Inf, the vendor's OL
+	b	.Ldq_go
+.Ldq_own:
+	vldr	s0, [sp, #20]		@ D or Q as published
+.Ldq_go:
+	add	sp, sp, #24
+	pop	{r0, r1, r2, r3, r4, lr}
 	b	fmt_core
 
 	.global	own_fmt_th

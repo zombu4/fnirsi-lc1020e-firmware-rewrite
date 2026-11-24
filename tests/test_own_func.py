@@ -165,6 +165,7 @@ def f20_ol_and_marker():
     check(mf(rig, 'TMODE') == 0, 'tolerance mode %d after the start' % mf(rig, 'TMODE'))
     wf(rig, V_Z, 1000.0)
     rig.wr(V_SERPAR, 0)
+    rig.wr(V_MAIN_ROW, bytes([1]))                            # main row R: fmt_dq's C / L rule (f31 c) off
     # (formatter, value, frequency, OL expected, marker expected)
     rows = [
         ('own_fmt_r', 1.0e7, 1000, False, False), ('own_fmt_r', 1.0001e7, 1000, True, False),
@@ -291,6 +292,7 @@ def f21_signs():
     the 0 of R, and the value field keeps the negative R."""
     rig = base_rig()
     wf(rig, V_Z, 1000.0)                                      # rule 2 off (1 kHz anyway)
+    rig.wr(V_MAIN_ROW, bytes([1]))                            # main row R: fmt_dq's C / L rule (f31 c) off
     # Expected texts, from the ui_42.s headers:
     # - R below 0 -> 0: fn_0800e028 on +0.0: bits 0 < 0x40ffff97 -> "%0.4f" -> "0.0000", unit ce a9, index 5;
     # - C below 0 -> 0: fn_0800db24 on +0.0: bits 0 not above 0xbb03126f (no OL), 0 < 0x3f4ccccd -> 0 * 1000
@@ -380,6 +382,7 @@ def f22_dq_extremes():
     1000: rule 2 of revision 14 does not act)."""
     rig = base_rig()
     rig.wr(V_FREQ, 1000)
+    rig.wr(V_MAIN_ROW, bytes([1]))                            # main row R: fmt_dq's C / L rule (f31 c) off
     for name in ('own_fmt_d', 'own_fmt_q'):
         rig.wr(TXT, bytes(16))
         fcall_bits(rig, name, 0x7F800000)
@@ -397,8 +400,10 @@ def f23_digits():
     """m23 (S2.4, D5): 19,999 / 20,000 counts in each vendor format range: the text keeps its decimals at
     19,999 and drops one at 20,000 (in the unit the vendor formatter chose); D through own_fmt_d, Q through
     own_fmt_q (the same vendor formatter and S2.4 rule; positive values, so the revision-14 sign rule and
-    the series / parallel word do not act; 1 kHz, so rule 2 does not act)."""
+    the series / parallel word do not act; 1 kHz, so rule 2 does not act; main row R, so the revision-15
+    rule of fmt_dq does not act)."""
     rig = base_rig()
+    rig.wr(V_MAIN_ROW, bytes([1]))
     rows = [('own_fmt_r', 1.9999, '1.9999'), ('own_fmt_r', 2.0, '2.000'), ('own_fmt_r', 19.999, '19.999'),
             ('own_fmt_r', 20.0, '20.00'), ('own_fmt_r', 199.99, '199.99'), ('own_fmt_r', 200.0, '200.0'),
             ('own_fmt_r', 1999.9, '1.9999'), ('own_fmt_r', 2000.0, '2.000'),
@@ -987,8 +992,16 @@ def f31_low_frequency_ol_and_call_sites():
         "0.0", parallel OL), 4 |Z| = -5 (0x200050C4 itself: "0.0000" in both modes, so the `addw` at
         0x0800D406 hands own_fmt_rz the |Z| word); secondary 0 R -5 (as main 1), 1 X -12.3456 ("-12.346"),
         2 D -0.5 ("0.0000" in both, `addw` at 0x0800D340), 3 Q -0.5 (OL in both, `addw` at 0x0800D34C);
-        rec_measure's text equals the display's and its validity is 1 exactly for OL; its value field keeps
-        the negative word. Expected texts as derived in f21 (ui_42.s headers)."""
+        the secondary rows drawn with main row 1 (R), so (c) cannot change them; rec_measure's text equals
+        the display's and its validity is 1 exactly for OL; its value field keeps the negative word.
+        Expected texts as derived in f21 (ui_42.s headers).
+    (c) revision 15 (fmt_dq), at 1 kHz with |Z| 1000, D 0.5 and Q 1.5 published (alone "0.5000" / "1.5000",
+        fn_0800dd44 "%0.4f" below 10): with main row 2 (C) or 3 (L) whose text is 0, D is "0L  " and Q
+        "0.0000"; otherwise D and Q as alone. Main values, both modes: C -0.5 nF (series OL, parallel "0.0"),
+        C 4e-5 nF (0.04 pF: "0.0" in both, a positive value below the last place), C 0.1 nF ("100.0" pF);
+        L -100 uH (series "0.0", parallel OL), L 0.04 uH ("0.0" in both), L 1000 uH (not 0); main row 1 R
+        -5 in series ("0.0000") leaves D and Q as alone (the rule is C and L only). The main text is checked
+        first (input check), then rows 2 and 3 of the secondary and rec_measure (main, 2) and (main, 3)."""
     rig = base_rig()
     seen = []
     a = rig.s['own_row_draw'] & ~1
@@ -1079,10 +1092,12 @@ def f31_low_frequency_ol_and_call_sites():
                 (1, 2): '0.0000', (1, 3): ol_t}
         shown = {}
         for (row, sel), w_ in sorted(want.items()):
+            if row == 1:
+                rig.wr(V_MAIN_ROW, bytes([1]))                # main R: the revision 15 rule off
             t, _ = draw(row, sel)
             shown[(row, sel)] = t
             check(t == w_, 'f31 0x200011EC = %d: row %d selector %d %r, expected %r' % (sp, row, sel, t, w_))
-        for m, s in ((1, 0), (2, 1), (3, 2), (1, 3)):
+        for m, s in ((1, 0), (2, 1), (3, 1), (1, 2), (1, 3)):
             d, bm, bs = record(m, s)
             check(bm[0] == shown[(0, m)] and bm[2] == int(bm[0] == ol_t) and bs[0] == shown[(1, s)]
                   and bs[2] == int(bs[0] == ol_t), 'f31 0x200011EC = %d: record main %d %r secondary %d %r, display '
@@ -1094,11 +1109,40 @@ def f31_low_frequency_ol_and_call_sites():
         d, bm, _ = record(4, 1)
         check(t == zero_r and bm[0] == zero_r and bm[2] == 0, 'f31 0x200011EC = %d: |Z| -5 shown %r, record %r '
               '(expected 0.0000: own_fmt_z, not R)' % (sp, t, bm))
+    # (c) revision 15: D and Q beside a C or L shown as 0
+    wf(rig, V_Z, 1000.0)
+    wf(rig, V_D, 0.5)
+    wf(rig, V_Q, 1.5)
+    wf(rig, V_R, -5.0)
+    n_c = 0
+    for sp in (0, 1):
+        rig.wr(V_SERPAR, sp)
+        # (main row, value word, value, expected main text)
+        cases = [(2, V_C, -0.5, ol_t if sp == 0 else zero_c), (2, V_C, 4e-5, zero_c), (2, V_C, 0.1, '100.0'),
+                 (3, V_L, -100.0, zero_l if sp == 0 else ol_t), (3, V_L, 0.04, zero_l), (3, V_L, 1000.0, None),
+                 (1, V_R, -5.0, zero_r if sp == 0 else ol_t)]
+        for m, w, v, wmain in cases:
+            wf(rig, w, v)
+            tm, _ = draw(0, m)
+            check(wmain is None and tm not in ('0.0', ol_t) or tm == wmain,
+                  'f31 c 0x200011EC = %d: main %d value %g shown %r, expected %r (input check)' % (sp, m, v, tm, wmain))
+            zero = m in (2, 3) and tm == '0.0'
+            wd, wq = ('0L  ', '0.0000') if zero else ('0.5000', '1.5000')
+            td, _ = draw(1, 2)
+            tq, _ = draw(1, 3)
+            check(td == wd and tq == wq, 'f31 c 0x200011EC = %d: main %d %r: D %r Q %r, expected %r %r' % (
+                sp, m, tm, td, tq, wd, wq))
+            for s, ws in ((2, wd), (3, wq)):
+                d, bm, bs = record(m, s)
+                check(bm[0] == tm and bs[0] == ws and bs[2] == int(ws == ol_t),
+                      'f31 c 0x200011EC = %d: record main %d %r secondary %d %r, expected %r / %r' % (
+                          sp, m, bm, s, bs, tm, ws))
+            n_c += 1
     rig.m.uc.hook_del(h)
     rig.wr(V_SERPAR, 0)
     wf(rig, V_Z, 1000.0)
-    NOTES.append('f31: %d rule-2 steps, rule 1 in both modes through fn_0800d3d8 / fn_0800d294 and rec_measure'
-                 % len(steps))
+    NOTES.append('f31: %d rule-2 steps, rule 1 in both modes through fn_0800d3d8 / fn_0800d294 and rec_measure, '
+                 '%d revision-15 cases' % (len(steps), n_c))
     rig.watch.check(what='f31')
     return True
 
