@@ -1,101 +1,91 @@
 # FNIRSI LC1020E firmware rewrite
 
-Firmware work for the **FNIRSI LC1020E** LCR meter. Its microcontroller is a Nations Technologies
-**N32G455** (Arm Cortex-M4F, 512 KiB flash, 144 KiB SRAM). The firmware is written in native
-**Thumb-2 assembly**.
+Replacement firmware for the **FNIRSI LC1020E** LCR meter, written by hand in **Thumb-2 assembly**:
+a new measurement core, calibration and display, a two-part bootloader that an interrupted update
+cannot break, and full control over USB.
 
-The vendor firmware leaves the chip's flash **read protection (level 1)** on. While it is on, a
-debugger cannot read the flash, and the first pages of flash, which hold the vendor bootloader,
-cannot be replaced. Getting past that costs the whole flash contents, so everything the meter
-holds has to be backed up first. This repository contains the tools for exactly that.
+<p align="center">
+  <img src=".github/assets/screen-measure.png" alt="Measure screen: the main reading and the secondary reading" width="320">
+  <img src=".github/assets/screen-compare.png" alt="Compare screen: nominal value, tolerance, verdict and counters" width="320">
+  <img src=".github/assets/screen-settings.png" alt="Settings menu: sorting, brightness, volume, off time, calibration" width="320">
+</p>
+<p align="center"><sub>Screenshots taken over USB from a meter running this firmware.</sub></p>
 
-## Status
+## What's new compared to the vendor firmware
 
-What exists now:
+| | |
+|---|---|
+| **Measurement** | New core: whole signal periods, DFT with a noise estimate, complex averaging, settle times, saturation detection |
+| **60 Hz** | A test frequency next to 100 Hz, 120 Hz, 1 kHz, 10 kHz and 100 kHz |
+| **Honest readings** | OL outside the manual's measurement range, amber digits outside its accuracy table, no impossible negative values |
+| **AUTO** | R / C / L and series / parallel chosen with hysteresis, so the display does not flip back and forth |
+| **Calibration** | New open / short sweep with complex compensation, plus a separate gain calibration area |
+| **Compare mode** | HI / IN / LO judged once per part, asymmetric and IEC-letter tolerances, a secondary limit, counters |
+| **Settings** | Kept in two copies, so a power cut during a save never loses them or the calibration |
+| **Updates** | Copy a `.uf2` file to the meter's USB drive; an interrupted update leaves the meter in update mode |
+| **USB control** | Every key, setting and reading, screenshots, backups and updates over USB ([PROTOCOL.md](PROTOCOL.md)) |
+| **Everyday use** | English only, Off Time and low-battery power-off, a crystal-fault message instead of silent restarts |
 
-| Part | Folder | What it does |
-|---|---|---|
-| SRAM dumper | [`dumper/`](dumper/) | Assembly program, installed through the vendor update drive. It copies the vendor bootloader, the drive and settings area (which holds the calibration) and the option bytes into SRAM, stores a CRC-32 of each flash part, and then runs from SRAM so that a debugger can read the copies. An emulator test and a checker for the dump are included. |
-| SWD tools | [`swd/`](swd/) | OpenOCD scripts: identify the chip, back up the flash under read protection through the halted CPU (`cpu_read.tcl`) or read the dumper's copies (`read_dump.tcl`), remove the read protection (`unprotect.tcl`), write the backup back and read it back (`program.tcl`), reset (`reset.tcl`). |
-| Update-drive installer | [`tools/`](tools/) | `iap_write.py` installs an image through the vendor bootloader's USB update drive (macOS), `make_restore.py` builds and checks the images `program.tcl` writes. |
-| Starter | [`starter/`](starter/) | First stage of the two-part bootloader, flash page 0 (1064 bytes). It holds the power latch, reads the control records and starts one of three bootloader slots (factory F, A, B): an installed slot is first recorded as on trial, a slot that never confirmed is replaced by the newest confirmed one, and slot F is the fallback. Every slot is checked (header, CRC-32 of the image, vector table) before it is started; every record it writes is read back. The emulator test covers every record state, bad headers, a full record page and a power cut after every single flash operation. |
-| Bootloader port | [`bootloader/`](bootloader/) | The vendor bootloader (USB update drive, flash programming, start of the application) in symbolic assembly, 208 functions in nine source files plus the vector table and the data, every function commented. Linked at 0x08000000 it reproduces the vendor bootloader byte for byte (`make check`); it is the base of the slot bootloader. Its three larger data blocks come from your own meter's flash: `make vendor-data DUMP=<your 0x08000000 dump>`. |
-| Slot bootloader | [`bootloader/`](bootloader/) (`make slot`) | The port built for the three slots F, A and B: linked for its slot with its own vector table, the packed RAM image typed with symbols, the confirmation records of the starter, a flash gate inside the erase and program routines (application area and record pages only), checks of the application's vector table before it is started, and its own update path: UF2 (each 512-byte block names its address, so host write order, cluster layout and extra files do not matter; the application's vector page is written last and only after the rest is verified, so an interrupted update leaves the meter in update mode). `tools/bin2uf2.py` converts a `.bin`, `tools/iap_write.py` writes the `.uf2` to the drive. |
-| Our application build | [`firmware/`](firmware/) (`make own`) | The port with our modules after its data, joined to it by same-size hooks (`.ifdef OWN`, so `make check` still rebuilds V1.1 byte for byte). The code keeps its addresses; the data is packed: every data pointer is a label, the Chinese texts, glyphs and pictures are cut out, the initial RAM image is typed out, so the free space lies in one block after our image (`tests/check_pack.py` checks every byte against V1.1). Our modules: the settings and calibration kept in two copies, each read back, a power cut never loses both (`own/save.s`); the vendor's own flash routines switched off; fixes of vendor defects found in the code (`own/fix.s`); English only: the language chooser and the Language menu item are gone, the settings menu has six items (`own/lang.s`); Off Time, the low-voltage power-off and the battery icon kept up to date every 30 s (`own/power.s`); a crystal fault shown on the display with its repair for 20 s, then a clean power-off, instead of the vendor's silent restarts (`own/xtal.s`); the start-up logo "FU\*\*NIRSI", composed from pieces of the vendor's own logo pictures (`own/logo.s`); a new measurement core (`own/meas.s`): whole signal periods in every acquisition (timer and DAC periods corrected), one DFT bin per channel with its noise estimate, a complex average over a window of the manual's 1 / 2 / 4 readings per second with outlier and part-change rules, an acquisition handshake that never uses a buffer re-armed during the reads, the voltage and current buffers started on the same conversion (their DMA channels switched off and on together), a settle time after every change, saturation and no-reading detection, the phase not folded (a negative R is kept as measured), and the factory calibration table protected from the calibration sweep and the menu restore; the complex open / short compensation on the measure and compare screens, with the factory resistor references kept as breakpoints through it, and a wait for a steady DC level after a bias change (`own/meas.s`, stage 4); a new calibration sweep (`own/cal.s`): complete windows only, the median of three agreeing windows per short point, the vector mean of the admittances of up to seven usable windows per open point, kept only when it stands out from their scatter (an F test at 0.999) and is a lead stray (capacitive, phase +45 .. +135 degrees, at most 50 pF), else "not resolved" and the short correction only there, the 100 / 120 Hz points "not resolved" filled with the capacitance of a resolved 1 kHz (else 10 kHz) point (a no-reading window skipped, never a restart), open points checked for at least 100 kohm, a calibration that a host can start and leave like the meter's menu, the results stored only after all 15 points and the settings put back before its one save, the progress and the reason of a failure in the dialog; the display and instrument functions (`own/fmt.s`, `own/cmp.s`): OL outside the manual's measurement range and, at 60 / 100 / 120 Hz, above the 10 Mohm the manual specifies there, the digits in amber outside its accuracy table, a negative R, C, L, D or Q shown as the end of the range it points to (no passive part has one: series R, parallel C, series L and D as 0, parallel R, series C, parallel L and Q as OL; beside a C or L shown as 0, D as OL and Q as 0), the sign of X and theta shown, at most 19,999 counts, AUTO R / C / L and series / parallel with hysteresis (a secondary picked with its key or LCR_SET stays), a hold that ends at a change of a measurement setting, a 60 Hz test frequency, the compare mode judged once per stable insertion with HI / IN / LO, asymmetric and IEC-letter tolerances, a secondary limit, a non-blocking beeper and an LED that holds the result, counters that stop at 999 and a counter reset key; a save that writes nothing when nothing changed, and loaded settings checked in RAM; and USB control (below). |
-| Own calibration area | [`firmware/own/ocal.s`](firmware/own/ocal.s), [`tools/ocal_fit.py`](tools/ocal_fit.py) | Per-range / per-gain complex gain calibration, clip limits, settle times and a level monitor, kept at 0x08062000..0x08065FFF (two slots, written only by `ocal.s` through the settings gate), commands 0x30..0x37 and event 0x98 (`PROTOCOL.md` 5.7 and 16), host fit `tools/ocal_fit.py`. Emulator tests: `tests/test_own_ocal.py` (records, power cuts inside every flash operation, rollback, foreign and newer records, every value rule, the gain correction on the measurement, lock, settle times, clip limits, the level monitor, the trace, a write-watch of the settings and tables), `tests/test_ocal_fit.py` (the fit on synthetic runs); on the meter: open. |
-| USB control and API | [`firmware/own/`](firmware/own/), [`PROTOCOL.md`](PROTOCOL.md), [`tools/lc1020e.py`](tools/lc1020e.py) | A USB serial port (CDC ACM) with a framed request / answer protocol, events and streams: every key, screen, measurement setting and reading (screen, settings, hold and compare values are set directly, without key presses), the compare mode, the menu settings, calibration, settings backup and restore, screenshots, memory read, restart, power off, application updates (the slot bootloader's update drive, entered by command) and bootloader updates into the free slot (trial and rollback by the starter). `PROTOCOL.md` is the specification for companion applications; `tools/lc1020e.py` is a host library with a command-line tool. |
-| Tests | [`tests/`](tests/) | Emulator tests of the whole chain (starter, slot, application start; records, faults, power cuts after every record write) and of the UF2 path (any block order, junk, repeated and foreign blocks, flash errors, power cuts), and a static never-brick check of every image (no option-byte or protection register, nothing in the settings page, flash-controller access only in the listed routines). For our build: the settings save with power cuts (`test_own_save.py`), USB control over a model of the USB device and the measurement hardware (`test_own_control.py`), the direct changes of screen, measurement settings, hold, menu settings and compare values against the meter's own key path, word by word and pixel by pixel (`test_own_dset.py`), power-off (`test_own_power.py`), English only and the reset path (`test_own_lang.py`), the measurement core against the vendor build and recomputed from the sampled buffers, with a write-watch on the calibration tables in every case (`test_own_measure.py`), the display and instrument functions and 60 Hz (`test_own_func.py`), the calibration sweep with its aborts, fails and a power-off in the middle (`test_own_cal.py`), the open / short compensation and the bias wait (`test_own_comp.py`), the own calibration area (`test_own_ocal.py`, `test_ocal_fit.py`), and the byte check of the packed image (`check_pack.py`). |
+Everything in detail: [FEATURES.md](FEATURES.md).
 
-The two-part bootloader runs on a meter: installed over SWD (`swd/install_bootloader.tcl`,
-`tools/make_install.py`), started the vendor application through slot A and confirmed it, and the
-vendor bootloader pages were erased.
+## Companion app
 
-The application is ported too: [`firmware/`](firmware/) holds the vendor application V1.1 in
-assembly, 1107 functions in 46 source files plus the vector table and the fixed data, every
-function commented. `make check` rebuilds it byte for byte (309080 bytes). Its fonts, pictures and
-the packed initial RAM image are not part of this repository; `make vendor-data
-IMAGE=<LC1020E_V1.1_250702.bin>` copies them out of your own copy of the vendor update file (each
-block checked by SHA-256, `firmware/vendor_blobs.tsv`). Our own build on this base (`make own`,
-table above) is tested in the emulator and runs on a meter with slot bootloader version 2 (installed
-as in GUIDE.md section 11; USB control, screens, streams, restart and the update over USB checked
-on it).
+[**FNIRSI Companion**](https://github.com/zombu4/fnirsi-companion) is a desktop program for Windows,
+macOS and Linux that works with this firmware: live readings, compare mode, the meter's settings,
+calibration, backups and updates.
 
-## Start here
+## Installing
 
-[GUIDE.md](GUIDE.md) takes you through the wiring, the backup, the removal of the read protection,
-the restore and the installation of the two-part bootloader, with the output to expect at every
-step.
+> [!WARNING]
+> The vendor firmware locks the flash. Unlocking it **erases the whole chip**, including the meter's
+> calibration. Back it up first, exactly as the guide describes, and read the guide's warnings before
+> you start.
 
-**Read the warnings at the top of the guide first.** Removing the read protection is irreversible
-and erases the meter's flash; without a verified backup the meter's settings and calibration are
-lost.
+The first installation needs an SWD probe. [GUIDE.md](GUIDE.md) walks through it, with the output to
+expect at every step:
 
-## Build and test
+1. Wire the probe and back up the flash (sections 3 to 6).
+2. Remove the read protection and write the backup back (sections 7 to 9).
+3. Install the two-part bootloader and this firmware (sections 10 and 11).
 
-    make -C dumper && make -C starter               # needs binutils for arm-none-eabi
+After that, updates need no probe and no key press:
+
+    python3 -I tools/lc1020e.py update APP_OWN.uf2 --yes
+
+## Building
+
+You need `arm-none-eabi` binutils, Python 3 and your own copy of the vendor update file
+(`LC1020E_V1.1_250702.bin`). The vendor's fonts and pictures are not in this repository;
+`make vendor-data` copies them out of your file.
+
+    make -C firmware vendor-data IMAGE=<LC1020E_V1.1_250702.bin>
+    make -C firmware check own      # vendor V1.1 rebuilt byte for byte, then our build and its .uf2
+
+The result is `firmware/build/own/APP_OWN.uf2`.
+
+## Testing
+
+The tests run in an emulator of the chip, its USB device and the measurement hardware. They need
+[Unicorn](https://www.unicorn-engine.org/):
+
     python3 -m venv venv && venv/bin/pip install unicorn
-    venv/bin/python -I dumper/test_sram_dumper.py dumper/sram_dumper.bin   # "16 checks, 0 failed"
-    venv/bin/python -I starter/test_starter.py starter/build/starter.elf   # "14 tests, 0 failed"
-
-A GitHub Actions workflow ([`.github/workflows/build.yml`](.github/workflows/build.yml)) does the
-same on every push.
-
-The bootloader and the application need the vendor data from your own files first (`make
-vendor-data`, see above); then:
-
-    make -C bootloader check slot                   # vendor bootloader byte for byte; slots F, A, B
-    make -C firmware check own                      # V1.1 byte for byte; our build and its .uf2
-    venv/bin/python -I tests/test_chain.py          # starter, slots, application start
-    venv/bin/python -I tests/test_uf2.py            # the slot's UF2 update path
     venv/bin/python -I tests/check_never_brick.py --app
-    venv/bin/python -I tests/check_pack.py          # our packed image against V1.1
-    venv/bin/python -I tests/test_own_save.py       # likewise test_own_control.py, test_own_power.py,
-                                                    # test_own_lang.py, test_own_dset.py,
-                                                    # test_own_measure.py, test_own_func.py (a case
-                                                    # name selects cases)
+    venv/bin/python -I tests/test_chain.py
+    venv/bin/python -I tests/test_own_measure.py
+
+What each test covers: [FEATURES.md](FEATURES.md#tests-tests). GitHub Actions builds the dumper and the
+starter and runs their tests on every push (the other parts need the vendor files).
 
 ## Repository layout
 
-    bootloader/  bootloader port and slot build: src/, link*.ld, Makefile (vendor-data, check, slot)
-    dumper/      sram_dumper.s, Makefile, test_sram_dumper.py, check_dump.py
-    firmware/    application port: src/, link.ld, link_units.ld, link_rodata.ld, Makefile;
-                 our build: own/ (save, USB driver, control and commands, direct changes of
-                 the settings, screenshot, fixes, English menu, power-off, start-up copy,
-                 measurement core, value formatters, AUTO and compare functions, the
-                 calibration sweep cal.s, the own calibration area ocal.s),
-                 link_own.ld; Makefile targets
-                 vendor-data, check, uf2, own; vendor_blobs.tsv
-    starter/     starter.s, Makefile, test_starter.py
-    swd/         OpenOCD scripts and the probe configuration
-    tests/       emulator chain and UF2 tests, chip, USB and measurement models, tests of our
-                 build, never-brick and packing checks
-    PROTOCOL.md  USB control protocol, the specification for companion applications
-    tools/       update-drive writer, root helper, UF2 converter, slot header and image builders,
-                 ocal_fit.py (gain fit of a calibration run)
-    GUIDE.md     step-by-step procedure
-
-`build/` and `dumps/` (your backups and the images built from them) and `vendor/` (the vendor
-application, which you download yourself) are created by you and never committed.
+| Folder | Content |
+|---|---|
+| [`firmware/`](firmware/) | The vendor application ported to assembly (`src/`) and our modules (`own/`) |
+| [`bootloader/`](bootloader/) | The vendor bootloader ported to assembly, and the slot bootloader built from it |
+| [`starter/`](starter/) | First stage of the two-part bootloader (flash page 0) |
+| [`dumper/`](dumper/), [`swd/`](swd/) | Tools for the first backup and installation over SWD |
+| [`tools/`](tools/) | Host tools: `lc1020e.py` (USB control), UF2 converter, image builders |
+| [`tests/`](tests/) | Emulator tests and static checks |
 
 ## License
 
