@@ -431,14 +431,14 @@ Value block (15 bytes):
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | f32 | the value the display formats, in the base unit of its quantity: R, Z and X in ohm, C in nF, L in uH, D and Q without unit, theta in degrees |
+| 0 | f32 | the value the display formats, as read before formatting, in the base unit of its quantity: R, Z and X in ohm, C in nF, L in uH, D and Q without unit, theta in degrees. A negative R, C, L, D or Q keeps its sign here while its text (offset 7) is 0 |
 | 4 | u8 | unit code of the display text: 0 none, 1 ohm, 2 kohm, 3 Mohm, 4 pF, 5 nF, 6 uF, 7 mF, 8 uH, 9 mH, 10 H, 11 degree |
 | 5 | u8 | decimals: digits after the point in the display text |
 | 6 | u8 | validity: 0 valid, 1 overload ("0L" from the formatter), 2 no reading (the meter's no-reading counter 0x2000120C above 200), 3 held. Checked in the order 3, 2, 1 |
-| 7 | 8 | display text, ASCII, zero padded: the text the display shows (firmware/own/fmt.s on the meter's formatters 0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L, 0x0800DD44 D / Q, 0x0800DFC4 theta): "0L" above the measurement range (R, Z, X above 10 Mohm, C above 100 mF, L above 100 H, or not finite), a '-' in front of a negative R, C, L or X, at most 19,999 counts (one decimal less above; C 2000.0 .. 7999.9 uF is sent in mF with 3 decimals, unit code 7; D and Q from 20,000 have no decimal to drop and keep 5 digits). Every byte after the terminating 0 is 0 (firmware before MEASUREMENT_FIX_DESIGN revision 12 could leave bytes of the vendor's longer text there: read the text up to its first 0) |
+| 7 | 8 | display text, ASCII, zero padded: the text the display shows (firmware/own/fmt.s on the meter's formatters 0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L, 0x0800DD44 D / Q, 0x0800DFC4 theta): "0L" above the measurement range (R, Z, X above 10 Mohm, C above 100 mF, L above 100 H, or not finite), a negative R (main or secondary) or C shown as 0 ("0.0000" with unit code 1 and 4 decimals, "0.0" with unit code 4 and 1 decimal; marker bit set; firmware before MEASUREMENT_FIX_DESIGN revision 13 sent it with a '-'), a negative L shown as "0.0" (unit code 8, 1 decimal, marked) and a negative D or Q as "0.0000", a '-' in front of a negative X or theta, at most 19,999 counts (one decimal less above; C 2000.0 .. 7999.9 uF is sent in mF with 3 decimals, unit code 7; D and Q from 20,000 have no decimal to drop and keep 5 digits). Every byte after the terminating 0 is 0 (firmware before MEASUREMENT_FIX_DESIGN revision 12 could leave bytes of the vendor's longer text there: read the text up to its first 0) |
 
 Sources: main row 1 R 0x200050B8, 2 C 0x200050BC, 3 L 0x200050C0, 4 Z 0x200050C4; secondary 0 R
-(0x200050B8, signed as the display shows it), 1 X 0x200050C8 (sign kept), 2 D 0x200050D4, 3 Q
+(0x200050B8, the signed word the display formats), 1 X 0x200050C8 (sign kept), 2 D 0x200050D4, 3 Q
 0x200050D0, 4 theta 0x200050CC. A main row or secondary outside these values gives a block with
 value 0, unit 0, decimals 0 and an empty text (validity 3 or 2 as above, else 0).
 

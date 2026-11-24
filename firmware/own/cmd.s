@@ -39,15 +39,17 @@
 @   table, fmt.s MF_MARK; MEASUREMENT_FIX_DESIGN.md S2.1); OCAL flags u8 (bit 0 the gain
 @   correction applied, bit 1 GAIN present for the frequency but not at this cell, bit 2
 @   OCAL_LOCK active, bit 3 OF_RETAKE; ocal.s ocal_meas_flags, OWN_CAL_DESIGN.md 2.8).
-@   Value block (15 bytes): value f32 as the display formats it (R ohm, C nF, L uH, Z / X
-@   ohm, D / Q none, theta degree), unit code u8 of the display text (0 none, 1 ohm, 2 kohm,
+@   Value block (15 bytes): value f32, the word the display formats, as read (R ohm, C nF, L
+@   uH, Z / X ohm, D / Q none, theta degree; fmt_value stores it before the formatter runs, so
+@   a negative R, C, L, D or Q keeps its sign here while its text is 0, S2.2 revision 13), unit code u8
+@   of the display text (0 none, 1 ohm, 2 kohm,
 @   3 Mohm, 4 pF, 5 nF, 6 uF, 7 mF, 8 uH, 9 mH, 10 H, 11 degree), decimals u8 (digits after
 @   the point of the text), validity u8 (0 valid, 1 "0L" from the formatter, 2 no reading:
 @   tick counter 0x2000120C above 200, 3 held), display text 8 bytes (the formatter's text,
 @   zero padded). The texts come from the display's formatters, our wrappers of fmt.s
-@   (own_fmt_r ohm, own_fmt_c C, own_fmt_l L, own_fmt_dq D / Q, own_fmt_th theta: OL, sign and
-@   digits as the display shows them) with the inputs 0x0800D3D8 / 0x0800D294 give them; the
-@   secondary R is the signed 0x200050B8 (S2.2).
+@   (own_fmt_r ohm, own_fmt_x X, own_fmt_c C, own_fmt_l L, own_fmt_dq D / Q, own_fmt_th theta:
+@   OL, sign and digits as the display shows them; a negative R, C, L, D or Q is the text of 0) with the
+@   inputs 0x0800D3D8 / 0x0800D294 give them; the secondary R is the signed 0x200050B8 (S2.2).
 @ COMPARE (50 bytes): quantity u8 (0x20001178), nominal f32 (0x20001184), tolerance f32
 @   (0x20001188), deviation f32 (0x200050D8), OK u8 (1 when the judgement is IN, cmp.s),
 @   pass u32 (0x200050F0), fail u32 (0x200050F4), compare value f32 (0x200050DC), warn type
@@ -1890,9 +1892,10 @@ rec_state:
 @ ----------------------------------------------------------------------------
 @ rec_measure - r0 = destination -> r0 = MEASURE_SIZE (layout in the file header).
 @   Main row by byte 0x200011E4 (0x0800D3D8): 1 R 0x200050B8 / 4 Z 0x200050C4 (ohm), 2 C
-@   0x200050BC, 3 L 0x200050C0. Secondary by 0x200011E8 (0x0800D294): 0 R (ohm, signed as the
-@   display shows it, S2.2), 1 X 0x200050C8 (ohm, sign kept), 2 D 0x200050D4, 3 Q 0x200050D0,
-@   4 theta 0x200050CC. Byte 64: the two markers fmt_value returns (bit 0 main, 1 secondary).
+@   0x200050BC, 3 L 0x200050C0. Secondary by 0x200011E8 (0x0800D294): 0 R (ohm, the signed word
+@   the display's own_fmt_rs formats, S2.2), 1 X 0x200050C8 (ohm, sign kept), 2 D 0x200050D4,
+@   3 Q 0x200050D0, 4 theta 0x200050CC. Byte 64: the two markers fmt_value returns (bit 0
+@   main, 1 secondary).
 @ ----------------------------------------------------------------------------
 	.global	rec_measure
 	.thumb_func
@@ -2017,7 +2020,10 @@ rec_measure:
 @ fmt_value - r0 = value block, r1 = FK_* kind, r2 = float bits: value, unit code, decimals,
 @   validity and the 8-byte text from the display's formatter (fmt_fn) called with s0 = the
 @   value, r0 = text buffer, r1 = unit buffer, r2 = index word (CT_FMT_*). FK_OHM_X stores 2
-@   to 0x20001198 around the call and 0 after it, as 0x0800D294 does for X.
+@   to 0x20001198 around the call and 0 after it, as 0x0800D294 does for X (its formatter
+@   own_fmt_x keeps the sign by itself; the word only mirrors the display's call). The value
+@   word is stored as read, before the formatter runs (a negative R, C, L, D or Q keeps its sign
+@   there).
 @   Returns r0 = the formatter's marker (fmt.s MF_MARK: 1 outside the accuracy table; 0 for
 @   FK_NONE), and leaves MF_MARK at 0 (a display row without a formatter call then reads 0).
 @ ----------------------------------------------------------------------------
@@ -2791,10 +2797,11 @@ mem_ranges:
 	.word	0x20000000, 0x20020000
 
 @ display formatters by FK_* kind (FK_NONE has none): the wrappers of fmt.s, which the display
-@ rows call too (S2.1 / S2.2 / S2.4: the host text equals the display text)
+@ rows call too (S2.1 / S2.2 / S2.4: the host text equals the display text); FK_OHM_X is X:
+@ own_fmt_x keeps the sign, own_fmt_r shows a negative R as 0 (S2.2 revision 13)
 fmt_fn:
 	.word	own_fmt_r, own_fmt_c, own_fmt_l, own_fmt_dq, own_fmt_th, 0
-	.word	own_fmt_r
+	.word	own_fmt_x
 @ unit codes by kind: {first index, last index, added to the index, 0}: ohm 5..7 -> 1..3,
 @ C 1..4 -> 4..7, L 3..5 -> 8..10, D / Q none, theta 1 -> 11 (the indices the formatters
 @ store, 0x0800E028 / 0x0800DB24 / 0x0800DE2C / 0x0800DFC4)

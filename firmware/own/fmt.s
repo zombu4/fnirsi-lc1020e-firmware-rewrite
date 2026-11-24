@@ -12,17 +12,25 @@
 @   - OL (the vendor's text "0L  ", unit text empty, index 0) when the value is not finite or its
 @     magnitude lies above the manual's measurement range (UM 1543: R 0..10 Mohm, C 0..100 mF,
 @     L 0..100 H; |Z| and X by the R row, design S2.1 "The other quantities");
+@   - R (main row and secondary R) and C (S2.2 revision 13, owner 2026-11-23): a finite negative
+@     value is shown as 0, the vendor formatter's own text of 0 ("0.0000" ohm, index 5; "0.0" pF,
+@     index 1), and marked (0 lies below every lower limit of the accuracy table); |Z| takes the
+@     same path and is never negative (revision 10). X keeps its sign: it has its own wrapper
+@     own_fmt_x (the X call 0x0800D32A and fmt_fn's FK_OHM_X), so the rule is told by the call
+@     site, not by a RAM word; L the same as R and C (owner 2026-11-23, "i don't think any neg
+@     numbers should be possible": "0.0" uH, index 3, from 0x0800DE2C "%0.1f" below 100);
 @   - else the vendor formatter (0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L) on the magnitude, one
 @     decimal less where its text would exceed 19,999 counts (S2.4, D5; C 2000.0 .. 7999.9 uF
 @     goes to mF with 3 decimals instead, fmt_reduce), and a '-' in front for a
-@     negative value (S2.2: R, L and C signed; X too, which the vendor formats signed itself only
-@     with 0x20001198 = 2, so X is signed once); a text of more than 7 characters with its sign is
-@     OL (never reached by the vendor formats: at most 6 characters);
+@     negative X or L (S2.2; X, which the vendor formats signed itself only with 0x20001198 = 2,
+@     is signed once, as the vendor gets the magnitude); a text of more than 7 characters with
+@     its sign is OL (never reached by the vendor formats: at most 6 characters);
 @   - MF_MARK = 1 when the magnitude lies outside the accuracy table of the manual for the
 @     frequency now (UM 1596-1646 as read in design S2.1; 120 Hz in the 100 Hz column; 60 Hz has no
 @     column: always marked), else 0 (design D6: the value is shown, with a marker);
 @ - D, Q (0x0800DD44) and theta (0x0800DFC4): the vendor formatter on the value, the S2.4 decimal
-@   rule, MF_MARK = 0 (no table entry, design S2.1).
+@   rule, MF_MARK = 0 (no table entry, design S2.1); a D or Q below 0 is given to it as +0
+@   ("0.0000", "%0.4f" below 10; owner 2026-11-23); theta keeps its sign.
 @ own_row_draw draws the row's text with the vendor's fn_0800d14c and then, when MF_MARK is 1, puts
 @ an amber multiply cover over each of the row's seven glyph objects (0x200059A8 + 32 row + 4 i,
 @ i = 0..6; ui_41.s 1111, 274), so the digits are drawn amber with their shapes; an unmarked row
@@ -43,6 +51,8 @@
 	.equ	K_L,		2		@ inductance, uH
 	.equ	K_DQ,		3		@ D, Q
 	.equ	K_TH,		4		@ theta, degrees
+	.equ	K_MASK,		7		@ the kind bits of fmt_core's r3
+	.equ	F_ZERO,		8		@ r3 flag: a negative value is shown as 0 (R, C, L, D, Q)
 	.equ	EXP_MASK,	0x7F800000	@ exponent field: all ones = Inf or NaN
 	.equ	GLYPHS,		0x200059A8	@ 2 rows x 8 glyph objects (ui_41.s 274)
 	.equ	MAX_COUNT,	19999		@ D5: 4 1/2 digits
@@ -51,11 +61,15 @@
 	.p2align 2
 
 @ ----------------------------------------------------------------------------
-@ own_fmt_r - ohm: R, |Z| or X in s0 (signed). own_fmt_rs - the secondary R: the value from
-@   0x200050B8 (the caller at 0x0800D2E4 made s0 absolute, ui_41.s 1350-1352; S2.2 takes the
-@   signed word). own_fmt_c - C in nF. own_fmt_l - L in uH. own_fmt_dq - D or Q. own_fmt_th -
-@   theta. All: r0 = text, r1 = unit text, r2 = index word address (the vendor interface).
-@   AAPCS: r0..r3, r12, s0..s15 changed.
+@ own_fmt_r - ohm: R or |Z| in s0, a finite negative value shown as 0 (S2.2 revision 13).
+@   own_fmt_rs - the secondary R: the value from 0x200050B8 (the caller at 0x0800D2E4 made s0
+@   absolute, ui_41.s 1350-1352; S2.2 takes the signed word), then as own_fmt_r. own_fmt_x - X
+@   in ohm, signed (called only at 0x0800D32A, case 1 of 0x200011E8 with s0 = 0x200050C8, and
+@   by fmt_fn's FK_OHM_X, own/cmd.s). own_fmt_c - C in nF, a finite negative value shown as 0.
+@   own_fmt_l - L in uH, the same. own_fmt_dq - D or Q, a negative shown as 0. own_fmt_th -
+@   theta, signed. All: r0 = text, r1 =
+@   unit text, r2 = index word address (the vendor interface). AAPCS: r0..r3, r12, s0..s15
+@   changed.
 @ ----------------------------------------------------------------------------
 	.global	own_fmt_rs
 	.thumb_func
@@ -67,28 +81,35 @@ own_fmt_rs:
 	.thumb_func
 	.type	own_fmt_r, %function
 own_fmt_r:
-	movs	r3, #K_R
+	movs	r3, #K_R + F_ZERO	@ R, |Z|: a negative shown as 0
+	b	fmt_core
+
+	.global	own_fmt_x
+	.thumb_func
+	.type	own_fmt_x, %function
+own_fmt_x:
+	movs	r3, #K_R		@ X: ohm, the sign kept
 	b	fmt_core
 
 	.global	own_fmt_c
 	.thumb_func
 	.type	own_fmt_c, %function
 own_fmt_c:
-	movs	r3, #K_C
+	movs	r3, #K_C + F_ZERO	@ C: a negative shown as 0
 	b	fmt_core
 
 	.global	own_fmt_l
 	.thumb_func
 	.type	own_fmt_l, %function
 own_fmt_l:
-	movs	r3, #K_L
+	movs	r3, #K_L + F_ZERO	@ L: a negative shown as 0 (owner 2026-11-23)
 	b	fmt_core
 
 	.global	own_fmt_dq
 	.thumb_func
 	.type	own_fmt_dq, %function
 own_fmt_dq:
-	movs	r3, #K_DQ
+	movs	r3, #K_DQ + F_ZERO	@ D, Q: a negative shown as 0 (owner 2026-11-23)
 	b	fmt_core
 
 	.global	own_fmt_th
@@ -100,8 +121,16 @@ own_fmt_th:
 
 @ ----------------------------------------------------------------------------
 @ fmt_core - the wrappers' work (file header): s0 = value, r0 = text, r1 = unit text, r2 = index
-@   word address, r3 = kind K_*. Register use: r4 text, r5 unit, r6 index address, r7 kind,
-@   r8 OWN_FUNC, r9 marker; s16 the value, s17 its magnitude.
+@   word address, r3 = kind K_* plus F_ZERO for R, C, L (here) and D, Q (at .Lfc_plain, the
+@   vendor's text of 0 "0.0000"; L: "0.0" uH index 3). Register use: r4 text, r5 unit, r6 index
+@   address, r7 kind, r8 OWN_FUNC, r9 marker, r10 F_ZERO (until the vendor call; fmt_reduce
+@   changes r10); s16 the value, s17 its magnitude. With F_ZERO a finite value below 0 is
+@   replaced by +0 in s16 and s17 before the range test, so all that follows sees 0: not OL
+@   (0 <= fmt_hard), marked (0 lies below every fmt_spec lower limit, and 60 Hz is always
+@   marked), the vendor's text of 0 (0x0800E028: 0 < 0x40ffff97, "%0.4f", "0.0000", index 5;
+@   0x0800DB24: 0 <= 0xbb03126f and 0 < 0x3f4ccccd, 0 * 1000 with "%0.1f", "0.0", "pF", index
+@   1), fmt_reduce keeps it (0 counts), and no '-' (s16 = 0 is not below 0). -0.0 is not below 0
+@   either way: it was already shown without a sign. Not finite stays OL (no number to show).
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	fmt_core, %function
@@ -111,7 +140,8 @@ fmt_core:
 	mov	r4, r0
 	mov	r5, r1
 	mov	r6, r2
-	mov	r7, r3
+	and	r7, r3, #K_MASK		@ r7 = kind
+	and	r10, r3, #F_ZERO	@ r10 = F_ZERO or 0
 	ldr	r8, =OWN_FUNC
 	movs	r9, #0			@ r9 = marker
 	str	r9, [r8, #MF_MARK]
@@ -123,6 +153,15 @@ fmt_core:
 	and	r0, r0, #EXP_MASK
 	cmp	r0, #EXP_MASK
 	beq	.Lfc_ol			@ Inf or NaN: OL
+	cmp	r10, #0
+	beq	.Lfc_range		@ X: the sign is kept
+	vcmpe.f32	s16, #0
+	vmrs	APSR_nzcv, fpscr
+	bge	.Lfc_range		@ R, C, L not below 0: as they are
+	movs	r0, #0
+	vmov	s16, r0			@ R, C, L below 0: shown as +0 (S2.2 revision 13)
+	vmov	s17, r0
+.Lfc_range:
 	ldr	r1, =fmt_hard
 	add	r1, r1, r7, lsl #2
 	vldr	s1, [r1]
@@ -149,6 +188,14 @@ fmt_core:
 	vmov.f32	s0, s17		@ the vendor formatter gets the magnitude
 	b	.Lfc_call
 .Lfc_plain:
+	cmp	r10, #0
+	beq	.Lfc_plainv		@ theta: the sign kept
+	vcmpe.f32	s16, #0
+	vmrs	APSR_nzcv, fpscr
+	bpl	.Lfc_plainv		@ D, Q not below 0 (or NaN: N clear): as they are
+	movs	r0, #0
+	vmov	s16, r0			@ D, Q below 0: shown as +0 ("0.0000", fn_0800dd44 "%0.4f")
+.Lfc_plainv:
 	vmov.f32	s0, s16
 .Lfc_call:
 	ldr	r3, =fmt_vendor
@@ -169,7 +216,7 @@ fmt_core:
 	bhi	.Lfc_mark		@ D, Q, theta: no sign of ours (theta keeps the vendor's)
 	vcmpe.f32	s16, #0
 	vmrs	APSR_nzcv, fpscr
-	bge	.Lfc_mark		@ not negative: no sign
+	bge	.Lfc_mark		@ not negative (R and C always, revision 13): no sign
 	mov	r0, r4
 	bl	fmt_len			@ r0 = length
 	cmp	r0, #7

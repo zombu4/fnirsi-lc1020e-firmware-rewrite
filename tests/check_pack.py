@@ -104,7 +104,7 @@ PATCHES = [
     # MEASUREMENT_FIX_DESIGN.md stages 2 / 2F / 2G (revision 6): the formatter calls and row draws
     # (S2.1, S2.2, S2.4), the AUTO block and the compare block of fn_0800f854 (S2.5, S2.8, S2.9),
     # the frequency key, the 60 Hz OL group (S2.12), the vendor compare call (S2.8)
-    (0x0800D2E4, 4, 'bl own_fmt_rs for bl fn_0800e028'), (0x0800D32A, 4, 'bl own_fmt_r for bl fn_0800e028'),
+    (0x0800D2E4, 4, 'bl own_fmt_rs for bl fn_0800e028'), (0x0800D32A, 4, 'bl own_fmt_x for bl fn_0800e028'),
     (0x0800D356, 4, 'bl own_fmt_dq for bl fn_0800dd44'), (0x0800D378, 4, 'bl own_fmt_th for bl fn_0800dfc4'),
     (0x0800D380, 4, 'bl own_row_draw for bl fn_0800d14c'), (0x0800D43C, 4, 'bl own_fmt_r for bl fn_0800e028'),
     (0x0800D452, 4, 'bl own_fmt_c for bl fn_0800db24'), (0x0800D48C, 4, 'bl own_fmt_l for bl fn_0800de2c'),

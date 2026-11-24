@@ -17,7 +17,8 @@ below the stack in use, as test_own_measure m03 places its array); the cases tha
 
 Expected values: every formatted text below is derived by hand from the vendor format thresholds of the
 ui_42.s headers (0x0800E028, 0x0800DB24, 0x0800DE2C, 0x0800DD44) and the rules of fmt.s: OL above the
-measurement range, one decimal less above 19,999 counts, a '-' for a negative value; the accuracy table
+measurement range, one decimal less above 19,999 counts, a '-' for a negative L or X, the text of 0 for
+a negative R or C (S2.2 revision 13); the accuracy table
 of fmt.s fmt_spec (design S2.1); the AUTO thresholds 10 / 11 / 9 degrees (D3); series / parallel at
 1 k / 10 k / 3162.28 ohm (D4); the compare rules of the cmp.s header. RUN LIMIT: one run of this file
 per case prefix, 10 cases.
@@ -149,8 +150,10 @@ def base_rig():
 @case
 def f20_ol_and_marker():
     """m20 (S2.1): values just inside and just outside every limit of the measurement range (OL) and of
-    the accuracy table (marker) per frequency column; |Z| and X go through the R row (own_fmt_r); 60 Hz
-    has no column (always marked); NaN / Inf are OL. own_row_draw colours the seven glyphs of the row
+    the accuracy table (marker) per frequency column; |Z| goes through the R row (own_fmt_r), X through
+    own_fmt_x with the R limits (S2.2 revision 13: a negative R is 0, so the OL of a negative magnitude
+    above the range is X's; a negative R beyond it is 0 and marked); 60 Hz has no column (always
+    marked); NaN / Inf are OL. own_row_draw colours the seven glyphs of the row
     with key 0x47 / 0x48 when marked and switches it off again (fn_080265dc / fn_080265f4)."""
     rig = base_rig()
     check(mf(rig, 'TMODE') == 0, 'tolerance mode %d after the start' % mf(rig, 'TMODE'))
@@ -161,7 +164,8 @@ def f20_ol_and_marker():
         ('own_fmt_r', 0.01, 120, False, False), ('own_fmt_r', 1.0e7, 120, False, False),
         ('own_fmt_r', 1.0e6, 10000, False, False), ('own_fmt_r', 1.0001e6, 10000, False, True),
         ('own_fmt_r', 1.0e6, 100000, False, False), ('own_fmt_r', 1.0001e6, 100000, False, True),
-        ('own_fmt_r', 1000.0, 60, False, True), ('own_fmt_r', -1.0001e7, 1000, True, False),
+        ('own_fmt_r', 1000.0, 60, False, True), ('own_fmt_x', -1.0001e7, 1000, True, False),
+        ('own_fmt_x', -1.0e7, 1000, False, False), ('own_fmt_r', -1.0001e7, 1000, False, True),
         ('own_fmt_c', 1.0e8, 1000, False, False), ('own_fmt_c', 1.0001e8, 1000, True, False),
         ('own_fmt_c', 1000.0, 100, False, False), ('own_fmt_c', 999.0, 100, False, True),
         ('own_fmt_c', 0.001, 1000, False, False), ('own_fmt_c', 0.00099, 1000, False, True),
@@ -266,23 +270,53 @@ def cover(rig, g):
 
 @case
 def f21_signs():
-    """m21 (S2.2): R, C, L and X negative get one '-' (X with 0x20001198 = 2, as the X row sets it); the
-    secondary R takes 0x200050B8 signed (own_fmt_rs ignores the s0 its caller made absolute); every text
-    fits 7 characters; then the host record: Func R on z = -1 + j100 ohm at 1 kHz (TDut as m10), the MEASURE
-    main text equals the text the display drew on row 0 and carries the '-'."""
+    """m21 (S2.2, revision 13 of 2026-11-23): a negative R (main row and secondary R), C, L, D or Q is
+    shown as 0, the vendor formatter's text of 0 (R, C, L marked, D / Q never); X and theta negative get
+    one '-' (X through own_fmt_x, the
+    wrapper of the X call 0x0800D32A, with or without 0x20001198 = 2; own_fmt_r ignores that word); the
+    secondary R takes 0x200050B8 (own_fmt_rs ignores the s0 its caller made absolute); every text fits 7
+    characters; then the host record: Func R on z = -1 + j100 ohm at 1 kHz (TDut as m10), the MEASURE main
+    text equals the text the display drew on row 0, is the 0 of R, and the value field keeps the negative
+    R."""
     rig = base_rig()
-    rows = [('own_fmt_r', -1.5, '-1.5000'), ('own_fmt_c', -0.0005, '-0.5'), ('own_fmt_l', -100.0, '-100.00'),
-            ('own_fmt_r', -79.999, '-80.00'), ('own_fmt_c', -0.799, '-799.0'), ('own_fmt_l', -79.9, '-79.9')]
-    for name, v, want in rows:
+    # Expected texts, from the ui_42.s headers:
+    # - R below 0 -> 0: fn_0800e028 on +0.0: bits 0 < 0x40ffff97 -> "%0.4f" -> "0.0000", unit ce a9, index 5;
+    # - C below 0 -> 0: fn_0800db24 on +0.0: bits 0 not above 0xbb03126f (no OL), 0 < 0x3f4ccccd -> 0 * 1000
+    #   with "%0.1f" -> "0.0", unit "pF", index 1 (also for -6.9163e6 nF, which unsigned would be 6.916 mF);
+    # - both 0 counts (fmt_reduce keeps them) and marked: 0 lies below the 1 kHz lower limits 10 mohm / 1 pF;
+    # - L below 0 -> 0 (owner 2026-11-23): fn_0800de2c on +0.0: below 80 (0x42a00000) -> "%0.1f" -> "0.0",
+    #   unit "uH", index 3; marked (0 below the 1 kHz lower limit 1 uH);
+    # - D / Q below 0 -> 0: fn_0800dd44 on +0.0: below 10 (0x41200000) -> "%0.4f" -> "0.0000", unit empty,
+    #   index 0; never marked (no accuracy-table entry);
+    # - X -12.3456: |X| in [7.99995 (0x40ffff97), 79.9995) -> "%0.3f" "12.346", 12,346 counts, '-';
+    #   X -0.0001: < 7.99995 -> "%0.4f" "0.0001", '-' -> "-0.0001".
+    zero_r, zero_c, zero_l = ('0.0000', '\xce\xa9', 5, 1), ('0.0', 'pF', 1, 1), ('0.0', 'uH', 3, 1)
+    zero_dq = ('0.0000', '', 0, 0)
+    rows = [('own_fmt_r', -1.5, zero_r), ('own_fmt_c', -0.0005, zero_c), ('own_fmt_r', -79.999, zero_r),
+            ('own_fmt_c', -0.799, zero_c), ('own_fmt_r', -0.0001, zero_r), ('own_fmt_c', -6.9163e6, zero_c),
+            ('own_fmt_l', -100.0, zero_l), ('own_fmt_l', -79.9, zero_l), ('own_fmt_l', -2.0e6, zero_l),
+            ('own_fmt_dq', -0.0123, zero_dq), ('own_fmt_dq', -2000.0, zero_dq)]
+    for name, v, (want, wunit, widx, wmk) in rows:
         t, u, i, mk = fmt(rig, name, v, 1000)
+        raw = rig.rd(TXT, 8)
+        check(t == want and u == wunit and i == widx and mk == wmk and raw == t.encode() + bytes(8 - len(t)),
+              '%s(%g): %r %r index %d marker %d (8 bytes %s), expected %r %r %d marker %d'
+              % (name, v, t, u, i, mk, raw.hex(), want, wunit, widx, wmk))
+    for name, v, want in (('own_fmt_x', -12.3456, '-12.346'), ('own_fmt_x', -0.0001, '-0.0001'),
+                          ('own_fmt_th', -45.0, '-45.00')):
+        t = fmt(rig, name, v, 1000)[0]
         check(t == want and len(t) <= 7, '%s(%g): %r, expected %r' % (name, v, t, want))
-    rig.wr(V_SIGN_MODE, 2)
-    t = fmt(rig, 'own_fmt_r', -12.3456, 1000)[0]
+    rig.wr(V_SIGN_MODE, 2)                                    # as the X row sets it around its call
+    tx = fmt(rig, 'own_fmt_x', -12.3456, 1000)[0]
+    tr = fmt(rig, 'own_fmt_r', -12.3456, 1000)[0]
     rig.wr(V_SIGN_MODE, 0)
-    check(t == '-12.346', 'X with 0x20001198 = 2: %r (one sign expected)' % t)
+    check(tx == '-12.346' and tr == '0.0000', 'with 0x20001198 = 2: X %r (one sign), R %r (0)' % (tx, tr))
     wf(rig, V_R, -0.05)
     t = fmt(rig, 'own_fmt_rs', 0.05, 1000)[0]
-    check(t == '-0.0500', 'secondary R from 0x200050B8: %r' % t)
+    check(t == '0.0000', 'secondary R -0.05 from 0x200050B8: %r' % t)
+    wf(rig, V_R, 0.0123)
+    t = fmt(rig, 'own_fmt_rs', 0.05, 1000)[0]
+    check(t == '0.0123', 'secondary R 0.0123 from 0x200050B8 (s0 0.05): %r' % t)
     rig.watch.check(what='f21 formatters')
     # the host record against the display
     z = complex(-1, 100)
@@ -299,8 +333,12 @@ def f21_signs():
     d = hr.ask_ok('MEASURE', size=M.T.MEASURE_SIZE)
     text = d[16:24].split(b'\x00')[0]
     check(d[8] == 1 and rows0 and text == rows0[-1], 'MEASURE main row %d text %r, display %r' % (d[8], text, rows0[-1:]))
-    check(text.startswith(b'-'), 'negative R without a sign: %r' % text)
-    check(d[64] == 0, 'marker byte %d for R about 1 ohm at 1 kHz' % d[64])
+    value = struct.unpack_from('<f', d, 9)[0]
+    check(text == b'0.0000' and value < 0 and list(d[13:16]) == [1, 4, 0],
+          'negative R: text %r, value %r, unit / decimals / validity %r (expected 0.0000, the signed value, '
+          '1 4 0)' % (text, value, list(d[13:16])))
+    # bit 0: the 0 shown lies below 10 mohm (marked); bit 1: X about 100 ohm lies in the 1 kHz column
+    check(d[64] == 1, 'marker byte %d for R about -1 ohm (shown 0) and X about 100 ohm at 1 kHz' % d[64])
     NOTES.append('f21: R of z = -1 + j100 shown %r on the display and in MEASURE' % text)
     hr.watch.check(what='f21 record')
     return True
@@ -341,10 +379,11 @@ def f23_digits():
         check(t == want, '%s(%g): %r, expected %r' % (name, v, t, want))
     # revision 12 (MEASUREMENT_FIX_DESIGN S2.4): C in the vendor's "%0.1f" uF range above 19,999 counts goes
     # to mF with 3 decimals (a text without '.' lies over the unit picture, fn_0800d14c), and no byte of the
-    # vendor's longer text is left after the terminating 0 (fmt() clears the buffer, the vendor writes it)
+    # vendor's longer text is left after the terminating 0 (fmt() clears the buffer, the vendor writes it);
+    # the negative C of this list (-6.9163e6 nF) is 0 since revision 13 (S2.2) and is a row of f21
     units = [('own_fmt_c', 1.9999e6, '1999.9', 'uF', 3), ('own_fmt_c', 2.0e6, '2.000', 'mF', 4),
              ('own_fmt_c', 6.9163e6, '6.916', 'mF', 4), ('own_fmt_c', 7.9999e6, '8.000', 'mF', 4),
-             ('own_fmt_c', -6.9163e6, '-6.916', 'mF', 4), ('own_fmt_c', 8.0e6, '8.00', 'mF', 4),
+             ('own_fmt_c', 8.0e6, '8.00', 'mF', 4),
              ('own_fmt_dq', 2000.0, '2000', '', None), ('own_fmt_dq', 7000.0, '7000', '', None)]
     for name, v, want, wunit, widx in units:
         t, u, i, _ = fmt(rig, name, v, 1000)

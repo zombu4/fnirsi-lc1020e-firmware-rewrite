@@ -1391,7 +1391,7 @@ fn_0800d294:
 	add	r1, sp, #0xc
 	add	r0, sp, #4
 .ifdef OWN
-	bl	own_fmt_r		@ 0x0800D32A: X (own/fmt.s; one '-' only)
+	bl	own_fmt_x		@ 0x0800D32A: X, signed (own/fmt.s; one '-' only)
 .else
 	bl	fn_0800e028
 .endif
