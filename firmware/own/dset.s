@@ -157,9 +157,11 @@ ds_run:
 @     LCR_SET level 0.6 V while the bias bits are 0x3DCCCCCD or more (signed, the key path's own
 @     compare ui_42.s .L0800d9f6: 0.3 V -> 0.1 V there, 0.6 V is never reached); LCR_SET Func
 @     0 or 4 in screen 2 (the key path forces Func 1 there, app_01.s 565-575);
-@   - S_SAFETY: a calibration runs (0x200050E4 != 0, as key_refused); SCREEN from screen 3 with
-@     a dialog open (0x200011AC != 0) on menu item 5 or 6 (0x200011A8): the result of the old job
-@     there (key_refused refused its long key 8, ctl.s .Lkr_ok_key).
+@   - S_SAFETY: a calibration runs (cal.s cal_busy: 0x200050E4 != 0 or a sweep of cal.s in
+@     progress, as key_refused); SCREEN from screen 3 with the dialog of menu item 6 open
+@     (0x200011AC != 0, 0x200011A8 = 6: the restore-defaults confirmation stays the meter's).
+@     SCREEN from the calibration dialog (item 5) with no calibration running closes it as the
+@     sorting dialog (MEASUREMENT_FIX_DESIGN revision 10 item 4).
 @   The equality check of a command comes before its refusals, as the old job's first step did.
 @   Uses r0..r3, r12, s0..s15 (cs_diff).
 @ ----------------------------------------------------------------------------
@@ -171,8 +173,7 @@ ds_check:
 	ldr	r0, [r4, #CT_FLAGS]	@ the flags:
 	tst	r0, #CF_OFF | CF_OFF_WAIT	@ powered off, or the power-off path ran
 	bne	.Lck_notnow		@ refused: 3
-	ldr	r0, =V_CAL_RUN		@ a calibration runs?
-	ldr	r0, [r0]		@ its word
+	bl	cal_busy		@ a calibration runs? (cal.s; changes r0, r1)
 	cmp	r0, #0			@ running:
 	bne	.Lck_safety		@ refused: 6
 	ldr	r5, =V_SCREEN		@ the screen word
@@ -237,11 +238,9 @@ ds_check:
 	beq	.Lck_go			@ a change
 	ldr	r0, =V_DISP_A8		@ its menu item
 	ldr	r0, [r0]		@ the word
-	cmp	r0, #5			@ calibration dialog: refused
-	beq	.Lck_safety		@ 6
 	cmp	r0, #6			@ restore-defaults dialog: refused
 	beq	.Lck_safety		@ 6
-	b	.Lck_go			@ the sorting dialog: closed by ds_screen
+	b	.Lck_go			@ the sorting or calibration dialog: closed by ds_screen
 .Lck_set:
 	ldr	r1, [r4, #CT_DS_C]	@ the setting's word
 	ldr	r1, [r1]		@ its value now

@@ -11,15 +11,17 @@ block in copies A and B). This file adds CalProbe: the entries of cal_point (r0 
 cal_abort / cal_fail, and every write of the step word 0x200050E8.
 
 The expected result of a point comes from the specification of cal.s applied to the windows the probe saw
-published on screen 3 between the point's cal_point and the next (expect_point): a no-reading / overload set
-or a non-finite window empties the held windows; the last 3 held are judged: the median |Z| (signed compare)
-and the theta of the same window, accepted when every |Zi| <= 2 |Zm| and 2 |Zi| >= |Zm|; an open (type 11)
-after 9 windows without that is accepted with theta +400 ("not resolved"). The stored table entries must equal
-these bit for bit (fn_0800bb64 copies the words).
+published on screen 3 between the point's cal_point and the next (expect_point). Short and reference points:
+a no-reading / overload set or a non-finite window empties the held windows; the last 3 held are judged: the
+median |Z| (signed compare) and the theta of the same window, accepted when every |Zi| <= 2 |Zm| and 2 |Zi| >=
+|Zm|. Open points (type 11, MEASUREMENT_FIX_DESIGN revision 10): such a window is skipped and the others kept;
+the first 7 usable windows (or all of them when the point's 20 s ended it first) give the window of the k-th
+smallest |Z|, k = (n - 1) / 2, with its theta; no usable window: |Z| 1e10, theta +400 ("not resolved"). The
+stored table entries must equal these bit for bit (fn_0800bb64 copies the words).
 
 Sources: measure_model.DutSource / test_own_measure.TDut; the counts per volt are chosen per case so that both
 channels lie in band at a range and gain code the ranging reaches (the model's source is ideal; revision 5 row
-18). RUN LIMIT: one run of this file per case prefix, 17 cases.
+18). RUN LIMIT: one run of this file per case prefix, 25 cases.
 """
 
 import math
@@ -35,9 +37,10 @@ import test_own_measure as M  # noqa: E402
 from test_own_measure import (own_rig, settings_item, tap, wait_until, TDut, is_set, u32f, f2u, USR_LO,  # noqa: E402
                               V_FREQ, V_LEVEL, V_BIAS, V_SPEED, V_SCREEN, V_MENU, V_DIALOG, V_CAL_TYPE,
                               V_CAL_RUN, KEY_OK, KEY_4, F_M400, F_1E10)
-from test_own_control import (check, block_with, OK2, C, S_OK, S_NOT_NOW, SAVE_COUNT, E_CAL, E_SAVE,  # noqa: E402
-                              KEY_POWER, OWN_CAL, CAO_ON, CAO_REC, CAO_SFREQ, CAO_SLEVEL, CAO_SBIAS, CAO_SSPEED,
-                              CAO_REL, V_CAL_WORK, host_timeout, BLK, V_BLOCK)
+from test_own_control import (check, block_with, OK2, C, S_OK, S_NOT_NOW, S_SAFETY, SAVE_COUNT, E_CAL,  # noqa: E402
+                              E_SAVE, E_SETTING, KEY_POWER, OWN_CAL, CAO_ON, CAO_REC, CAO_SFREQ, CAO_SLEVEL,
+                              CAO_SBIAS, CAO_SSPEED, CAO_REL, V_CAL_WORK, host_timeout, BLK, V_BLOCK, fb_replay,
+                              f1_draw)
 from meter_model import SET_A, SET_B  # noqa: E402
 from measure_model import DutSource  # noqa: E402
 from usb_host import FR_ANSWER, FR_EVENT  # noqa: E402
@@ -47,13 +50,15 @@ NOTES = M.NOTES
 
 # ---- own.inc OWN_CAL (cal.s) ----
 CAO_PT, CAO_NW, CAO_TPT, CAO_FAILP, CAO_WHY, CAO_STYPE, CAO_WIN = 0x04, 0x08, 0x14, 0x20, 0x24, 0x3C, 0x40
+CAO_NO, CAO_RES, CAO_OWIN = 0x0C, 0x58, 0x1C0
+CA_NO_OPEN, CA_POINT_S = 7, 20.0                  # cal.s: usable windows that end an open point; CA_POINT_MS
 R_NONE, R_STALL, R_TIME, R_OPEN, R_CHECK, R_SPREAD, R_ABORT = range(7)
 V_CAL_STEP, V_CAL_STATUS = 0x200050E8, 0x200050EC
 V_STAT_TXT, V_TYPE_TXT, V_STAT_NAMES, V_TYPE_NAMES, V_LANGUAGE = 0x20005960, 0x20005958, 0x200000FC, 0x2000009C, 0x2000115C
 F_P400 = 0x43C80000
 FREQS = (100, 120, 1000, 10000, 100000)
 LEVELS = (0x3DCCCCCD, 0x3E99999A, 0x3F19999A)
-NAMES = ['%s %sV' % (fs, lv) for fs in ('100Hz', '120Hz', '1kHz', '10kHz', '100kHz') for lv in ('0.1', '0.3', '0.6')]
+NAMES = ['%s %sV' % (fs, lv) for fs in ('100', '120', '1k', '10k', '100k') for lv in ('0.1', '0.3', '0.6')]
 TIM1_CTRL1 = 0x40012C00
 # the settings before a sweep in the cases that check the restore (D10): 1 kHz, 0.3 V, speed 1, bias 0.5 V,
 # and a pattern in 0x200010C0..0x20001137 (the vendor start zero-fills it)
@@ -126,10 +131,21 @@ class CalProbe:
         def step(uc, acc, addr, size, value, user):
             self.steps.append((m.now(), value))
         m.uc.hook_add(UC_HOOK_MEM_WRITE, step, begin=V_CAL_STEP, end=V_CAL_STEP + 3)
+        # the end of cal_finish: its last instruction, the pop after `bl cal_text_status` at cal_save_ret
+        # (cal.s; app_own.elf 0x0804F7B4 bl, 0x0804F7B8 pop). cal_finish stores CAO_ON = 0 before own_save,
+        # whose page erases take 100 ms each in the model (meter_model T_ERASE), so CAO_ON = 0 alone does
+        # not mean the save and the finish text are done (2026-11-23: c01 read "15/15", c22 saves 0 -> 0)
+        self.finished, self.fin_block = [], None
+
+        def fin(uc, a, size, u):
+            self.finished.append(m.now())
+            self.fin_block = bytes(uc.mem_read(M.V_BLOCK, M.BLK))   # the RAM block own_save has just saved
+        a = (s['cal_save_ret'] & ~1) + 4
+        m.uc.hook_add(UC_HOOK_CODE, fin, begin=a, end=a)
 
 
-def cal_rig(source, block=None, usb=False, keys_at_start=0):
-    rig = own_rig(source, block=block, usb=usb, keys_at_start=keys_at_start)
+def cal_rig(source, block=None, usb=False, keys_at_start=0, panel=False):
+    rig = own_rig(source, block=block, usb=usb, keys_at_start=keys_at_start, panel=panel)
     rig.cal = CalProbe(rig)
     return rig
 
@@ -158,7 +174,11 @@ def wait_point(rig, p, seconds=120.0):
 
 
 def wait_end(rig, seconds=360.0):                # CAL_LIMIT_MS (ctl.inc): 15 x 20 s + 30 s bias wait + 30 s
-    wait_until(rig, lambda: rig.rd(V_CAL_RUN) == 0 and rig.rd(OWN_CAL + CAO_ON) == 0, seconds, 'sweep end')
+    # a finish (status 2) ends at the end of cal_finish, after own_save (CalProbe.finished); a fail or an
+    # abort has no save between its CAO_ON = 0 and its text
+    n0 = len(rig.cal.finished)
+    wait_until(rig, lambda: rig.rd(V_CAL_RUN) == 0 and rig.rd(OWN_CAL + CAO_ON) == 0 and (
+        rig.rd(V_CAL_STATUS) != 2 or len(rig.cal.finished) > n0), seconds, 'sweep end')
     # cal_fail stores CAO_ON = 0 before its last call, cal_text_fail (cal.s), and the condition is
     # polled between emulation slices, so it can be seen inside cal_fail (2026-11-22, the build
     # without ocal.s: c14 read the point text "10/15" instead of "Fail 10/15"); 0.2 s more lets
@@ -182,9 +202,30 @@ def finite(bits):
     return (bits & 0x7F800000) != 0x7F800000
 
 
+def usable(w):
+    """cal.s cal_usable: not the no-reading / overload set (theta -400 or |Z| 1e10), both words finite."""
+    return not (w['TH'] == F_M400 or w['Z'] == F_1E10 or not finite(w['Z']) or not finite(w['TH']))
+
+
+def omed(zs):
+    """cal.s cal_omed: the index of the k-th smallest of zs, k = (n - 1) / 2 (below <= k < at or below; of
+    equal values the first)."""
+    k = (len(zs) - 1) // 2
+    for i, z in enumerate(zs):
+        if sum(1 for y in zs if y < z) <= k < sum(1 for y in zs if y <= z):
+            return i
+    return 0
+
+
 def expect_point(wins, typ):
-    """(|Z| bits, theta bits, the 3 windows) the specification of cal.s gives for the windows of one point,
-    or None when they give no result."""
+    """(|Z| bits, theta bits, the windows used) the specification of cal.s gives for the windows of one point,
+    or None when they give no result. An open point (type 11) always gives one (revision 10)."""
+    if typ == 11:
+        used = [w for w in wins if usable(w)][:CA_NO_OPEN]
+        if not used:
+            return F_1E10, F_P400, []
+        m = omed([u32f(w['Z']) for w in used])
+        return used[m]['Z'], used[m]['TH'], used
     held, nt = [], 0
     for w in wins:
         z, th = w['Z'], w['TH']
@@ -204,8 +245,6 @@ def expect_point(wins, typ):
         a = abs(zs[m])
         if all(abs(z) <= 2 * a and 2 * abs(z) >= a for z in zs):
             return held[m]['Z'], held[m]['TH'], held
-        if typ == 11 and nt >= 9:
-            return held[m]['Z'], F_P400, held
     return None
 
 
@@ -227,7 +266,8 @@ def check_sweep_result(rig, typ, before, what, since=0.0):
         for w in used:
             check(all(a['t'] > t0 for a in w['adds']), '%s: point %d: a window holds an acquisition from before '
                   'its fn_08009f10' % (what, p))
-        last_win = max(last_win, used[-1]['t'])
+        if used:                                     # an open "not resolved" uses no window
+            last_win = max(last_win, used[-1]['t'])
     for p in range(15):
         for t in range(12):
             if t == typ:
@@ -289,11 +329,21 @@ def c01_short_sweep_host():
     def on_point(r, p):
         seen[p] = None
     rig.cal.on_point = on_point
+    check(rig.rd(V_SCREEN) == 1, 'c1: the rig does not start on screen 1 (%d)' % rig.rd(V_SCREEN))
     seq = ask_async(rig, 'CALIBRATE', b'\x00' + OK2)
     wait_point(rig, 7, 120.0)
     rig.run(0.2)
     txt = obj_text(rig, V_STAT_TXT)
     check(txt == b'8/15\n' + NAMES[7].encode(), 'c1: progress text %r' % txt)
+    # the finish text while the dialog is still open: cal_finish sets status 2 and the text in one call,
+    # the job's long key 8 (1100 ms) that closes the dialog starts in a later pass (revision 10 item 4)
+    wait_until(rig, lambda: rig.cal.finished, 360.0, 'c1: the end of cal_finish')
+    check(rig.rd(V_CAL_STATUS) == 2, 'c1: status %d at the end of cal_finish' % rig.rd(V_CAL_STATUS))
+    rig.run(0.05)
+    check(rig.rd(V_DIALOG) != 0, 'c1: the dialog closed within 0.05 s of the end of cal_finish')
+    lang = rig.rd(V_LANGUAGE)
+    fin = cstr(rig, rig.rd(V_STAT_NAMES + 4 * (4 * lang + 2)))
+    check(obj_text(rig, V_STAT_TXT) == fin, 'c1: finish text %r, vendor %r' % (obj_text(rig, V_STAT_TXT), fin))
     st, d = wait_answer(rig, seq, 'CALIBRATE', host_timeout(C['CALIBRATE']))
     check(st == S_OK and len(d) == 8, 'c1: answer status %d, %d bytes %s' % (st, len(d), d.hex()))
     check(d[0] == 2 and d[1] == 0 and d[6] == 0xFF and d[7] == R_NONE, 'c1: answer %s' % d.hex())
@@ -309,12 +359,18 @@ def c01_short_sweep_host():
     saves = [f for f in rig.host.frames if f['type'] == FR_EVENT and f['cmd'] == E_SAVE]
     check(len(saves) == 1 and rig.rd(SAVE_COUNT) == saves0 + 1, 'c1: %d SAVE_RESULT events, count %d -> %d' % (
         len(saves), saves0, rig.rd(SAVE_COUNT)))
-    lang = rig.rd(V_LANGUAGE)
-    fin = cstr(rig, rig.rd(V_STAT_NAMES + 4 * (4 * lang + 2)))
-    check(obj_text(rig, V_STAT_TXT) == fin, 'c1: finish text %r, vendor %r' % (obj_text(rig, V_STAT_TXT), fin))
+    check(rig.rd(V_DIALOG) == 0 and rig.rd(V_SCREEN) == 1, 'c1: after the answer dialog %d screen %d, expected '
+          'the dialog closed and screen 1 (the screen found)' % (rig.rd(V_DIALOG), rig.rd(V_SCREEN)))
     check_restored(rig, 'c1')
-    blk = rig.rd(V_BLOCK, BLK)
-    check(rig.m.get(SET_A, BLK) == blk, 'c1: copy A does not hold the block after the finish')
+    # copy A holds the block as cal_finish saved it (the restored settings); revision 10 item 4 closes the
+    # dialog and returns to the screen found after that save, which changes the screen word 0x20001168
+    # (inside the block) in RAM only: the words that differ afterwards are listed, not compared
+    blk = rig.cal.fin_block
+    check(rig.m.get(SET_A, BLK) == blk, 'c1: copy A does not hold the block of the end of cal_finish')
+    now = rig.rd(V_BLOCK, BLK)
+    NOTES.append('c1: block words changed after the save: %s' % ', '.join(
+        '0x%08X %08X->%08X' % (V_BLOCK + i, struct.unpack_from('<I', blk, i)[0], struct.unpack_from('<I', now, i)[0])
+        for i in range(0, BLK, 4) if blk[i:i + 4] != now[i:i + 4]))
     rig.watch.check(what='c1')
     NOTES.append('c1: sweep %.1f s emulated (CALIBRATE to the finish), %d windows' % (
         rig.cal.commits[0] - rig.cal.points[0][0], len([w for w in rig.probe.pubs if w['screen'] == 3])))
@@ -425,13 +481,19 @@ def c05_type_key_abort():
     rig.run(0.5)
     tap(rig, KEY_4)
     wait_until(rig, lambda: rig.rd(OWN_CAL + CAO_ON) == 0, 1.0, 'c5: the abort')
-    st, d = wait_answer(rig, seq, 'CALIBRATE', 5.0)
-    check(st == S_NOT_NOW and d[0] == 0, 'c5: answer status %d, data %s' % (st, d.hex()))
-    check(rig.rd(V_CAL_RUN) == 0 and rig.rd(V_CAL_STEP) == 0 and rig.rd(V_CAL_STATUS) == 0, 'c5: E4 / E8 / EC')
-    check(rig.rd(OWN_CAL + CAO_WHY) == R_ABORT and rig.rd(OWN_CAL + CAO_FAILP) == 4, 'c5: reason / point')
+    rig.run(0.1)
+    # the type text while the dialog is open (OP_WAITCAL waits 1000 ms after the running word went to 0
+    # before the job closes the dialog, revision 10 item 4)
+    check(rig.rd(V_DIALOG) != 0, 'c5: the dialog closed within 0.1 s of the abort')
     lang = rig.rd(V_LANGUAGE)
     name0 = cstr(rig, rig.rd(V_TYPE_NAMES + 4 * (12 * lang + 0)))
     check(obj_text(rig, V_TYPE_TXT) == name0, 'c5: type text %r, type 0 is %r' % (obj_text(rig, V_TYPE_TXT), name0))
+    st, d = wait_answer(rig, seq, 'CALIBRATE', 10.0)
+    check(st == S_NOT_NOW and d[0] == 0, 'c5: answer status %d, data %s' % (st, d.hex()))
+    check(rig.rd(V_CAL_RUN) == 0 and rig.rd(V_CAL_STEP) == 0 and rig.rd(V_CAL_STATUS) == 0, 'c5: E4 / E8 / EC')
+    check(rig.rd(OWN_CAL + CAO_WHY) == R_ABORT and rig.rd(OWN_CAL + CAO_FAILP) == 4, 'c5: reason / point')
+    check(rig.rd(V_DIALOG) == 0 and rig.rd(V_SCREEN) == 1, 'c5: after the answer dialog %d screen %d' % (
+        rig.rd(V_DIALOG), rig.rd(V_SCREEN)))
     check_nothing_stored(rig, before, saves0, 'c5')
     check_restored(rig, 'c5')
     rig.watch.check(what='c5')
@@ -593,8 +655,9 @@ def c11_power_key_mid_sweep():
 @case
 def c13_noise_limited_open():
     """Critique item 11: an open (type 11) of 5e7 ohm with noise +-400 counts on both channels, so that the
-    current channel is noise-limited at every point: the sweep completes, every point stored by the rule
-    (agreeing three, or "not resolved" with theta +400 after 9 windows), every |Zo| >= 1e5."""
+    current channel is noise-limited at every point: the sweep completes, every point stored by the open rule
+    of revision 10 (the median window of its first 7 usable windows or of those its 20 s gave, "not resolved"
+    1e10 / +400 only without any), every |Zo| >= 1e5."""
     rig = cal_rig(DutSource('R', 5e7, noise_lsb=400.0), block=pre_block())
     rig.run(1.0)
     before = table(rig)
@@ -670,6 +733,487 @@ def u01_judge_unit():
         r0 = rig.m.call(rig.s['cal_judge'])
         r1 = rig.m.uc.reg_read(UC_ARM_REG_R1)
         check(r0 == m_exp and r1 == a_exp, 'u1: %r -> median %r agree %r, expected %d / %d' % (zs, r0, r1, m_exp, a_exp))
+    return True
+
+# ---------------------------------------------------------------- revision 10 (2026-11-23)
+
+def gap_source(z, gaps):
+    """TDut of the impedance z(f) whose current channel (ADC2) reads mid-scale (2048, no current) at the times
+    t with gaps(t) true (c08's method)."""
+    src = TDut(lambda f, t: z(f))
+    plain = TDut.samples
+
+    def samples(path, adc, channel, times):
+        if adc == 2 and any(gaps(t) for t in times):
+            return [2048] * len(times)
+        return plain(src, path, adc, channel, times)
+    src.samples = samples
+    return src
+
+
+def point_span(rig, p):
+    """(t0, t1) of the last cal_point(p) and of the next cal_point / commit / fail / abort after it."""
+    starts = [t for t, q in rig.cal.points if q == p]
+    check(starts, 'point %d never set' % p)
+    t0 = starts[-1]
+    ends = [t for t, _ in rig.cal.points if t > t0] + [t for t in rig.cal.commits + rig.cal.fails + rig.cal.aborts
+                                                       if t > t0]
+    check(ends, 'point %d never ended' % p)
+    return t0, min(ends)
+
+
+@case
+def c16_open_point_keeps_its_windows():
+    """Revision 10 item 1 (the meter, 2026-11-23: the open failed at point 13, 100 kHz / 0.3 V, reason 2, while
+    the measure screen there gave 34 results in 30 s, 2 of them the no-reading set): an open of 1 Mohm whose
+    current channel reads mid-scale for 3 s twice inside point 13 (1.5 .. 4.5 s and 6.5 .. 9.5 s after its
+    cal_point). Input checks: point 13 has at least 2 no-reading publishes and a usable window before the
+    first of them. Expected: the sweep finishes; point 13 ends within its 20 s (plus 0.5 s for the pass); its
+    result is expect_point's (the first 7 usable windows, the median window) and uses the window from before
+    the first gap (no restart); every point stored by expect_point."""
+    t13 = {'t': None}
+
+    def gaps(t):
+        a = t13['t']
+        return a is not None and (a + 1.5 <= t < a + 4.5 or a + 6.5 <= t < a + 9.5)
+    rig = cal_rig(gap_source(lambda f: complex(1e6, 0.0), gaps), block=pre_block())
+    rig.run(1.0)
+    before = table(rig)
+
+    def on_point(r, p):
+        if p == 13:
+            t13['t'] = r.m.now()
+    rig.cal.on_point = on_point
+    start(rig, typ=11)
+    wait_end(rig)
+    check(rig.rd(V_CAL_STATUS) == 2, 'c16: status %d (reason %d at point %d)' % (
+        rig.rd(V_CAL_STATUS), rig.rd(OWN_CAL + CAO_WHY), rig.rd(OWN_CAL + CAO_FAILP)))
+    wins, t0 = windows_of(rig, 13)
+    sets = [w for w in wins if is_set(w)]
+    check(len(sets) >= 2, 'c16: %d no-reading publishes inside point 13 (input)' % len(sets))
+    first_set = min(w['t'] for w in sets)
+    early = [w for w in wins if usable(w) and w['t'] < first_set]
+    check(early, 'c16: no usable window before the first no-reading publish (input)')
+    t0, t1 = point_span(rig, 13)
+    check(t1 - t0 <= CA_POINT_S + 0.5, 'c16: point 13 took %.2f s' % (t1 - t0))
+    exp = expect_point(wins, 11)
+    check(early[0] in exp[2], 'c16: the window before the gap was not used (a restart)')
+    check_sweep_result(rig, 11, before, 'c16')
+    NOTES.append('c16: point 13 %.2f s, %d publishes, %d no-reading, %d used' % (
+        t1 - t0, len(wins), len(sets), len(exp[2])))
+    rig.watch.check(what='c16')
+    return True
+
+
+@case
+def c17_open_point_without_a_window():
+    """Revision 10 item 1: an open of 1 Mohm whose current channel reads mid-scale through all of point 4
+    (120 Hz / 0.3 V). Input check: every publish inside point 4 is the no-reading set, at least one. Expected:
+    point 4 ends at its 20-s limit (20.0 .. 20.5 s after its cal_point) with "not resolved", |Z| 1e10 and
+    theta +400, stored; the sweep goes on and finishes (status 2), every other point by expect_point."""
+    on = {'v': False}
+    rig = cal_rig(gap_source(lambda f: complex(1e6, 0.0), lambda t: on['v']), block=pre_block())
+    rig.run(1.0)
+    before = table(rig)
+
+    def on_point(r, p):
+        on['v'] = p == 4
+    rig.cal.on_point = on_point
+    start(rig, typ=11)
+    wait_end(rig)
+    check(rig.rd(V_CAL_STATUS) == 2, 'c17: status %d (reason %d at point %d)' % (
+        rig.rd(V_CAL_STATUS), rig.rd(OWN_CAL + CAO_WHY), rig.rd(OWN_CAL + CAO_FAILP)))
+    wins, _ = windows_of(rig, 4)
+    check(wins and all(is_set(w) for w in wins), 'c17: point 4 publishes %r (input: all the no-reading set)' % (
+        [(hex(w['Z']), hex(w['TH'])) for w in wins[:6]]))
+    t0, t1 = point_span(rig, 4)
+    check(CA_POINT_S <= t1 - t0 <= CA_POINT_S + 0.5, 'c17: point 4 took %.2f s' % (t1 - t0))
+    after = check_sweep_result(rig, 11, before, 'c17')
+    z, th = struct.unpack_from('<I', after, entry(4, 11) - USR_LO)[0], struct.unpack_from(
+        '<I', after, entry(4, 11) - USR_LO + 0x2D0)[0]
+    check(z == F_1E10 and th == F_P400, 'c17: point 4 stored %08X / %08X' % (z, th))
+    rig.watch.check(what='c17')
+    return True
+
+
+@case
+def c18_open_time_limit_takes_the_median():
+    """Revision 10 item 1, the limit path of an open point: in point 3 three windows are planted in CAO_OWIN
+    (|Z| 3e6, 1e6, 2e6 at theta 10, 20, 30; the step word with them) and CAO_TPT moved 21 s back. Input check
+    at the entry of cal_oend for point 3: CAO_NO below 7 (the limit, not the 7th window) with the planted
+    three first. Expected: the result of point 3 (CAO_RES) is the window cal_omed's rule picks from what
+    CAO_OWIN held there, the sweep goes on to point 4, no fail."""
+    rig = cal_rig(DutSource('R', 1e6), block=pre_block())
+    rig.run(1.0)
+    start(rig, typ=11)
+    wait_point(rig, 3)
+    rig.run(0.3)
+    seen = []
+
+    def at_oend(uc, a, size, u):
+        n = rig.rd(OWN_CAL + CAO_NO)
+        seen.append((rig.rd(OWN_CAL + CAO_PT), n, [(rig.rd(OWN_CAL + CAO_OWIN + 8 * i),
+                                                    rig.rd(OWN_CAL + CAO_OWIN + 8 * i + 4)) for i in range(n)]))
+    a = rig.s['cal_oend'] & ~1
+    rig.m.uc.hook_add(UC_HOOK_CODE, at_oend, begin=a, end=a)
+    planted = [(f2u(3e6), f2u(10.0)), (f2u(1e6), f2u(20.0)), (f2u(2e6), f2u(30.0))]
+    for i, (z, th) in enumerate(planted):
+        rig.wr(OWN_CAL + CAO_OWIN + 8 * i, z)
+        rig.wr(OWN_CAL + CAO_OWIN + 8 * i + 4, th)
+    rig.wr(OWN_CAL + CAO_NO, 3)
+    rig.wr(V_CAL_STEP, 3 * 3 + 2)                    # cal_expect: 3 CAO_PT + min(CAO_NO, 2) (cal_same)
+    rig.wr(OWN_CAL + CAO_TPT, (rig.rd(M.V_TICK) - 21000) & 0xFFFFFFFF)
+    wait_until(rig, lambda: any(s[0] == 3 for s in seen), 1.0, 'c18: cal_oend of point 3')
+    _, n, held = [s for s in seen if s[0] == 3][0]
+    check(n < CA_NO_OPEN and held[:3] == planted, 'c18: at cal_oend %d windows %r (input)' % (n, held))
+    rig.run(0.3)
+    m = omed([u32f(z) for z, _ in held])
+    got = (rig.rd(OWN_CAL + CAO_RES + 8 * 3), rig.rd(OWN_CAL + CAO_RES + 8 * 3 + 4))
+    check(got == held[m], 'c18: result %r, the rule gives %r of %r' % (got, held[m], held))
+    check(any(q == 4 for _, q in rig.cal.points) and not rig.cal.fails, 'c18: point 4 not reached or a fail')
+    rig.watch.check(what='c18')
+    return True
+
+
+@case
+def c19_menu_and_host_run_the_same_sweep():
+    """Revision 10 item 2: the same short (short_src) from the same settings (pre_block), started once by the
+    meter's keys (settings item 5, key 8, key 8) and once by CALIBRATE. Both finish (status 2), each stores
+    expect_point of its own windows at every point (check_sweep_result) and restores the settings; the
+    recordings of cal.s are the same; at every point both stored entries lie in the set of |Z| and theta the
+    model gives for that point's frequency, level and the gain codes of the stored window, over every sampling
+    phase, and they differ by no more than the two sets allow.
+    Why a set and not a fixed bound: the sampling is coherent (meas.s S1.1: 128 samples = 1, 4 or 16 periods,
+    M = 128, 32 or 8 samples per period), so in one run every acquisition after a restart sees the same
+    sample phases p + 2 pi m / M and every window is the same; only the phase p, fixed at the restart, differs
+    between runs. A window is the bin of one period: theta = arg(XV / XI), |Z| = R[c8] G[c6] / G[c5]
+    |XV / XI| (measure_model.DutSource), XV = sum round(mid + Av cos(p + 2 pi m / M)) e^(-j 2 pi m / M),
+    XI the same with Ai and p - arg z, Av = k G[c5] |c|, Ai = k G[c6] R[c8] |c| / |z|, |c| the generator's
+    amplitude (measure_model._gen_epoch). The rounding makes theta and |Z| piecewise constant in p with a
+    period of 2 pi / M; model_set enumerates every interval between two rounding steps exactly. Emulator
+    diagnostic 2026-11-23 (short_src, 0.1 V, speed 0, restarts at varied moments): the windows 0.0700899 /
+    43.9171, 0.0706564 / 43.9944, 0.070006 / 44.4643 (codes 7, 2, 0, 10 kHz) and 0.0699521 / 44.1516
+    (7, 3, 0) are model values to 1e-6 of |Z| and 1e-4 degree, as are 0.05028097 / 5.59428 (1 kHz) and
+    0.4975671 / 84.95387 (100 kHz, 7, 2, 1); at 10 kHz the set spans 43.662 .. 45.195 degree and 0.069250 ..
+    0.070681 ohm. The first run of this case stored 0.070006 / 44.464 (menu) and 0.0700899 / 43.917 (host)
+    at point 9, two values of that set; the former bounds 0.5 degree and 1e-2 [J] were narrower than the set.
+    Margins of the membership: 1e-5 of |Z| and 1e-3 degree (the firmware's float32 values agreed with the
+    model within 1e-6 and 1e-4 in that diagnostic). Input checks of the model: no sample at the clip (Av, Ai
+    + 0.5 below the distance of mid to 0 and 4095), the ADC sample period 1 / (M f) at the window, the gain
+    codes of the window equal the GPIO outputs."""
+    import cmath
+    import measure_model as MM
+
+    def model_set(src, a, f, ts, fn, codes):
+        """(|Z| min, |Z| max, theta min, theta max) over every sampling phase (docstring)."""
+        nm = 128 // (1 if fn < 10000 else 4 if fn < 100000 else 16)
+        check(abs(ts * f * nm - 1) < 1e-6, 'c19 %d Hz: ADC period %r s is not 1 / (%d f), f %r' % (fn, ts, nm, f))
+        c5, c6, c8 = codes
+        z = src.z(f)
+        av = src.k * MM.GAIN[c5] * a
+        ai = src.k * MM.GAIN[c6] * MM.RANGE_OHM[c8] * a / abs(z)
+        check(max(av, ai) + 0.5 < min(src.mid, 4095 - src.mid), 'c19 %d Hz: amplitudes %.1f / %.1f reach the clip'
+              % (fn, av, ai))
+        ph = [2 * math.pi * m / nm for m in range(nm)]
+        ex = [cmath.exp(-1j * x) for x in ph]
+        az = cmath.phase(z)
+        cuts = [0.0, 2 * math.pi / nm]
+        for amp, off in ((av, 0.0), (ai, -az)):
+            for x in ph:
+                for q in range(int(math.floor(src.mid - amp)), int(math.ceil(src.mid + amp)) + 1):
+                    c = (q + 0.5 - src.mid) / amp
+                    if -1.0 <= c <= 1.0:
+                        for y in (math.acos(c), -math.acos(c)):
+                            cuts.append((y - x - off) % (2 * math.pi) % (2 * math.pi / nm))
+        cuts = sorted(set(cuts))
+        kz = MM.RANGE_OHM[c8] * MM.GAIN[c6] / MM.GAIN[c5]
+        zs, ts_ = [], []
+        for lo, hi in zip(cuts, cuts[1:]):
+            if hi - lo < 1e-15:
+                continue
+            p = (lo + hi) / 2
+            xv = xi = 0j
+            for x, e in zip(ph, ex):
+                xv += int(round(src.mid + av * math.cos(p + x))) * e
+                xi += int(round(src.mid + ai * math.cos(p - az + x))) * e
+            r = xv / xi
+            zs.append(kz * abs(r))
+            ts_.append(math.degrees(cmath.phase(r)))
+        return min(zs), max(zs), min(ts_), max(ts_)
+
+    res = {}
+    for how in ('menu', 'host'):
+        src = short_src()
+        rig = cal_rig(src, block=pre_block(), usb=how == 'host')
+        gens = []                                    # (t, |c|, f, ADC period, GPIO codes) at every publish
+
+        def at_publish(r, gens=gens):
+            e, g = r.meas._gen_epoch(), r.meas._adc_grid(0)
+            gens.append((r.m.now(), abs(e['c']) if e else 0.0, e['freq'] if e else 0.0, g[1] if g else 0.0,
+                         r.meas.front_end()))
+        rig.probe.on_publish_entry = at_publish
+        rig.run(1.0)
+        before = table(rig)
+        if how == 'menu':
+            start(rig)
+        else:
+            ask_async(rig, 'CALIBRATE', b'\x00' + OK2)
+            wait_until(rig, lambda: rig.rd(OWN_CAL + CAO_ON) != 0, 30.0, 'c19 host: the start')
+        wait_end(rig)
+        check(rig.rd(V_CAL_STATUS) == 2, 'c19 %s: status %d (reason %d at point %d)' % (
+            how, rig.rd(V_CAL_STATUS), rig.rd(OWN_CAL + CAO_WHY), rig.rd(OWN_CAL + CAO_FAILP)))
+        after = check_sweep_result(rig, 0, before, 'c19 %s' % how)
+        check_restored(rig, 'c19 %s' % how)
+        rec = [rig.rd(OWN_CAL + o) for o in (CAO_SFREQ, CAO_SLEVEL, CAO_SBIAS, CAO_SSPEED)] + [
+            rig.rd(OWN_CAL + CAO_REL, 0x78)]
+        sets = []
+        for p in range(15):
+            wins, _ = windows_of(rig, p)
+            zb, tb, used = expect_point(wins, 0)
+            w = [u for u in used if u['Z'] == zb and u['TH'] == tb][0]
+            g = [x for x in gens if x[0] <= w['t']][-1]
+            check(g[4] == w['codes'], 'c19 %s point %d: codes %r in RAM, %r at the GPIO' % (how, p, w['codes'], g[4]))
+            s = model_set(src, g[1], g[2], g[3], FREQS[p // 3], w['codes'])
+            z, t = u32f(zb), u32f(tb)
+            check(s[0] * (1 - 1e-5) <= z <= s[1] * (1 + 1e-5) and s[2] - 1e-3 <= t <= s[3] + 1e-3,
+                  'c19 %s point %d: stored %.7g / %.5f outside the model set %.7g .. %.7g / %.5f .. %.5f (codes %r)'
+                  % (how, p, z, t, s[0], s[1], s[2], s[3], w['codes']))
+            sets.append((z, t, s, w['codes']))
+        res[how] = (after, rec, sets)
+        rig.watch.check(what='c19 %s' % how)
+    check(res['menu'][1] == res['host'][1], 'c19: the recordings differ')
+    for p in range(15):
+        (zm, tm, sm, cm), (zh, th, sh, ch) = res['menu'][2][p], res['host'][2][p]
+        zb = max(sm[1] - sh[0], sh[1] - sm[0]) + 1e-5 * (sm[1] + sh[1])
+        tb = max(sm[3] - sh[2], sh[3] - sm[2]) + 2e-3
+        check(abs(zm - zh) <= zb and abs(tm - th) <= tb, 'c19: point %d menu %.7g / %.5f, host %.7g / %.5f, '
+              'allowed %.3g / %.4f' % (p, zm, tm, zh, th, zb, tb))
+        NOTES.append('c19 point %d: menu %.7g / %.4f (codes %r), host %.7g / %.4f (%r), model theta %.4f .. %.4f'
+                     % (p, zm, tm, cm, zh, th, ch, min(sm[2], sh[2]), max(sm[3], sh[3])))
+    return True
+
+
+@case
+def c20_open_fail_restores_what_the_start_found():
+    """Revision 10 items 3 and 4, the meter's sequence (2026-11-23): settings 1 kHz, 0.6 V, speed 0, bias 0
+    and a pattern at 0x200010C0 (input check in RAM before the request), the meter on screen 1, CALIBRATE type
+    11, an open that reads 50 kohm at 100 kHz, so the sweep fails "open low" at point 12. Expected: answer
+    status 3 with calibration status 3, type 11, point 12, reason 3; frequency, level, speed, bias, type and
+    the 0x200010C0 bytes as before; no SETTING_CHANGED of the speed word (0x0BD4) at all (0 before, 0 from
+    the start, 0 after); the last frequency / level events carry 1000 / 0.6 V; nothing stored or saved; the
+    dialog closed and screen 1 again when the answer comes.
+    The source selects 100 kHz by f > 5e4 (between the sweep's 10 kHz and 100 kHz), not by f == 100000: the
+    model's generator frequency is 1 / (n x period) in float64, 100000.00000000001 at the word 100000 (scratchpad
+    rev10/diag_freq.py, 2026-11-23; 10000.0 exactly at 10 kHz, so c14's f == 10000 matched), so the equality
+    never held and every point read 1 Mohm: the sweep finished (answer 020b00000000ff00). Input check, by
+    cal_accept's criterion, before the answer is judged: point 12 published usable windows on screen 3, and
+    each has |Z| + the point's short entry below 1e5 (so its median window has too)."""
+    words = {'0x%08x' % V_FREQ: 1000, '0x%08x' % V_LEVEL: 0x3F19999A, '0x%08x' % V_SPEED: 0,
+             '0x%08x' % V_BIAS: 0}
+    b = bytearray(block_with(**words))
+    b[V_CAL_WORK - V_BLOCK:V_CAL_WORK - V_BLOCK + 0x78] = REL_PATTERN
+    rig = cal_rig(DutSource(z=lambda f: complex(5e4 if f > 5e4 else 1e6, 0.0)), block=bytes(b), usb=True)
+    rig.run(1.0)
+    pre = (rig.rd(V_FREQ), rig.rd(V_LEVEL), rig.rd(V_SPEED), rig.rd(V_BIAS), rig.rd(V_SCREEN))
+    check(pre == (1000, 0x3F19999A, 0, 0, 1) and rig.rd(V_CAL_WORK, 0x78) == REL_PATTERN,
+          'c20: the state before %r (input)' % (pre,))
+    before, saves0 = table(rig), rig.rd(SAVE_COUNT)
+    seq = ask_async(rig, 'CALIBRATE', b'\x0b' + OK2)
+    st, d = wait_answer(rig, seq, 'CALIBRATE', host_timeout(C['CALIBRATE']))
+    t0 = struct.unpack_from('<f', before, entry(12) - USR_LO)[0]
+    w12 = [u32f(w['Z']) + t0 for w in windows_of(rig, 12)[0] if usable(w)]
+    check(w12 and all(z < 1e5 for z in w12), 'c20: point 12 |Z| + short %r (input)' % w12)
+    check(st == S_NOT_NOW and len(d) == 8 and d[0] == 3 and d[1] == 11 and d[6] == 12 and d[7] == R_OPEN,
+          'c20: answer status %d, %s' % (st, d.hex()))
+    got = (rig.rd(V_FREQ), rig.rd(V_LEVEL), rig.rd(V_SPEED), rig.rd(V_BIAS), rig.rd(V_CAL_TYPE))
+    check(got == (1000, 0x3F19999A, 0, 0, 11) and rig.rd(V_CAL_WORK, 0x78) == REL_PATTERN,
+          'c20: after the fail %r' % (got,))
+    ev = [struct.unpack_from('<HI', f['payload']) for f in rig.host.frames
+          if f['type'] == FR_EVENT and f['cmd'] == E_SETTING and len(f['payload']) >= 6]
+    check(not [v for i, v in ev if i == V_SPEED - V_BLOCK], 'c20: speed events %r' % (
+        [v for i, v in ev if i == V_SPEED - V_BLOCK],))
+    last = {i: v for i, v in ev}
+    check(last.get(V_FREQ - V_BLOCK) == 1000 and last.get(V_LEVEL - V_BLOCK) == 0x3F19999A,
+          'c20: last frequency / level events %r / %r' % (last.get(V_FREQ - V_BLOCK), last.get(V_LEVEL - V_BLOCK)))
+    check(rig.rd(V_DIALOG) == 0 and rig.rd(V_SCREEN) == 1, 'c20: dialog %d screen %d after the answer' % (
+        rig.rd(V_DIALOG), rig.rd(V_SCREEN)))
+    check_nothing_stored(rig, before, saves0, 'c20')
+    rig.watch.check(what='c20')
+    return True
+
+
+def line_ink(rig, text):
+    """[(advance, {(x, y): level})] per character of text in F1 (f1_draw with the levels 0..3 as colours, each
+    glyph at x = 0 of its own pattern, line top 0)."""
+    out = []
+    for ch in text:
+        g = {}
+        adv = f1_draw(rig, g, 0, 0, ch, (0, 1, 2, 3))
+        out.append((adv, g))
+    return out
+
+
+def glyph_at(fb, g, ox, oy):
+    """The glyph pattern g drawn at (ox, oy) in the panel memory fb: every level-3 pixel one colour, at least
+    80 % of the level-0 pixels another (a neighbour's box may reach into its box; levels 1 / 2 are blends)."""
+    full = [p for p, v in g.items() if v == 3]
+    empty = [p for p, v in g.items() if v == 0]
+    c3 = fb.get((ox + full[0][0], oy + full[0][1]))
+    if c3 is None or any(fb.get((ox + x, oy + y)) != c3 for x, y in full):
+        return False
+    other = sum(1 for x, y in empty if fb.get((ox + x, oy + y)) not in (None, c3))
+    return other >= 0.8 * len(empty)
+
+
+def find_text(rig, fb, text):
+    """Offsets (ox, oy) at which the panel memory shows text as one line: its first glyph matches there and
+    each next glyph on the same row at the pen position +-3 pixels (the font's kerning, which f1_draw does not
+    apply)."""
+    ink = line_ink(rig, text)
+    first = next(i for i, (_, g) in enumerate(ink) if any(v == 3 for v in g.values()))
+    adv0, g0 = ink[first]
+    fx, fy = next(p for p, v in g0.items() if v == 3)
+    hits = []
+    for (x, y) in list(fb):
+        ox, oy = x - fx, y - fy
+        if not glyph_at(fb, g0, ox, oy):
+            continue
+        pen, ok = ox + adv0, True
+        for adv, g in ink[first + 1:]:
+            if not any(v == 3 for v in g.values()):
+                pen += adv                           # a space
+                continue
+            at = [px for px in range(pen - 3, pen + 4) if glyph_at(fb, g, px, oy)]
+            if not at:
+                ok = False
+                break
+            pen = at[0] + adv
+        if ok:
+            hits.append((ox, oy))
+    return hits
+
+
+@case
+def c21_progress_and_fail_text_on_the_panel():
+    """Revision 10 item 6 (the owner, 2026-11-23: the dialog counted to 12, then showed 3, 4, 5): a short sweep
+    with the panel model; the panel log is cleared at every cal_point, so the replay holds what was drawn
+    since. 0.5 s after cal_point(12): the status object's string is "13/15\n100k 0.1V" (the number and the
+    formatter) and both lines are on the panel whole, every glyph from the leading "1" on (the text object and
+    the font). Then TIM1 stopped (c3's stall): the fail text "Fail 13/15\nno signal" and both of its lines on
+    the panel. The F1 widths of every line cal.s prints are at most 75 pixels (below the 80 of panel D)."""
+    rig = cal_rig(short_src(), block=pre_block(), panel=True)
+    rig.run(1.0)
+
+    def on_point(r, p):
+        r.m.panel.flushes.clear()
+    rig.cal.on_point = on_point
+    for t in [b'%d/15' % n for n in (1, 9, 15)] + [b'Fail %d/15' % n for n in (1, 15)] + [n.encode() for n in NAMES] + [
+            b'no signal', b'time limit', b'open low', b'check', b'spread', b'aborted']:
+        w = sum(a for a, _ in line_ink(rig, t.decode()))
+        check(w <= 75, 'c21: %r is %d pixels wide in F1' % (t, w))
+    start(rig)
+    wait_point(rig, 12, 240.0)
+    rig.run(0.5)
+    txt = obj_text(rig, V_STAT_TXT)
+    check(txt == b'13/15\n100k 0.1V', 'c21: progress string %r' % txt)
+    fb = fb_replay(rig.m.panel.flushes)
+    for line in ('13/15', '100k 0.1V'):
+        hits = find_text(rig, fb, line)
+        check(hits, 'c21: %r found %d times on the panel (%d pixels drawn)' % (line, len(hits), len(fb)))
+    rig.m.panel.flushes.clear()
+    rig.meas.write(rig.m, TIM1_CTRL1, 4, 0)          # CEN = 0: the stall (c3 (a))
+    wait_until(rig, lambda: rig.rd(V_CAL_RUN) == 0, 4.0, 'c21: the stall fail')
+    rig.run(0.5)
+    txt = obj_text(rig, V_STAT_TXT)
+    check(txt == b'Fail 13/15\nno signal', 'c21: fail string %r' % txt)
+    fb = fb_replay(rig.m.panel.flushes)
+    for line in ('Fail 13/15', 'no signal'):
+        hits = find_text(rig, fb, line)
+        check(hits, 'c21: %r found %d times on the panel (%d pixels drawn)' % (line, len(hits), len(fb)))
+    return True
+
+
+def host_to_item(rig, item):
+    """With the injected keys of KEY: long key 8 (settings) from screen 1, then key 0x20 to the item."""
+    if rig.rd(V_SCREEN) != 3:
+        st, _ = rig.ask('KEY', struct.pack('<BH', 3, 1200), timeout=25.0)
+        check(st == S_OK and rig.rd(V_SCREEN) == 3, 'KEY long 8: status %d screen %d' % (st, rig.rd(V_SCREEN)))
+    for _ in range(8):
+        if rig.rd(V_MENU) == item:
+            return
+        st, _ = rig.ask('KEY', bytes([5]), timeout=25.0)
+        check(st == S_OK, 'KEY 0x20: status %d' % st)
+    check(rig.rd(V_MENU) == item, 'menu item %d not reached (%d)' % (item, rig.rd(V_MENU)))
+
+
+@case
+def c22_host_drives_the_calibration_menu():
+    """Revision 10 item 4: with KEY and SCREEN only. Item 5: key 8 opens the dialog (status 0, nothing runs);
+    SCREEN 1 from it closes it (status 0, screen 1); again to the dialog, key 8 starts the calibration
+    (status 0, 0x200050E4 = 1, the sweep of cal.s in progress). While it runs KEY, SCREEN and LCR_SET answer
+    6 and it goes on; it finishes (status 2), saves once and restores the settings as one started by the
+    meter's keys. Then the dialog closed with long key 8, item 6: key 8 opens the restore-defaults dialog, key
+    8 there and SCREEN answer 6 (the confirmation stays the meter's)."""
+    rig = cal_rig(short_src(), block=pre_block(), usb=True)
+    rig.run(1.0)
+    saves0 = rig.rd(SAVE_COUNT)
+    host_to_item(rig, 5)
+    st, _ = rig.ask('KEY', bytes([3]), timeout=25.0)
+    check(st == S_OK and rig.rd(V_DIALOG) != 0 and rig.rd(V_CAL_RUN) == 0, 'c22: key 8 on item 5: status %d '
+          'dialog %d running %d' % (st, rig.rd(V_DIALOG), rig.rd(V_CAL_RUN)))
+    st, _ = rig.ask('SCREEN', b'\x01')
+    check(st == S_OK and rig.rd(V_SCREEN) == 1 and rig.rd(V_DIALOG) == 0 and rig.rd(V_CAL_RUN) == 0,
+          'c22: SCREEN 1 from the dialog: status %d screen %d dialog %d' % (st, rig.rd(V_SCREEN), rig.rd(V_DIALOG)))
+    host_to_item(rig, 5)
+    st, _ = rig.ask('KEY', bytes([3]), timeout=25.0)
+    check(st == S_OK and rig.rd(V_DIALOG) != 0, 'c22: the dialog again: status %d' % st)
+    st, _ = rig.ask('KEY', bytes([3]), timeout=25.0)
+    check(st == S_OK and rig.rd(V_CAL_RUN) != 0, 'c22: key 8 in the dialog: status %d running %d' % (
+        st, rig.rd(V_CAL_RUN)))
+    rig.run(0.3)
+    check(rig.rd(OWN_CAL + CAO_ON) == 1, 'c22: no sweep of cal.s in progress')
+    for cmd, p in (('KEY', bytes([2])), ('SCREEN', b'\x01'), ('LCR_SET', b'\x06\x00')):
+        st, _ = rig.ask(cmd, p, timeout=25.0)
+        check(st == S_SAFETY, 'c22: %s while it runs: status %d' % (cmd, st))
+    check(rig.rd(V_CAL_RUN) != 0 and rig.rd(OWN_CAL + CAO_ON) == 1, 'c22: a refused request ended the sweep')
+    wait_end(rig)
+    check(rig.rd(V_CAL_STATUS) == 2, 'c22: status %d (reason %d at point %d)' % (
+        rig.rd(V_CAL_STATUS), rig.rd(OWN_CAL + CAO_WHY), rig.rd(OWN_CAL + CAO_FAILP)))
+    check(rig.rd(SAVE_COUNT) == saves0 + 1, 'c22: saves %d -> %d' % (saves0, rig.rd(SAVE_COUNT)))
+    check_restored(rig, 'c22')
+    st, _ = rig.ask('KEY', struct.pack('<BH', 3, 1200), timeout=25.0)
+    check(st == S_OK and rig.rd(V_DIALOG) == 0 and rig.rd(V_SCREEN) == 3, 'c22: long 8 in the finished dialog: '
+          'status %d dialog %d screen %d' % (st, rig.rd(V_DIALOG), rig.rd(V_SCREEN)))
+    host_to_item(rig, 6)
+    st, _ = rig.ask('KEY', bytes([3]), timeout=25.0)
+    check(st == S_OK and rig.rd(V_DIALOG) != 0, 'c22: key 8 on item 6: status %d dialog %d' % (st, rig.rd(V_DIALOG)))
+    for cmd, p in (('KEY', bytes([3])), ('SCREEN', b'\x01')):
+        st, _ = rig.ask(cmd, p, timeout=25.0)
+        check(st == S_SAFETY and rig.rd(V_DIALOG) != 0 and rig.rd(V_SCREEN) == 3,
+              'c22: %s in the restore-defaults dialog: status %d' % (cmd, st))
+    rig.watch.check(what='c22')
+    return True
+
+
+@case
+def u02_omed_unit():
+    """cal_omed (revision 10: the k-th smallest |Z|, k = (n - 1) / 2, of the first held of equal ones) on chosen
+    sets of 1..7 windows with the expected index written out, called directly on a rig at the main loop; the
+    meter-like set is the 100 kHz / 0.3 V open stream of 2026-11-23 (2.21e7 .. 4.25e7 with outliers)."""
+    rig = own_rig(DutSource())
+    cases = [((1.0,), 0), ((2.0, 1.0), 1), ((1.0, 2.0), 0), ((3.0, 1.0, 2.0), 2), ((5.0, 5.0, 1.0, 9.0), 0),
+             ((2.21e7, 2.24e7, 4.25e7, 2.43e7, 1.74e7, 2.25e7, 3.41e7), 5), ((2.0, 2.0, 2.0), 0),
+             ((-1.0, 3.0, -2.0, 0.0, 5.0, 4.0, 1.0), 6), ((7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0), 3)]
+    for zs, idx in cases:
+        check(omed(list(zs)) == idx, 'u2: the test rule gives %d for %r, written %d' % (omed(list(zs)), zs, idx))
+        for i, z in enumerate(zs):
+            rig.wr(OWN_CAL + CAO_OWIN + 8 * i, f2u(z))
+            rig.wr(OWN_CAL + CAO_OWIN + 8 * i + 4, f2u(10.0 * i))
+        rig.wr(OWN_CAL + CAO_NO, len(zs))
+        r0 = rig.m.call(rig.s['cal_omed'])
+        r1 = rig.m.uc.reg_read(UC_ARM_REG_R1)
+        check(r0 == f2u(zs[idx]) and r1 == f2u(10.0 * idx), 'u2: %r -> %08X / %08X, expected window %d' % (
+            zs, r0, r1, idx))
     return True
 
 

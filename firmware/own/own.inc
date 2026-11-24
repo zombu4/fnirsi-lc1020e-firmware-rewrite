@@ -601,7 +601,8 @@
         .equ    CAO_PT,         0x04            @ point 0..14 in progress (frequency index
                                                 @ point / 3, level index point mod 3)
         .equ    CAO_NW,         0x08            @ windows of the point held in CAO_WIN, 0..3
-        .equ    CAO_NT,         0x0C            @ windows taken at this point in all
+        .equ    CAO_NO,         0x0C            @ usable windows of an open point in CAO_OWIN,
+                                                @ 0..7 (MEASUREMENT_FIX_DESIGN revision 10)
         .equ    CAO_PSEQ,       0x10            @ MF_PSEQ (publishes of meas.s) as last seen
         .equ    CAO_TPT,        0x14            @ tick at the start of the point
         .equ    CAO_G,          0x18            @ the re-arm generation MO_G as last seen
@@ -620,7 +621,9 @@
                                                 @ before the store (restored when one fails)
         .equ    CAO_REL,        0x148           @ 0x78 bytes: 0x200010C0..0x20001137 before the
                                                 @ sweep (the vendor start clears them)
-        .equ    CAO_END,        0x1C0
+        .equ    CAO_OWIN,       0x1C0           @ 7 windows of an open point: |Z| bits, theta
+                                                @ bits (cal.s CA_NO_OPEN)
+        .equ    CAO_END,        0x1F8
         .if     CAO_END > CAL_SIZE
         .error  "own.inc: the OWN_CAL words do not fit O_CAL"
         .endif

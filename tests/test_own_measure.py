@@ -227,11 +227,12 @@ def settings(**words):
     return block_with(**{'0x%08x' % names[k]: v for k, v in words.items()})
 
 
-def own_rig(source, block=None, usb=False, keys_at_start=0, **words):
+def own_rig(source, block=None, usb=False, keys_at_start=0, panel=False, **words):
     """Our build with the settings block (block or settings(**words)) in copies A and B, the table watch
-    and the probe armed from reset, run to the main loop."""
+    and the probe armed from reset, run to the main loop; panel: the panel model logs every RAMWR window
+    (test_own_control.Panel)."""
     blk = block if block is not None else settings(**words)
-    rig = Ctl(a=copy_image(blk, 2), b=copy_image(blk, 1), usb=usb, source=source)
+    rig = Ctl(a=copy_image(blk, 2), b=copy_image(blk, 1), usb=usb, source=source, panel=panel)
     rig.block = blk
     rig.vendor = False
     rig.watch = TableWatch(rig)

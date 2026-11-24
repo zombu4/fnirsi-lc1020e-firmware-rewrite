@@ -17,14 +17,20 @@
 @   window meas.s publishes (MF_PSEQ + 1) is one window of the point. Each published window holds
 @   only acquisitions after the last change and its settle time (meas.s, S1.4), so none is
 @   discarded for settling;
-@ - a no-reading or overload window (theta -400 or |Z| 1e10) or a non-finite one is never used and
-@   starts the point's windows again (critique item 1);
-@ - the last 3 windows: the median of |Z|, theta of the same window (no unwrap, items 6 / 7). The
-@   point is accepted when each of the 3 lies within a factor 2 of the median (|Zi| <= 2 |Zm| and
-@   2 |Zi| >= |Zm|: CAL_SETTLE_DESIGN 4.2's limit, design 8.1 for D9); otherwise the oldest is
-@   dropped and the next window taken. An open (type 11) that has taken 9 windows without an
-@   agreeing three is accepted as "not resolved": its median with theta = +400 (design stage 3;
-@   S4.1 then uses the short only at that point);
+@ - a no-reading or overload window (theta -400 or |Z| 1e10) or a non-finite one is never used
+@   (cal_usable). In a short or reference point (type != 11) it starts the point's windows again
+@   (critique item 1); in an open point it is skipped and the windows taken stay (revision 10);
+@ - short and reference points (type != 11): the last 3 windows: the median of |Z|, theta of the
+@   same window (no unwrap, items 6 / 7). The point is accepted when each of the 3 lies within a
+@   factor 2 of the median (|Zi| <= 2 |Zm| and 2 |Zi| >= |Zm|: CAL_SETTLE_DESIGN 4.2's limit,
+@   design 8.1 for D9); otherwise the oldest is dropped and the next window taken;
+@ - open points (type 11, MEASUREMENT_FIX_DESIGN revision 10): every usable window is kept in
+@   CAO_OWIN; the point ends at its CA_NO_OPEN-th usable window or at its time limit CA_POINT_MS,
+@   whichever comes first, with the lower median window of what it has (cal_omed: |Z| and theta of
+@   one window; the order of |Z| is the reverse order of the admittance |Y| = 1 / (|Z| + the
+@   short), so the median window is the median of the admittance too). An open point never fails
+@   by its time; with no usable window at all it is stored "not resolved": |Z| 1e10 and theta
+@   +400 (S4.1 then uses the short only at that point, meas.s meas_comp);
 @ - open validity: an open point needs |Zo| = |Z| + the point's short entry >= 100 kohm ([S10]
 @   p.5), else the sweep fails naming the point;
 @ - results stay in OWN_CAL; the table is written only at the end (item 4), point by point
@@ -41,19 +47,23 @@
 @   re-arm generation MO_G for 1.5 s (stall, item 8), the point not accepted within CA_POINT_MS
 @   (20 s [J]; M0-3's figure replaces it after the flash; the time does not run while meas.s
 @   holds publication for the S4.4 bias wait, MF_BIASP != 0, which the start's bias change to 0
-@   begins and BIAS_MAX_MS = 30 s bounds), an open below 100 kohm, the vendor's check at the
-@   store;
+@   begins and BIAS_MAX_MS = 30 s bounds; an open point ends there instead, see above), an open
+@   below 100 kohm, the vendor's check at the store;
 @ - the frequency, level or step word not the one cal_step set (the vendor start ran again by a
 @   physical key 8, item 2): the sweep begins again at point 0 (nothing was stored, so nothing is
 @   restored; the recording is kept);
 @ - the running word cleared by a key (type keys 4 / 0x10, ui_44.s 0x0800F70A..) or the guard
 @   lost (long key 8 closes the dialog, item 3): the settings and the type back (item 5),
 @   0x200050E4 / E8 / EC = 0, nothing stored.
-@ Progress: the step word 0x200050E8 = 3 x point + held windows (0..2), 3 x (point + 1) once a
-@ point is accepted, 45 at the store (the CALIBRATION event), and the dialog status text
-@ (word 0x20005960) "n/15" with the point's frequency and level, in font F1 (d_0802ce5c: it has
-@ '/' and '.', the dialog's F2 has letters, digits, space, '%', '(' and ')' only, RESOURCE_FACTS 1c
-@ cmap ranges).
+@ Progress: the step word 0x200050E8 = 3 x point + held windows (0..2; an open point: its usable
+@ windows, at most 2 counted), 3 x (point + 1) once a point is accepted, 45 at the store (the
+@ CALIBRATION event), and the dialog status text (word 0x20005960) "n/15" with the point's
+@ frequency and level, in font F1 (d_0802ce5c: it has '/' and '.', the dialog's F2 has letters,
+@ digits, space, '%', '(' and ')' only, RESOURCE_FACTS 1c cmap ranges). Every line of these texts
+@ is at most 75 pixels wide in F1 (the sum of the glyph advances of d_0802ce5c; revision 10 item
+@ 6), less than the 80-pixel width of the panel D that holds the text object (fn_0800e6c8 mode 5,
+@ ui_43.s header). The names of revision 7 were 84 and 93 pixels wide ("100kHz 0.1V"), wider
+@ than the panel; the meter showed "3/15" for "13/15" (owner, 2026-11-23).
 @
 @ RAM: OWN_CAL (own.inc CAO_*, 0x200 bytes), cleared by own_start. Calling convention: AAPCS; each
 @ function states the registers it changes beyond r0..r3, r12, s0..s15 and the flags.
@@ -66,7 +76,11 @@
 	.include "own/own.inc"
 
 	.equ	CA_PTS,		15		@ points of a sweep
-	.equ	CA_NT_OPEN,	9		@ windows after which an open is "not resolved" [J]
+	.equ	CA_NO_OPEN,	7		@ usable windows that end an open point [J]: the median of 7
+						@ stands with up to 3 outliers (own.inc CAO_OWIN holds 7)
+	.if	CAO_OWIN + 8 * CA_NO_OPEN > CAO_END
+	.error	"cal.s: CA_NO_OPEN windows do not fit CAO_OWIN"
+	.endif
 	.equ	CA_STALL_MS,	1500		@ no re-arm for this long: stall (critique item 8 asks 2 s; 1.5 s
 						@ [J] so that the stall is seen before meas.s publishes the
 						@ no-reading set after 2 s, whose re-arm changes MO_G again)
@@ -189,6 +203,13 @@ cal_step:
 	movw	r1, #CA_POINT_MS
 	cmp	r0, r1
 	bls	.Lcs_word
+	ldr	r0, =V_CAL_TYPE
+	ldr	r0, [r0]
+	cmp	r0, #11
+	bne	.Lcs_lfail
+	bl	cal_oend		@ an open point ends with the windows it has (revision 10)
+	b	.Lcs_ret
+.Lcs_lfail:
 	ldr	r0, [r4, #CAO_NW]
 	cmp	r0, #3
 	ite	eq
@@ -226,6 +247,29 @@ cal_guard:
 	bx	lr
 .Lcg_no:
 	movs	r0, #0
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ cal_busy - r0 = 1 while a calibration runs: the running word 0x200050E4 != 0, or a sweep of
+@   cal.s in progress (CAO_ON != 0; it ends in the next pass when the running word was cleared),
+@   else 0. The test of ctl.s key_refused and dset.s ds_check (revision 10 item 4). Changes r0,
+@   r1.
+@ ----------------------------------------------------------------------------
+	.global	cal_busy
+	.thumb_func
+	.type	cal_busy, %function
+cal_busy:
+	ldr	r1, =V_CAL_RUN
+	ldr	r0, [r1]
+	cmp	r0, #0
+	bne	.Lcb_yes
+	ldr	r1, =OWN_CAL
+	ldr	r0, [r1, #CAO_ON]
+	cmp	r0, #0
+	bne	.Lcb_yes
+	bx	lr			@ r0 = 0
+.Lcb_yes:
+	movs	r0, #1
 	bx	lr
 
 @ ----------------------------------------------------------------------------
@@ -315,13 +359,19 @@ cal_settings:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ cal_expect - r0 = the step word cal_step keeps: 3 x CAO_PT + min(CAO_NW, 2). Changes r0, r1.
+@ cal_expect - r0 = the step word cal_step keeps: 3 x CAO_PT + min(held, 2), held = CAO_NO for an
+@   open (type 11), else CAO_NW. Changes r0, r1.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	cal_expect, %function
 cal_expect:
+	ldr	r1, =V_CAL_TYPE
+	ldr	r0, [r1]
 	ldr	r1, =OWN_CAL
-	ldr	r0, [r1, #CAO_NW]
+	cmp	r0, #11
+	ite	eq
+	ldreq	r0, [r1, #CAO_NO]	@ an open: its usable windows
+	ldrne	r0, [r1, #CAO_NW]	@ else the windows held for the agreeing three
 	cmp	r0, #2
 	it	hi
 	movhi	r0, #2
@@ -382,8 +432,9 @@ cal_same:
 @ ----------------------------------------------------------------------------
 @ cal_point - r0 = point: it becomes the point in progress. Frequency and level words
 @   (cal_settings), fn_08009f10 (the signal and a measurement restart, which meas.s sees as a
-@   change: its window starts again after the 26-ms settle), no window held, the publish count, the
-@   generation and the ticks taken now, the step word, the progress text. Changes r0..r3, r12.
+@   change: its window starts again after the 26-ms settle), no window held (CAO_NW and CAO_NO
+@   0), the publish count, the generation and the ticks taken now, the step word, the progress
+@   text. Changes r0..r3, r12.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	cal_point, %function
@@ -395,7 +446,7 @@ cal_point:
 	bl	fn_08009f10
 	movs	r0, #0
 	str	r0, [r4, #CAO_NW]
-	str	r0, [r4, #CAO_NT]
+	str	r0, [r4, #CAO_NO]
 	ldr	r1, =OWN_FUNC
 	ldr	r0, [r1, #MF_PSEQ]
 	str	r0, [r4, #CAO_PSEQ]	@ windows published from now on belong to this point
@@ -413,37 +464,38 @@ cal_point:
 
 @ ----------------------------------------------------------------------------
 @ cal_window - r0 = publishes since the last pass (>= 1); the window is the published |Z|
-@   0x200050C4 and theta 0x200050CC. Not used, and the point's held windows dropped: more than one
-@   publish (never with one own_measure call per pass; then one of them would be unseen), the
-@   no-reading / overload set (theta -400 or |Z| 1e10), a non-finite word. Else it is held (the
-@   oldest of 3 dropped first) and, with 3 held, judged (cal_judge): agreeing, or an open after
-@   CA_NT_OPEN windows ("not resolved", theta +400), gives cal_accept of the median window.
+@   0x200050C4 and theta 0x200050CC. It is not used when more than one publish came (never with
+@   one own_measure call per pass; then one of them would be unseen) or cal_usable refuses it
+@   (the no-reading / overload set, a non-finite word).
+@   Open point (type 11): a window not used is skipped; a used one goes into CAO_OWIN (CAO_NO + 1)
+@   and the CA_NO_OPEN-th ends the point (cal_oend).
+@   Other types: a window not used drops the point's held windows (CAO_NW = 0); a used one is held
+@   (the oldest of 3 dropped first) and, with 3 held, judged (cal_judge): agreeing gives
+@   cal_accept of the median window, else the next window is waited for.
 @   Returns r0 = 1 when cal_accept ran, else 0. Changes r0..r3, r12, s0..s5.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	cal_window, %function
 cal_window:
-	push	{r4, r5, r6, lr}
+	push	{r4, r5, r6, r7, r8, lr}
 	ldr	r4, =OWN_CAL
+	mov	r7, r0			@ r7 = publishes since the last pass
 	ldr	r1, =V_Z
 	ldr	r5, [r1]		@ r5 = |Z| bits
 	ldr	r1, =V_THETA
 	ldr	r6, [r1]		@ r6 = theta bits
-	cmp	r0, #1
-	bne	.Lcw_drop
-	ldr	r1, =F_M400
-	cmp	r6, r1
-	beq	.Lcw_drop		@ the no-reading / overload set (critique item 1)
-	ldr	r1, =F_1E10
-	cmp	r5, r1
-	beq	.Lcw_drop
-	ldr	r1, =EXPM
-	and	r2, r5, r1
-	cmp	r2, r1
-	beq	.Lcw_drop		@ |Z| Inf or NaN
-	and	r2, r6, r1
-	cmp	r2, r1
-	beq	.Lcw_drop		@ theta Inf or NaN
+	mov	r0, r5
+	mov	r1, r6
+	bl	cal_usable		@ r0 = 1: a window that can be used
+	cmp	r7, #1
+	it	ne
+	movne	r0, #0			@ more than one publish: not used
+	ldr	r1, =V_CAL_TYPE
+	ldr	r1, [r1]
+	cmp	r1, #11
+	beq	.Lcw_open
+	cmp	r0, #0
+	beq	.Lcw_drop		@ a short / reference point starts its windows again
 	ldr	r0, [r4, #CAO_NW]
 	cmp	r0, #3
 	bne	.Lcw_put
@@ -459,37 +511,137 @@ cal_window:
 	strd	r5, r6, [r1]
 	adds	r0, r0, #1
 	str	r0, [r4, #CAO_NW]
-	ldr	r1, [r4, #CAO_NT]
-	adds	r1, r1, #1
-	str	r1, [r4, #CAO_NT]
 	cmp	r0, #3
 	bne	.Lcw_no
 	bl	cal_judge		@ r0 = median slot, r1 = 1 agreeing
+	cmp	r1, #0
+	beq	.Lcw_no			@ not agreeing: wait for the next window
 	add	r2, r4, #CAO_WIN
 	add	r2, r2, r0, lsl #3
-	ldrd	r5, r6, [r2]		@ the median window
-	cmp	r1, #0
-	bne	.Lcw_acc
-	ldr	r0, =V_CAL_TYPE
-	ldr	r0, [r0]
-	cmp	r0, #11
-	bne	.Lcw_no			@ not agreeing: wait for the next window
-	ldr	r0, [r4, #CAO_NT]
-	cmp	r0, #CA_NT_OPEN
-	blo	.Lcw_no
-	ldr	r6, =F_P400		@ an open without an agreeing three: "not resolved"
-.Lcw_acc:
-	mov	r0, r5
-	mov	r1, r6
+	ldrd	r0, r1, [r2]		@ the median window
 	bl	cal_accept
 	movs	r0, #1
-	pop	{r4, r5, r6, pc}
+	pop	{r4, r5, r6, r7, r8, pc}
+.Lcw_open:
+	cmp	r0, #0
+	beq	.Lcw_no			@ an open point skips it; its windows stay
+	ldr	r0, [r4, #CAO_NO]
+	add	r1, r4, #CAO_OWIN
+	add	r1, r1, r0, lsl #3
+	strd	r5, r6, [r1]
+	adds	r0, r0, #1
+	str	r0, [r4, #CAO_NO]
+	cmp	r0, #CA_NO_OPEN
+	blo	.Lcw_no
+	bl	cal_oend		@ CA_NO_OPEN usable windows: the point's result
+	movs	r0, #1
+	pop	{r4, r5, r6, r7, r8, pc}
 .Lcw_drop:
 	movs	r0, #0
 	str	r0, [r4, #CAO_NW]	@ the point's windows start again
 .Lcw_no:
 	movs	r0, #0
-	pop	{r4, r5, r6, pc}
+	pop	{r4, r5, r6, r7, r8, pc}
+
+@ ----------------------------------------------------------------------------
+@ cal_usable - r0 = |Z| bits, r1 = theta bits of a published window: r0 = 1 when it can be used,
+@   0 for the no-reading / overload set of meas.s (theta -400 or |Z| 1e10) and for a non-finite
+@   word (critique item 1). Changes r0..r2.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	cal_usable, %function
+cal_usable:
+	ldr	r2, =F_M400
+	cmp	r1, r2
+	beq	.Lcu_no			@ theta of the no-reading / overload set
+	ldr	r2, =F_1E10
+	cmp	r0, r2
+	beq	.Lcu_no			@ |Z| of that set
+	ldr	r2, =EXPM
+	and	r0, r0, r2
+	cmp	r0, r2
+	beq	.Lcu_no			@ |Z| Inf or NaN
+	and	r1, r1, r2
+	cmp	r1, r2
+	beq	.Lcu_no			@ theta Inf or NaN
+	movs	r0, #1
+	bx	lr
+.Lcu_no:
+	movs	r0, #0
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ cal_oend - the end of an open point (type 11; at its CA_NO_OPEN-th usable window or at its time
+@   limit): with CAO_NO >= 1 windows the lower median window (cal_omed), with none "not
+@   resolved", |Z| 1e10 and theta +400; then cal_accept (its open validity check, the next point
+@   or the store). Keeps r4..r11; changes r0..r3, r12 and what cal_accept's callees change
+@   (s0..s15 at the store, cal_commit).
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	cal_oend, %function
+cal_oend:
+	push	{r4, lr}
+	ldr	r4, =OWN_CAL
+	ldr	r0, [r4, #CAO_NO]
+	cbz	r0, .Loe_none
+	bl	cal_omed		@ r0 / r1 = the median window
+	b	.Loe_acc
+.Loe_none:
+	ldr	r0, =F_1E10		@ no usable window at all: "not resolved"
+	ldr	r1, =F_P400
+.Loe_acc:
+	bl	cal_accept
+	pop	{r4, pc}
+
+@ ----------------------------------------------------------------------------
+@ cal_omed - the CAO_NO (1..CA_NO_OPEN) windows in CAO_OWIN, every |Z| finite (cal_usable): r0 /
+@   r1 = |Z| bits / theta bits of the window whose |Z| is the k-th smallest, k = (n - 1) / 2 (the
+@   median for odd n, the lower median for even n; signed compare; of equal |Z| the first held).
+@   Window i is the k-th when (windows below it) <= k < (windows at or below it). Finite floats
+@   are totally ordered, so one i always qualifies; the fall-through to window 0 only keeps the
+@   result defined. Changes r0..r3, s0, s1.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	cal_omed, %function
+cal_omed:
+	push	{r4, r5, r6, r7, r8, lr}
+	ldr	r5, =OWN_CAL
+	add	r4, r5, #CAO_OWIN	@ r4 = the windows
+	ldr	r5, [r5, #CAO_NO]	@ r5 = n
+	subs	r6, r5, #1
+	lsrs	r6, r6, #1		@ r6 = k
+	movs	r7, #0			@ r7 = i
+.Lom_i:
+	add	r0, r4, r7, lsl #3
+	vldr	s0, [r0]		@ |Z| of window i
+	movs	r1, #0			@ r1 = windows below it
+	movs	r2, #0			@ r2 = windows at or below it
+	movs	r3, #0			@ r3 = j
+.Lom_j:
+	add	r0, r4, r3, lsl #3
+	vldr	s1, [r0]
+	vcmpe.f32	s1, s0
+	vmrs	APSR_nzcv, fpscr
+	it	lt
+	addlt	r1, r1, #1
+	it	le
+	addle	r2, r2, #1
+	adds	r3, r3, #1
+	cmp	r3, r5
+	blo	.Lom_j
+	cmp	r1, r6
+	bhi	.Lom_next		@ more than k below: above the k-th
+	cmp	r2, r6
+	bhi	.Lom_take		@ k below at most and more than k at or below: the k-th
+.Lom_next:
+	adds	r7, r7, #1
+	cmp	r7, r5
+	blo	.Lom_i
+	movs	r7, #0
+.Lom_take:
+	add	r0, r4, r7, lsl #3
+	ldrd	r0, r1, [r0]
+	pop	{r4, r5, r6, r7, r8, pc}
 
 @ ----------------------------------------------------------------------------
 @ cal_judge - the 3 held windows (CAO_WIN; |Z| finite): r0 = slot 0..2 of the median |Z| (signed
@@ -946,28 +1098,29 @@ cal_freqs:
 @ literals of fn_0800bd5c)
 cal_levels:
 	.word	0x3DCCCCCD, 0x3E99999A, 0x3F19999A
-@ the names of the 15 points (second line of the progress text)
+@ the names of the 15 points (second line of the progress text): frequency in Hz, k for 1000, then
+@ the level in V; each at most 73 pixels wide in F1 (cal.s header, revision 10 item 6)
 cal_names:
 	.word	nm_p00, nm_p01, nm_p02, nm_p03, nm_p04, nm_p05, nm_p06, nm_p07
 	.word	nm_p08, nm_p09, nm_p10, nm_p11, nm_p12, nm_p13, nm_p14
 @ the reasons CAL_R_NONE .. CAL_R_ABORT (second line of the fail text)
 cal_why:
 	.word	why_none, why_stall, why_time, why_open, why_check, why_spread, why_abort
-nm_p00:	.asciz	"100Hz 0.1V"
-nm_p01:	.asciz	"100Hz 0.3V"
-nm_p02:	.asciz	"100Hz 0.6V"
-nm_p03:	.asciz	"120Hz 0.1V"
-nm_p04:	.asciz	"120Hz 0.3V"
-nm_p05:	.asciz	"120Hz 0.6V"
-nm_p06:	.asciz	"1kHz 0.1V"
-nm_p07:	.asciz	"1kHz 0.3V"
-nm_p08:	.asciz	"1kHz 0.6V"
-nm_p09:	.asciz	"10kHz 0.1V"
-nm_p10:	.asciz	"10kHz 0.3V"
-nm_p11:	.asciz	"10kHz 0.6V"
-nm_p12:	.asciz	"100kHz 0.1V"
-nm_p13:	.asciz	"100kHz 0.3V"
-nm_p14:	.asciz	"100kHz 0.6V"
+nm_p00:	.asciz	"100 0.1V"
+nm_p01:	.asciz	"100 0.3V"
+nm_p02:	.asciz	"100 0.6V"
+nm_p03:	.asciz	"120 0.1V"
+nm_p04:	.asciz	"120 0.3V"
+nm_p05:	.asciz	"120 0.6V"
+nm_p06:	.asciz	"1k 0.1V"
+nm_p07:	.asciz	"1k 0.3V"
+nm_p08:	.asciz	"1k 0.6V"
+nm_p09:	.asciz	"10k 0.1V"
+nm_p10:	.asciz	"10k 0.3V"
+nm_p11:	.asciz	"10k 0.6V"
+nm_p12:	.asciz	"100k 0.1V"
+nm_p13:	.asciz	"100k 0.3V"
+nm_p14:	.asciz	"100k 0.6V"
 why_none:	.asciz	""
 why_stall:	.asciz	"no signal"
 why_time:	.asciz	"time limit"

@@ -65,6 +65,7 @@ from test_own_control import (Ctl, Snapshot, check, f32, stretch_in, PERIOD_MIN,
                               E_SETTING, V_BLOCK, BLK, V_SCREEN, V_FUNC, V_SECONDARY, V_FREQ, V_LEVEL,
                               V_BIAS, V_RANGE, V_SPEED, V_CIRCUIT, V_BRIGHT, V_HOLD, V_MENU, V_DIALOG,
                               V_MAIN_ROW, V_CAL_RUN, V_KEY_CODE, MEASURE_SIZE, STATE_SIZE, COMPARE_SIZE)
+V_CAL_TYPE = 0x200050E0                          # own.inc: 0 short, 11 open
 from measure_model import DutSource  # noqa: E402
 
 CASES = []
@@ -838,8 +839,8 @@ def d02_refusals():
 def nav_dialog(rig, item, edit=False):
     """Screen 3 (long 8), the menu item (key 0x20 steps over the visible items 0, 2..6), key 8
     (the dialog), with edit: key 8 again (the sorting dialog's row 0 being edited). Items 5 and 6:
-    physical keys (test_own_control.nav_settings): key_refused refuses an injected key 8 on item 5
-    (ctl.s .Lkr_ok_key), so the KEY command cannot open the calibration dialog."""
+    physical keys (test_own_control.nav_settings), as before revision 10 of MEASUREMENT_FIX_DESIGN (when
+    key_refused refused an injected key 8 on item 5); the state reached is the same."""
     if item in (5, 6):
         T.nav_settings(rig, item, dialog=True)
         return
@@ -849,6 +850,26 @@ def nav_dialog(rig, item, edit=False):
     press(rig, 0x0008)
     if edit:
         press(rig, 0x0008)
+
+
+def first_result():
+    """Screen 1 at the first main-loop pass after the first published result of the start-up (a store
+    of 1 to 0x20001200, own/meas.s meas_tail; Probe.results), a Snapshot. The state at(()) stands
+    before it: there the display words 0x200050B8..0x200050C4 still hold the start-up 0 (emulator
+    diagnostic 2026-11-23: 0 at that snapshot, the first result 1e10 stored 48 ms later by
+    0x080544F6..0x08054506). From there the key path (a long press, 1.1 s) builds screen 2 after
+    that result and draws "0L", the direct change builds it at once and draws 0.0000 with the
+    marker of fmt.s (0 lies outside the accuracy table), whose amber covers (own_row_draw, six GUI
+    objects with data blocks) put 0x20000460 at 0x42 against 0x36 and the heap pointers
+    0x20000204..0x20000218 apart. Each path shows the values it finds; the comparison needs both
+    to find the same ones."""
+    rig = base()
+    rig.probe.results = 0
+    end = rig.m.run_for(seconds=1.2, until=lambda m: rig.probe.results > 0)   # a window period at
+    check(end is None and rig.probe.results > 0, 'no result within 1.2 s of the start-up: %r' % end)
+    to_pass(rig)                                                              # speed 0 (capture())
+    check(rig.rd(V_SCREEN) == 1, 'first result state: screen %d' % rig.rd(V_SCREEN))
+    return Snapshot(rig)
 
 
 def screen_ref(target):
@@ -868,9 +889,11 @@ def screen_ref(target):
 def d03_screen_pairs_and_dialogs():
     """SCREEN between all screens (3 -> 1 / 2 with 0x200011BC = 1 and = 2) and from screen 3 with the
     sorting dialog open (item 0) and with its row being edited (the byte 0x2000000C), against the
-    key path; the calibration and restore dialogs (items 5, 6): status 6, nothing changed."""
+    key path; the restore dialog (item 6): status 6, nothing changed; the calibration dialog (item 5) with
+    no calibration running (MEASUREMENT_FIX_DESIGN revision 10 item 4): status 0, the target screen, the
+    dialog closed, no calibration started, the calibration type as before."""
     runs = 0
-    s1 = at(())
+    s1 = first_result()
     s2 = at(((0x0400, LONG),))
     s3a = at(((0x0008, LONG),))                              # from 1: 0x200011BC = 1
     s3b = at(((0x0400, LONG), (0x0008, LONG)))              # from 2: 0x200011BC = 2
@@ -913,15 +936,29 @@ def d03_screen_pairs_and_dialogs():
             NOTES.append('%s: expected differences %s' % (w, ' '.join('0x%08X' % a for a in diff)))
         NOTES.append('%s: stretch %.0f ms' % (w, direct['stretch'] * 1e3))
         runs += 2
-    for item in (5, 6):
+    rig = base()
+    nav_dialog(rig, 6)
+    rig.run(0.2)
+    to_pass(rig)
+    check(rig.rd(V_DIALOG) == 1 and rig.rd(V_MENU) == 6, 'dialog of item 6 not open')
+    for t in (1, 2):
+        refused(rig, 'SCREEN', bytes([t]), S_SAFETY, STATE_SIZE, 'SCREEN from the item 6 dialog')
+        check(rig.rd(V_SCREEN) == 3 and rig.rd(V_DIALOG) == 1, 'item 6 dialog left')
+    for t in (1, 2):
         rig = base()
-        nav_dialog(rig, item)
+        nav_dialog(rig, 5)
         rig.run(0.2)
         to_pass(rig)
-        check(rig.rd(V_DIALOG) == 1 and rig.rd(V_MENU) == item, 'dialog of item %d not open' % item)
-        for t in (1, 2):
-            refused(rig, 'SCREEN', bytes([t]), S_SAFETY, STATE_SIZE, 'SCREEN from the item %d dialog' % item)
-            check(rig.rd(V_SCREEN) == 3 and rig.rd(V_DIALOG) == 1, 'item %d dialog left' % item)
+        check(rig.rd(V_DIALOG) == 1 and rig.rd(V_MENU) == 5 and rig.rd(V_CAL_RUN) == 0,
+              'dialog of item 5 not open, or a calibration runs (input)')
+        typ = rig.rd(V_CAL_TYPE)
+        st, s = rig.ask('SCREEN', bytes([t]))
+        check(st == S_OK and len(s) == STATE_SIZE and rig.rd(V_SCREEN) == t and rig.rd(V_DIALOG) == 0,
+              'SCREEN %d from the item 5 dialog: status %d screen %d dialog %d' % (t, st, rig.rd(V_SCREEN),
+                                                                                rig.rd(V_DIALOG)))
+        check(rig.rd(V_CAL_RUN) == 0 and rig.rd(V_CAL_TYPE) == typ, 'SCREEN %d from the item 5 dialog: running %d '
+              'type %d (was %d)' % (t, rig.rd(V_CAL_RUN), rig.rd(V_CAL_TYPE), typ))
+        runs += 1
     NOTES.append('d03: %d runs' % runs)
     return True
 

@@ -1747,7 +1747,15 @@ def _k30_guard(state):
                     rig.run(0.05)
                 b1 = rig.rd(V_BLOCK, BLK)
                 bad = [o for o in block_diff(b0, b1) if o not in ALLOWED]
-                if name != 'calibration running':
+                # revision 10 item 4 of MEASUREMENT_FIX_DESIGN: an injected key 8 in the calibration dialog starts
+                # the calibration as the meter's key does; the start zero-fills 0x200010C0..0x20001137 (block
+                # 0xB44..0xBBB, ui_44.s 0x0800F740) and its sweep (own/cal.s) runs
+                started = name != 'calibration running' and rig.rd(V_CAL_RUN) != 0
+                running = name == 'calibration running' or started
+                if started:
+                    check(all(0xB44 <= o < 0xBBC for o in bad), '%s: a calibration started by the key changed block '
+                          'words outside the settings and 0x200010C0..: %r' % (what, [hex(o) for o in bad]))
+                elif name != 'calibration running':
                     check(not bad, '%s: block words changed outside the settings: %r' % (what, [hex(o) for o in bad]))
                 ev = m.events()
                 passes, sweeps = ev.count('pass') - p0, ev.count('sweep') - s0
@@ -1761,7 +1769,7 @@ def _k30_guard(state):
                 check(m.st['pa8'] == 0, '%s: no power-off' % what)
                 check(not m.st['viol'], '%s: %r' % (what, m.st['viol']))
                 blk_off = rig.rd(V_BLOCK, BLK)
-                if name == 'calibration running':
+                if running:
                     # a save during the sweep stages the settings of before it (own/save.s stage_cal_fix
                     # from the recording of own/cal.s): frequency, level, bias, speed, 0x200010C0..
                     blk_off = cal_staged(rig, blk_off)
@@ -1774,9 +1782,9 @@ def _k30_guard(state):
                 # one record per run, the same in both modes: answer, refusal, loop passes and sweep calls
                 # after the key, changed block words, the end time of the run, log length, CRCs of the RAM
                 # block before / after the power-off and of both settings copies
-                print('k30rec %s|%d|%d|st=%d|refused=%d|passes=%d|sweeps=%d|bad=%d|pa8=%r|t=%.9f|log=%d|'
+                print('k30rec %s|%d|%d|st=%d|refused=%d|started=%d|passes=%d|sweeps=%d|bad=%d|pa8=%r|t=%.9f|log=%d|'
                       'b1=%08x|off=%08x|A=%08x|B=%08x' % (
-                          name, bit, hold, st, st == S_SAFETY, passes, sweeps, len(bad), m.st['pa8'], m.now(),
+                          name, bit, hold, st, st == S_SAFETY, started, passes, sweeps, len(bad), m.st['pa8'], m.now(),
                           len(m.st['log']), zlib.crc32(b1), zlib.crc32(blk_off), zlib.crc32(m.get(SET_A, BLK)),
                           zlib.crc32(m.get(SET_B, BLK))), flush=True)
         print('k30time %s|%s|%.1f s' % (name, 'fresh' if OPTS['fresh'] else 'snapshot', time.time() - t_state),

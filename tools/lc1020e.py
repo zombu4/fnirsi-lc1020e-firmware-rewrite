@@ -146,6 +146,8 @@ FLASH_RESULT = {0: 'OK', 1: 'outside the gate', 2: 'word not erased', 3: 'contro
 UPDATE_RESULT = {0: 'none', 1: 'OK', 2: 'image check failed', 3: 'programming failed'}
 CAL_STATUS = {0: 'start', 1: 'busy', 2: 'finish', 3: 'fail'}
 # CALIBRATE answer byte 7 (capability bit 25, firmware/own/cal.s CAL_R_*)
+# (reasons 2 and 5 end short and reference points only: an open point ends at its limit with the windows it
+# has, MEASUREMENT_FIX_DESIGN revision 10)
 CAL_REASON = {0: 'none', 1: 'no acquisition for 1.5 s', 2: 'point time limit, fewer than 3 windows',
               3: 'open below 100 kohm', 4: 'the store check of the table', 5: 'point time limit, 3 windows not agreeing',
               6: 'ended by a key, the dialog closed or the screen left'}

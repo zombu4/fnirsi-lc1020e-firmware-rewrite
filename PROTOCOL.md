@@ -151,7 +151,7 @@ is their data length. RESET, UPDATE_MODE and the BOOT_* commands take no confirm
 |---|---|---|---|
 | 0x10 | STATE | - | STATE record (section 6.1), 32 bytes |
 | 0x11 | STREAM | period u16 ms, 0 stops | none; STATE records follow as stream frames cmd 0x10 every period (section 11) |
-| 0x12 | SCREEN | screen u8: 1 measure, 2 compare, 3 settings | STATE. Direct (section 5.3.4): the meter's own screen builder of the requested screen runs (from the settings screen an open sorting dialog is closed first). Status 6 from the settings screen while the calibration dialog (menu item 5) or the restore-defaults dialog (item 6) is open; status 3 in screen 0 (the vendor's language chooser; it never occurs: the firmware is English only, section 5.6) |
+| 0x12 | SCREEN | screen u8: 1 measure, 2 compare, 3 settings | STATE. Direct (section 5.3.4): the meter's own screen builder of the requested screen runs (from the settings screen an open sorting or calibration dialog is closed first). Status 6 while a calibration runs and from the settings screen while the restore-defaults dialog (item 6) is open; from the calibration dialog (item 5) with no calibration running the dialog is closed (status 0; firmware before MEASUREMENT_FIX_DESIGN revision 10 answered 6); status 3 in screen 0 (the vendor's language chooser; it never occurs: the firmware is English only, section 5.6) |
 | 0x13 | KEY | key bit u8 0..13, hold u16 ms (optional, 0 or missing: short press) | STATE after the meter handled the key. Status 6 when the key is refused (section 7.3) or the guard stopped a flash write or defaults change; status 4 when a physical key ended the injection or the time limit passed; status 3 in powered-off mode |
 
 ### 5.3 Measurement
@@ -214,27 +214,39 @@ its key that lands on the value; the key is named for reference, it is not press
   calibration-running word 0x200050E4 must be 1, else status 3). Then the meter's sweep runs from
   the main loop; the job waits for status 2 (finish; the meter saves the result itself) -> answer
   status 0, or 3 (fail) -> status 3. When the running word goes to 0 for 1000 ms without one of
-  them: status 3 (counted from the start of the waiting step). Progress comes as CALIBRATION
+  them: status 3 (counted from the start of the waiting step). After the sweep's end (finish or
+  fail; revision 10 of MEASUREMENT_FIX_DESIGN) the job presses long key 0x008 until the dialog is
+  closed and then returns to the screen it found at the request (1, 2 or 3), so no physical key is
+  needed afterwards; the calibration status, the failed point and the reason stay for the answer.
+  When a check of the start fails (status 3) the job ends there. Progress comes as CALIBRATION
   events (section 10). The answer's save status is the save status word at the end of the job
   (after a finished calibration: the result of the meter's own save of it).
 - The sweep of firmware with capability bit 25 (firmware/own/cal.s): 15 points in the vendor's
   order (100, 120, 1000, 10000, 100000 Hz, each at 0.1, 0.3, 0.6 V). Each point takes complete
-  measurement windows only; the result is the median of its last 3 windows when all 3 lie within
-  a factor 2 of it (an open that never agrees within 9 windows is stored as "not resolved", its
-  phase entry +400). The results stay in RAM and are written to the user table only after all 15
+  measurement windows only. A short (and a factory reference) point: the result is the median of
+  its last 3 windows when all 3 lie within a factor 2 of it; a no-reading window starts its
+  windows again. An open point (revision 10): every usable window is kept (a no-reading or
+  non-finite window is skipped, nothing is dropped); the point ends at its 7th usable window or at
+  its 20-s limit, with the window of the median |Z| of those it has (the lower median for an even
+  count), its phase with it; with no usable window at all it is stored "not resolved" (|Z| 1e10,
+  phase entry +400) and the sweep goes on. An open point never fails by its time. The results stay in RAM and are written to the user table only after all 15
   points (a save during the sweep, by the power key or a host command, holds the old table and the
   settings of before the sweep). The finish restores the frequency, level, bias, speed and type of
   before the sweep, then saves once. The factory table is never written.
 - Answer bytes 6 and 7 (capability bit 25): the point 0..14 at which the sweep ended without a
   result (0xFF when it finished or never started) and the reason: 0 none, 1 no acquisition for
-  1.5 s, 2 the point's 20-s limit with fewer than 3 windows (the limit does not run while the
+  1.5 s, 2 a short or reference point's 20-s limit with fewer than 3 windows (the limit does not run while the
   measurement's bias wait holds publication after the start moved the bias to 0: a window is
   published once the DC midpoints are steady, at the latest 30 s after the bias change), 3 an open point below 100 kohm, 4 the
   vendor's store check (the table is written back as it was), 5 the point's limit with 3 windows
   that do not agree, 6 ended by a key, the dialog closed or the screen left. With status 3 the
   meter shows "Fail n/15" and the reason in the dialog; during the sweep "n/15" with the point's
-  frequency and level.
+  frequency (Hz, k for 1000) and level, for example "13/15" and "100k 0.1V".
 - While CALIBRATE runs, every other request waits (section 4.1) and every injected key is refused.
+- A calibration can also be started with KEY (key 0x008 on menu item 5 opens the dialog, key 0x008
+  in it starts the sweep; revision 10) or with the meter's keys: it is the same sweep with the same
+  finish and save. While any calibration runs, KEY, SCREEN, LCR_SET and the other direct changes
+  answer status 6 (section 7.3).
 
 #### 5.3.4 Direct changes: checks and differences from the jobs
 
@@ -242,7 +254,7 @@ Checks, in this order, at the request and again when the change is to run (a phy
 between may have changed the state); a refusal changes nothing and answers the record:
 - powered-off mode, or the meter's power-off path ran (its save is done; a change now would be
   lost): status 3;
-- a calibration runs: status 6;
+- a calibration runs (0x200050E4 != 0, or the sweep of cal.s still in progress): status 6;
 - the screen is not 1..3: status 3; LCR_SET and HOLD outside screens 1 and 2: status 3;
 - the value is set already: status 0 at once, nothing changed;
 - the refusals of the command (LCR_SET, SCREEN rows above).
@@ -437,6 +449,14 @@ R shows theta as its secondary. An overload (ADC saturated with no range step le
 finite value) and the no-reading result (no in-band acquisition for 2 s) carry |Z| 1e10 and theta
 -400, the vendor firmware's values; while hold is on no result is published.
 
+|Z| (0x200050C4) is never negative on the measure and compare screens (revision 10 of
+MEASUREMENT_FIX_DESIGN): where the open / short compensation cannot be used the result is |Zbar|
+minus the short entry, and a reading below the short entry is published as the same complex value
+with |Z| >= 0 and theta moved by 180 degrees (R, X, C, L, D, Q unchanged; firmware before it
+published a negative |Z| with the uncorrected theta). On the settings screen the field is the
+calibration's store quantity (|Zbar| for the short, |Zbar| minus the short entry for the other
+types), which can be negative.
+
 With capability bit 26 the result can carry the gain correction of the own calibration area
 (section 16): where a GAIN section calibrates the frequency and the range / gain cell (all four
 mask bits), |Z| and theta are K zeta nu sum V' / sum I' and the vendor decade interpolation is not
@@ -532,15 +552,20 @@ Empty cells: no function that this document specifies.
 
 Injected keys (KEY and every job step except the procedures listed below) are refused before they
 reach the meter when (the direct commands press no key; their refusals are in section 5.3.4,
-with the same status 6 while a calibration runs and for SCREEN from the dialogs of items 5 and 6):
+with the same status 6 while a calibration runs and for SCREEN from the dialog of item 6):
 
 | Condition (RAM words the meter's key handler reads) | Why | Use instead |
 |---|---|---|
 | screen 0 (0x20001168 = 0): every key (never occurs, section 5.6) | the language chooser's keys store the first-start flag and save | - |
-| a calibration runs (0x200050E4 != 0) or CALIBRATE is active: every key | keys of item 5 abort a calibration (with bit 25 nothing is stored and the settings are put back; without it the start has already changed the calibration table) | wait for its end |
+| a calibration runs (0x200050E4 != 0, or the sweep of cal.s still in progress for the pass after the running word was cleared) or CALIBRATE is active: every key | keys of item 5 abort a calibration (with bit 25 nothing is stored and the settings are put back; without it the start has already changed the calibration table) | wait for its end |
 | a hold of the power key (bit 0) | the meter's power-off path switches the meter off | POWER_OFF |
-| key 0x0008 in screen 3 on menu item 5 (0x200011A8 = 5) | starts the calibration, which changes frequency, level, bias and speed at once (and, without bit 25, the calibration table before anything can stop it) | CALIBRATE |
 | key 0x0008 in screen 3 on menu item 6 while a dialog is open (0x200011AC != 0) | confirms the restore of the defaults | RESTORE_DEFAULTS |
+
+Key 0x0008 on menu item 5 is not refused (revision 10 of MEASUREMENT_FIX_DESIGN; refused before):
+with the dialog closed it opens the calibration dialog, in the dialog it starts the calibration,
+the same sweep with the same finish and save as from the meter's keys or CALIBRATE (5.3.3); the
+keys 0x004 / 0x010 there choose the type, a long key 0x008 closes the dialog. With bit 25 the
+calibration table is written only after its 15th point.
 
 Guard: while the meter's key handler processes an injected event, and while a direct change runs,
 the settings save and the menu's call of the defaults routine return without acting; the job or
@@ -554,8 +579,9 @@ UPDATE_MODE is refused with status 6 when the next slot bootloader would not hon
 
 ### 7.4 Jobs and the screen
 
-CALIBRATE goes to the settings screen and does not switch back. A host that wants the measure
-screen back sends SCREEN 1. SETTINGS_SET and COMPARE_SET leave the screen as it is (with bit 21;
+CALIBRATE goes to the settings screen for the sweep and, after its end, closes the calibration
+dialog and returns to the screen it found (revision 10 of MEASUREMENT_FIX_DESIGN; before, it stayed
+in the dialog and a physical long OK was needed). SETTINGS_SET and COMPARE_SET leave the screen as it is (with bit 21;
 the jobs of older firmware went to the settings screen).
 
 ### 7.5 Power-off

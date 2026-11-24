@@ -1046,23 +1046,28 @@ key_step:
 @   refused before dispatch (design 4.3), else 0. Read from the words the dispatchers read:
 @   - screen 0 (0x20001168): every key (the first-start chooser stores 0x20001140 and saves;
 @     not reached in our build, save.s set_english keeps 0x20001140 at 1);
-@   - a calibration running (0x200050E4 != 0) or the CALIBRATE job active: every key;
+@   - a calibration running (cal.s cal_busy: 0x200050E4 != 0 or a sweep of cal.s in progress) or
+@     the CALIBRATE job active: every key;
 @   - a hold of the power key (mask 1);
-@   - key 8 in screen 3 on menu item 5 (0x200011A8: calibration start 0x0800F740..);
 @   - key 8 in screen 3 on menu item 6 while a dialog is open (0x200011AC != 0: restore).
-@   Uses r0..r3.
+@   Key 8 on menu item 5 (the calibration dialog and its start, 0x0800F740..) is not refused
+@   (MEASUREMENT_FIX_DESIGN revision 10 item 4): the host drives that menu as the meter's keys
+@   do, and the calibration it starts is the sweep of cal.s, as one started by the key or by
+@   CALIBRATE. Uses r0..r3, r12.
 @ ----------------------------------------------------------------------------
 	.global	key_refused
 	.thumb_func
 	.type	key_refused, %function
 key_refused:
+	push	{r4, r5, r6, lr}
+	mov	r4, r0			@ r4 = key mask
+	mov	r5, r1			@ r5 = 1 for a hold
+	bl	cal_busy		@ r0 = 1 while a calibration runs
 	ldr	r2, =V_SCREEN
 	ldr	r2, [r2]
 	cmp	r2, #0
 	beq	.Lkr_yes
-	ldr	r3, =V_CAL_RUN
-	ldr	r3, [r3]
-	cmp	r3, #0
+	cmp	r0, #0
 	bne	.Lkr_yes
 	ldr	r3, =OWN_CTL
 	ldr	r12, [r3, #CT_J_ACTIVE]
@@ -1072,19 +1077,17 @@ key_refused:
 	cmp	r12, #C_CALIBRATE
 	beq	.Lkr_yes
 .Lkr_power:
-	cmp	r1, #0
+	cmp	r5, #0
 	beq	.Lkr_ok_key
-	tst	r0, #KEY_POWER
+	tst	r4, #KEY_POWER
 	bne	.Lkr_yes
 .Lkr_ok_key:
-	tst	r0, #KEY_OK
+	tst	r4, #KEY_OK
 	beq	.Lkr_no
 	cmp	r2, #3
 	bne	.Lkr_no
 	ldr	r3, =V_DISP_A8
 	ldr	r3, [r3]		@ menu item
-	cmp	r3, #5
-	beq	.Lkr_yes
 	cmp	r3, #6
 	bne	.Lkr_no
 	ldr	r3, =V_DIALOG
@@ -1093,10 +1096,10 @@ key_refused:
 	bne	.Lkr_yes
 .Lkr_no:
 	movs	r0, #0
-	bx	lr
+	pop	{r4, r5, r6, pc}
 .Lkr_yes:
 	movs	r0, #1
-	bx	lr
+	pop	{r4, r5, r6, pc}
 
 	.ltorg
 
@@ -1220,8 +1223,10 @@ job_press:
 @   moves to the next step (one step per pass).
 @   OP_SCREEN: target screen reached -> next; screen 1 / 2 -> long key 0x400 (1 <-> 2) or
 @     long key 8 (settings); screen 3 -> long key 8 (closes a dialog, then leaves the menu to
-@     the previous screen), on menu item 5 without a dialog first key 2 (item - 1, so that
-@     key 8 is not refused); screen 0 or another: status 3. At most PS_MAX presses.
+@     the previous screen), on menu item 5 without a dialog first key 2 (item - 1; written when
+@     key 8 on item 5 was refused, kept: the only programs with OP_SCREEN, CALIBRATE's, press
+@     with the guard off, and the way out of the menu is the same); screen 0 or another: status
+@     3. At most PS_MAX presses.
 @   OP_PRESS: done when the word at PS_ARG equals the target; else key a, or with a key b:
 @     key a to raise, key b to lower the value, swapped when a press left the value unchanged
 @     or moved it away. PS_MAX presses, then status 3.

@@ -18,7 +18,7 @@ The fixture (fixture_block): the same at all 15 entries of the user table, Zs = 
 2 Mohm at -80 degrees, and the 10 references N_k = 0.01 * 10^(k-1) ohm as a meter would have stored them
 through that fixture (b_k = |Zm_k| - |t0|, theta_k = arg Zm_k, Zm_k = Zs + N_k / (1 + N_k Yo)). The factory
 table keeps the defaults, so a result that matches the fixture's expectation used the user table (m44).
-RUN LIMIT: one run of this file per case prefix, 7 cases.
+RUN LIMIT: one run of this file per case prefix, 8 cases.
 """
 
 import cmath
@@ -363,6 +363,61 @@ def m46_bias_transient():
             check(30.0 <= t_first - t_b <= 32.0, '%s: the first publish %.3f s after the change' % (what, t_first - t_b))
         NOTES.append('m46 %s: first publish %.2f s after the change, %d closes waited' % (what, t_first - t_b, i))
         rig.watch.check(what='m46 %s' % what)
+    return True
+
+# ---------------------------------------------------------------- m48 the sign of |Z| (revision 10 item 5)
+
+@case
+def m48_magnitude_never_negative():
+    """Revision 10 item 5 (the meter, 2026-11-23: MEASURE |Z| -8.86881e-05 ohm, theta 105.42 deg, shorted leads
+    before the short calibration): the stage-1 chain on screen 1 (every entry's short phase -400, so meas_comp
+    returns 0) with a short entry of 0.5 ohm, the references b_k at their nominal values and a part of 0.32 + j
+    0.24 ohm (0.4 ohm at 36.87 degrees, so arg Zbar is far from 0 and theta -+ 180 is one-sided).
+    The part is not smaller: the model's source is ideal (DutSource: the DUT gets the whole generator
+    voltage), so with K_SHORT = 7 counts per volt the current channel at its lowest gain and range (c6 0, c8
+    0, 100 ohm) has p-p 1186 / |Z| counts (V p-p 1518 at c5 7 = 128 x 11.86, the trace of 2026-11-23: V
+    1289..2807; I = V x 100 / |Z|): 0.25 ohm gives 4744, clipped to 0..4095 at every acquisition, so after
+    the overload set (S1.5, published once) nothing is published, as designed; 0.4 ohm gives 2965 (traced:
+    I 566..3530), inside the band 1500..3600, so the codes hold at c5 7 / c6 0 / c8 0.
+    Input checks: |Zdut| below the short entry; every acquisition the window saw after 1 s unsaturated by
+    the firmware's criterion (ocal_clip with the default limits: a code 0 or 4095 is saturation) on both
+    channels; no overload / no-reading set after 1 s; per window |Zbar| - t0 < 0 (the chain's value below
+    0). Expected per publish: |Z| >= 0, |Z| =
+    |d| with d = the decade interpolation of |Zbar| - t0 (below b1: d / b1 * 0.01), theta = arg Zbar - 180
+    for arg Zbar > 0, else + 180; Rs = d cos(arg Zbar), Xs = d sin(arg Zbar) (the chain's complex value,
+    unchanged); bounds of the module docstring (1e-4 relative, 0.01 degree)."""
+    z = [0.5] + NOMINAL + [u32f(F_OPENDEF)]
+    th = [-400.0] + [0.0] * 10 + [0.0]
+    blk = block_with_entry(z, th)
+    zdut = complex(0.32, 0.24)
+    check(abs(zdut) < 0.5, 'm48: the part %.6g is not below the short entry (input)' % abs(zdut))
+    rig = own_rig(DutSource(z=lambda f: zdut, counts_per_volt=M.K_SHORT), block=blk)
+    rig.run(4.0)
+    acqs = [a for a in rig.probe.acqs if a['t'] > 1.0]
+    check(acqs and all(0 < min(a[c]) and max(a[c]) < 4095 for a in acqs for c in ('v', 'i')),
+          'm48: %d acquisitions after 1 s, a saturated one among them (input)' % len(acqs))
+    sets = [p['t'] for p in rig.probe.pubs if p['t'] > 1.0 and is_set(p)]
+    check(not sets, 'm48: the overload / no-reading set at %r' % sets)
+    pubs = rig.probe.normal(1.0)
+    check(len(pubs) >= 3, 'm48: %d publishes' % len(pubs))
+    ent = [0.0] + [f32(v) for v in NOMINAL] + [0.0]
+    for p in pubs:
+        zb = zbar_of(p)
+        d0 = abs(zb) - f32(0.5)
+        check(d0 < 0, 'm48: |Zbar| %.6g is not below the short entry (input)' % abs(zb))
+        d = interp64(ent, d0)
+        a = deg(zb)
+        t_exp = a - 180.0 if a > 0 else a + 180.0
+        gz, gt, rs, xs = (u32f(p[k]) for k in ('Z', 'TH', 'RS', 'XS'))
+        check(gz >= 0 and abs(gz - abs(d)) <= 1e-4 * abs(d) and abs(gt - t_exp) <= 0.01,
+              'm48: |Z| %.7g theta %.5f, expected %.7g / %.5f' % (gz, gt, abs(d), t_exp))
+        check(abs(rs - d * math.cos(math.radians(a))) <= 1e-4 * abs(d)
+              and abs(xs - d * math.sin(math.radians(a))) <= 1e-4 * abs(d),
+              'm48: Rs %.7g Xs %.7g, expected %.7g / %.7g' % (rs, xs, d * math.cos(math.radians(a)),
+                                                            d * math.sin(math.radians(a))))
+    rig.watch.check(what='m48')
+    NOTES.append('m48: %d publishes, the last |Z| %.6g theta %.3f' % (len(pubs), u32f(pubs[-1]['Z']),
+                                                                      u32f(pubs[-1]['TH'])))
     return True
 
 

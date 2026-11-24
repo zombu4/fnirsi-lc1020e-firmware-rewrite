@@ -1872,7 +1872,9 @@ meas_add:
 @   used (meas_comp r0 = 0) and on screen 3 the magnitude chain of
 @   fn_0800a068: |Z|c = |Zbar| on screen 3 with calibration type 0, else |Zbar| minus the short
 @   entry of fn_080090a4(frequency, level), and on screens 1 and 2 the decade interpolation
-@   (meas_interp). Then |Z|c to 0x200050C4, theta to 0x200050CC, Rs = |Z|c cos, Xs = |Z|c sin,
+@   (meas_interp) and meas_polar (a negative |Z|c written as the same complex value with |Z|c
+@   >= 0, theta +-180; revision 10 item 5; screen 3 keeps the signed store quantity of V1.1).
+@   Then |Z|c to 0x200050C4, theta to 0x200050CC, Rs = |Z|c cos, Xs = |Z|c sin,
 @   Rp = |Z|c / cos, Xp = |Z|c / sin (signed infinity for a zero divisor), Cs / Cp = -1e9 /
 @   (w Xs / Xp), Ls / Lp = Xs / Xp 1e6 / w (w = 2 pi f), Q = 0 for Xs = 0, +Inf for Rs = 0, else
 @   |Xs / Rs|; D = 0 for Rs = 0, +Inf for Xs = 0, else |Rs / Xs|; series / parallel: circuit 1
@@ -1995,11 +1997,13 @@ meas_publish:
 	beq	.Lpb_out		@ screen 3: no interpolation
 	bl	ocal_gain_on		@ the gain applied: no decade interpolation (2.1)
 	cmp	r0, #0
-	bne	.Lpb_out
+	bne	.Lpb_polar
 	vmov.f32	s0, s22
 	mov	r0, r7
 	bl	meas_interp
 	vmov.f32	s22, s0
+.Lpb_polar:
+	bl	meas_polar		@ screens 1 and 2: |Z|c >= 0 (revision 10 item 5)
 .Lpb_out:
 	vstr	s22, [r6, #VR_Z]
 	vstr	s19, [r6, #VR_TH]
@@ -2367,6 +2371,36 @@ meas_interp:
 	vdiv.f32	s3, s3, s5
 	vldr	s4, [r2]		@ B_k
 	vadd.f32	s0, s3, s4
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ meas_polar - the stage-1 chain of meas_publish on screens 1 and 2 (MEASUREMENT_FIX_DESIGN
+@   revision 10 item 5): s22 = |Z|c (|Zbar| minus the short entry, then the decade
+@   interpolation unless the OCAL gain was applied), s19 =
+@   theta, s20 / s21 = cos / sin of Zbar. The chain's value is the complex number s22 (s20 + j
+@   s21); with |Zbar| below the short entry s22 is negative, and the same number is written with
+@   a magnitude >= 0: s22 = -s22, s20 = -s20, s21 = -s21 (Rs, Xs, Rp, Xp and all that follows
+@   unchanged bit for bit: IEEE negation is exact) and theta - 180 for theta > 0, else theta +
+@   180 (theta stays in -180..180). s22 >= 0, -0.0 or unordered: nothing changed (bpl after
+@   vcmpe: N clear). Changes r0, s0, s19..s22.
+@ ----------------------------------------------------------------------------
+	.thumb_func
+	.type	meas_polar, %function
+meas_polar:
+	vcmpe.f32	s22, #0
+	vmrs	APSR_nzcv, fpscr
+	bpl	.Lpo_ret		@ not below 0: as it is
+	vneg.f32	s22, s22
+	vneg.f32	s20, s20
+	vneg.f32	s21, s21
+	ldr	r0, =meas_ck
+	vldr	s0, [r0, #CK_180]	@ 180.0
+	vcmpe.f32	s19, #0
+	vmrs	APSR_nzcv, fpscr
+	ite	gt
+	vsubgt.f32	s19, s19, s0	@ theta > 0: theta - 180
+	vaddle.f32	s19, s19, s0	@ else theta + 180
+.Lpo_ret:
 	bx	lr
 
 @ ----------------------------------------------------------------------------

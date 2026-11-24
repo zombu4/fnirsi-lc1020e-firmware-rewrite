@@ -943,9 +943,11 @@ h_compare_set:
 @ and while a calibration runs (4). The meter's procedure with the guard off: settings, menu
 @ item 5, key 8 (dialog), keys 4 / 0x10 to the type (0x200050E0), key 8 (start: 0x200050E4
 @ = 1); then the sweep (cal_step, cal.s; MEASUREMENT_FIX_DESIGN stage 3) runs from the main
-@ loop until status 0x200050EC is 2 (finish, saved by cal_finish) or 3. Progress as events
-@ 0x97. Answer: status u8, type u8, own_save_status u32, failed point u8 (0xFF none), reason u8
-@ (CAL_R_*; capability bit 25).
+@ loop until status 0x200050EC is 2 (finish, saved by cal_finish) or 3. Then (revision 10 item
+@ 4) long key 8 until the dialog is closed and the screen found at the request (0x20001168,
+@ 1..3) again; status 0x200050EC and the failed point stay for the answer (only the type keys
+@ and the start write it). Progress as events 0x97. Answer: status u8, type u8,
+@ own_save_status u32, failed point u8 (0xFF none), reason u8 (CAL_R_*; capability bit 25).
 	.thumb_func
 	.type	h_calibrate, %function
 h_calibrate:
@@ -972,10 +974,11 @@ h_calibrate:
 	ldr	r0, [r0]
 	tst	r0, #SF_HELD | SF_RESTART
 	bne	h_notnow
-	ldr	r0, =V_CAL_RUN
-	ldr	r0, [r0]
+	bl	cal_busy		@ a calibration runs (cal.s): 4
 	cmp	r0, #0
 	bne	h_busy
+	ldr	r0, =V_SCREEN
+	ldr	r5, [r0]		@ r5 = the screen found, to leave at the end
 	bl	prog_reset
 	movs	r0, #KB_GOFF
 	bl	add_settings
@@ -988,6 +991,8 @@ h_calibrate:
 	STEP	OP_KEY, KB_GOFF, 0, KEY_OK, 0, 0, 0			@ key 8: the start
 	STEP	OP_CHECK, 0, 0, S_NOT_NOW, 0, V_CAL_RUN, 1		@ it started, else 3
 	STEP	OP_WAITCAL, 0, 0, 0, 0, 0, 0				@ the sweep's end
+	STEP	OP_NODIALOG, KB_GOFF, 4, 0, 0, 0, 0			@ its dialog closed
+	STEPT	OP_SCREEN, KB_GOFF, 8, 0, 0, 0, r5			@ the screen found
 	movs	r0, #C_CALIBRATE
 	movs	r1, #AN_CAL
 	ldr	r2, =CAL_LIMIT_MS
