@@ -134,7 +134,7 @@ fn_08009400:
 	movs r0, #1
 	strh.w r0, [r4, #0xc14]         @ 0x20001190 = 1
 .ifdef OWN
-	bl own_save                     @ 0x08009474: our save (own/save.s)
+	bl own_off_save                 @ 0x08009474: the power-off note, then our save (own/ctl.s)
 .else
 	bl fn_08014b94
 .endif
@@ -405,7 +405,10 @@ fn_080095f0:
 @     entry 1 (fn_080228d0 and the fn_08021c14 calls with 0x0803da44,
 @     0x0803d2fc). Every path then tail-calls fn_0800f854.
 @   mask 0x40: increments word 0x200011e8 (stored 0 when above 4) and
-@     tail-calls fn_0800f854.
+@     tail-calls fn_0800f854. Our build (.ifdef OWN at 0x080097B8): the load of
+@     0x200011e8 is bl own_sec_key (own/cmp.s), which also sets MF_SECPICK = 1, so
+@     own_auto_class keeps the value the key picks (MEASUREMENT_FIX_DESIGN.md
+@     revisions 16, 17); key_step (own/ctl.s) clears it after fn_08009400.
 @   mask 0x1000: increments word 0x20001150 (stored 0 when above 2); r2 = word
 @     0x2000115c; calls fn_08021c14(word [0x200001e0], p) with p = 0x08040f10
 @     (value 0, r2 nonzero), 0x0803c690 (0, r2 = 0), 0x08041184 (1, r2
@@ -602,7 +605,12 @@ fn_08009614:
 	str.w r9, [r4, #0xbfc]          @ word 0x20001178 = 3
 	b.n .L080097ca
 .L080097b8:
+.ifdef OWN
+	bl own_sec_key                  @ 0x080097B8: MF_SECPICK = 1 and r0 = word 0x200011e8 (own/cmp.s;
+	                                @ reached only for code 1 with mask 0x40, as fn_08009614 read them)
+.else
 	ldr.w r0, [r4, #0xc6c]          @ word 0x200011e8
+.endif
 	.inst.n 0x1c40                  @ adds r0, r0, #1
 	str.w r0, [r4, #0xc6c]
 	cmp r0, #4

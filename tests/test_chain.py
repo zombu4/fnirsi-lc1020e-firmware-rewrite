@@ -310,7 +310,7 @@ def c12_failed_record_word_written_again_in_next_cell():
 # USB_CONTROL_DESIGN.md section 6 (a)..(e) and section 9; bootloader/src/slot_10.s (slot_key_check,
 # slot_app_start, slot_finish, slot_soft_restart, slot_trial_wdg, slot_feed, slot_confirm) and
 # system_05.s main; the no-init words of bootloader/src/slot.inc. Cases c13..c21 need the slots built
-# with SLOT_VERSION 2 (bootloader/Makefile default).
+# with SLOT_VERSION 2 or later (version 3 keeps every feature of 2; bootloader/Makefile default 3).
 
 REQ_WORD, REQ_MAGIC, REQ_RESTART = 0x2001FFF4, 0x55504454, 0x52535452
 HANDOVER_WORD, HANDOVER_TAG = 0x2001FFF8, 0x534C0000
@@ -671,6 +671,169 @@ def c19_starter_trial_append_fails_slot_starts_without_watchdog():
     check('slot1 confirm' in m.events() and not [x for x in m.flash_ops() if x[1] >= REC0 + 64],
           'slot_confirm wrote a record')
     NOTES.append('c19: documented: TRIAL append failed 3 times -> slot A started as INSTALL, no watchdog, no OK')
+    return True
+
+
+# ---------------------------------------------------------------- slot bootloader version 3
+# The three clock waits of the slot's start-up code end after CLK_POLLS = 0x8000 reads
+# (bootloader/src/slot.inc; board_02.s fn_08002598 .Lslot_hsi and the slot copy of fn_080020c4,
+# .Lslot_pll, .Lslot_sw / .Lslot_back). The RCC rules are the opt-in ones of tests/meter_model.py
+# (pll_locks, sws_stuck, rcc_switch_reads, pll_lock_reads, rcc_strict). Under the rules of c23..c25 a
+# wait without a bound (slot version 2) never ends: the start would end 'timeout' after the
+# instruction budget of boot() instead of reaching the application or update mode.
+
+RCC_CTRL, RCC_CFG, FLASH_AC = 0x40021000, 0x40021004, 0x40022000
+PLLEN, HSEEN, PLL_FIELDS = 1 << 24, 1 << 16, 0x083F0000
+APB_DIVS = 0x2500          # RCC_CFG |= 0x2000 (APB2 / 2) and |= 0x500 (APB1 / 4), fn_080020c4
+CLK_POLLS = 0x8000
+
+
+def clock_start(setup, key, strict=True):
+    """One start of OK A with the application stub, the RCC rules set by setup(m), the key as given;
+    rcc_strict on unless strict is False. Returns the meter after the start (application or update
+    mode reached, checked; no violation, no flash write)."""
+    m = Meter(records=[(REC0, cell(1, ST_OK, 1))], app=app_stub())
+    m.rcc_strict = strict
+    setup(m)
+    m.key_pressed = key
+    m.boot()
+    what = 'key %s' % key
+    clean(m, what)
+    if key:
+        update_reached(m, 1, what)
+    else:
+        app_reached(m, what)
+    check(started(m) == ['slot1 reset'], '%s: started %r' % (what, started(m)))
+    check(not m.flash_ops(), '%s: wrote %r' % (what, m.flash_ops()))
+    return m
+
+
+@case
+def c22_slot_headers_version_3():
+    """Header word +12 of BOOT_F / A / B = 3 (bootloader/Makefile SLOT_VERSION, tools/slot_header.py).
+    The starter's header_ok does not read it (starter/starter.s); the application's UPDATE_MODE and
+    RESET require 2 or more and refuse 0xFFFFFFFF (firmware/own/cmd.s h_update_mode, h_reset)."""
+    m = Meter(records=[], app=app_stub())
+    got = [struct.unpack_from('<I', m.flash, base - 0x08000000 + 12)[0] for base in SLOTS]
+    check(got == [3, 3, 3], 'header versions %r' % got)
+    return True
+
+
+@case
+def c23_slot_hsi_switch_bound():
+    """SCLKSTS stuck at 10 (sws_stuck 2: the PLL keeps running the core): fn_08002598's wait for
+    SCLKSTS = 00 ends after CLK_POLLS reads and goes straight to the VTOR store: no RCC_CTRL store
+    after HSIEN (no PLLEN / HSEEN clear, rcc_strict would report one), no FLASH_AC store (neither
+    fn_08002598's |= 0x90 nor fn_080020c4's LATENCY stores, the only two writers, check_never_brick
+    D2), RCC_CFG holds only the SCLKSW = 00 write. Application start and update mode both reached.
+    The write is read-modify-write (ldr, bic #3, str): it carries the SCLKSTS bits 3:2 as read (10,
+    the stuck PLL status: 0x8, Run of 2026-11-24), which the chip ignores (manual RCC_CFG, UM line
+    6328: SCLKSTS "Set and cleared by hardware"); so the writable bits are compared (mask ~0xC)."""
+    for key in (False, True):
+        m = clock_start(lambda mm: setattr(mm, 'sws_stuck', 2), key)
+        regs = m.st['regs']
+        check(FLASH_AC not in regs, 'key %s: FLASH_AC written 0x%X' % (key, regs.get(FLASH_AC, 0)))
+        check(regs.get(RCC_CTRL) == 1, 'key %s: RCC_CTRL 0x%08X, expected HSIEN only' % (key, regs.get(RCC_CTRL, 0)))
+        if not key:
+            check(regs.get(RCC_CFG, 0) & ~0xC == 0, 'RCC_CFG 0x%08X, expected 0 in the writable bits (SCLKSW = 00 only)'
+                  % regs.get(RCC_CFG, 0))
+    return True
+
+
+@case
+def c24_slot_pll_lock_bound():
+    """The PLL never locks (pll_locks False): fn_080020c4's PLLRDF wait ends after CLK_POLLS reads,
+    PLLEN is cleared, the APB prescaler bits 0x2500 are cleared, the HSE-failure exit returns; the
+    core stays on the HSI (SCLKSW 00). HSEEN stays set, the PLL fields as written (PLLSRC HSE,
+    0x08040000), FLASH_AC = 0x90 | LATENCY 4. Application start and update mode both reached (on the
+    meter USB has no 48 MHz clock then: USBCLK comes from the PLL, manual 6.2.4)."""
+    for key in (False, True):
+        m = clock_start(lambda mm: setattr(mm, 'pll_locks', False), key)
+        regs = m.st['regs']
+        ctrl, cfg = regs.get(RCC_CTRL, 0), regs.get(RCC_CFG, 0)
+        check(not ctrl & PLLEN and ctrl & HSEEN, 'key %s: RCC_CTRL 0x%08X' % (key, ctrl))
+        check(cfg & 3 == 0 and not cfg & APB_DIVS and cfg & PLL_FIELDS == 0x08050000,
+              'key %s: RCC_CFG 0x%08X' % (key, cfg))
+        check(regs.get(FLASH_AC) == 0x94, 'key %s: FLASH_AC 0x%X' % (key, regs.get(FLASH_AC, 0)))
+    return True
+
+
+@case
+def c25_slot_switch_to_pll_bound():
+    """SCLKSTS stuck at 00 (sws_stuck 0: the switch to the PLL never happens): fn_080020c4's wait for
+    SCLKSTS = 10 ends after CLK_POLLS reads, SCLKSW = 00 is written again, the wait back ends at its
+    first read (SCLKSTS 00), the APB prescaler bits are cleared, the HSE-failure exit returns. The
+    PLL stays enabled (nothing selects it). Application start and update mode both reached."""
+    for key in (False, True):
+        m = clock_start(lambda mm: setattr(mm, 'sws_stuck', 0), key)
+        regs = m.st['regs']
+        ctrl, cfg = regs.get(RCC_CTRL, 0), regs.get(RCC_CFG, 0)
+        check(ctrl & PLLEN and ctrl & HSEEN, 'key %s: RCC_CTRL 0x%08X' % (key, ctrl))
+        check(cfg & 3 == 0 and not cfg & APB_DIVS, 'key %s: RCC_CFG 0x%08X' % (key, cfg))
+    return True
+
+
+class RccCfgLate:
+    """RCC_CFG 0x40021004 as a plain register, except SCLKSTS (bits 3:2): it reads SCLKSW until the
+    first write that sets SCLKSW = 10; after that write the next `late` reads give 00 and every
+    later read gives 10, whatever SCLKSW says (a switch to the PLL that completes just after the
+    last poll of fn_080020c4's bounded wait and is not undone within the wait back)."""
+    ranges = [(0x40021004, 0x40021008)]
+
+    def __init__(self, late):
+        self.value, self.late, self.armed, self.reads = 0, late, False, 0
+
+    def read(self, m, a, size):
+        if not self.armed:
+            sws = self.value & 3
+        else:
+            self.reads += 1
+            sws = 0 if self.reads <= self.late else 2
+        return (self.value & ~0xC) | sws << 2
+
+    def write(self, m, a, size, value):
+        if size == 4:
+            if value & 3 == 2 and self.value & 3 != 2:
+                self.armed = True
+            self.value = value
+
+
+@case
+def c26_slot_switch_late_prescalers_stay():
+    """RccCfgLate with late = CLK_POLLS: the switch wait's CLK_POLLS reads give 00 (timeout), the
+    reads after them give 10: SCLKSW = 00 is written, the wait back reads 10 CLK_POLLS times and runs
+    out too, so the APB prescaler bits stay set (the PLL may run the core: PCLK2 <= 72 MHz, PCLK1 <=
+    36 MHz need them, manual lines 6294 / 6302), then the HSE-failure exit. Reads of RCC_CFG after
+    the arming write: CLK_POLLS (switch wait) + 1 (the read before SCLKSW = 00) + CLK_POLLS (wait back).
+    rcc_strict is off: the device holds RCC_CFG, which the model's strict rules read from the register
+    file."""
+    dev = {}
+
+    def setup(mm):
+        dev['d'] = mm.attach(RccCfgLate(CLK_POLLS))
+    m = clock_start(setup, False, strict=False)
+    d = dev['d']
+    check(d.value & 3 == 0 and d.value & APB_DIVS == APB_DIVS, 'RCC_CFG 0x%08X' % d.value)
+    check(m.st['regs'].get(RCC_CTRL, 0) & PLLEN, 'PLLEN cleared')
+    check(d.reads >= 2 * CLK_POLLS + 1, 'RCC_CFG reads after SCLKSW = 10: %d' % d.reads)
+    NOTES.append('c26: RCC_CFG reads from SCLKSW = 10 to the application start: %d' % d.reads)
+    return True
+
+
+@case
+def c27_slot_clock_slow_but_within_bounds():
+    """The PLL locks after 1000 reads (pll_lock_reads) and the switch to it completes after 1000 reads
+    (rcc_switch_reads), both far below CLK_POLLS: the normal path, the PLL runs the core (SCLKSW 10,
+    PLLEN set, prescaler bits 0x2500 set), application start and update mode reached."""
+    def setup(mm):
+        mm.pll_lock_reads = 1000
+        mm.rcc_switch_reads = 1000
+    for key in (False, True):
+        m = clock_start(setup, key)
+        regs = m.st['regs']
+        ctrl, cfg = regs.get(RCC_CTRL, 0), regs.get(RCC_CFG, 0)
+        check(ctrl & PLLEN, 'key %s: RCC_CTRL 0x%08X' % (key, ctrl))
+        check(cfg & 3 == 2 and cfg & APB_DIVS == APB_DIVS, 'key %s: RCC_CFG 0x%08X' % (key, cfg))
     return True
 
 

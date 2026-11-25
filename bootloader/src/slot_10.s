@@ -10,7 +10,8 @@
 @                 -> slot_fault
 @   board_02.s    fn_08002598: SYSCLK switched to HSI and SCLKSTS waited for first (a soft
 @                 restart enters with the PLL running); VTOR = this image's own vector
-@                 table, interrupts enabled
+@                 table, interrupts enabled; fn_080020c4: a slot copy with the bounded
+@                 PLL-lock and switch waits (feature version 3, below)
 @   update_06.s   fn_08000e24 / fn_08000eb4 (page erase / word program) -> flash_gate first;
 @                 fn_0800159c: drive size DRIVE_SECTORS; fn_080015b8 -> slot_read_sector;
 @                 fn_080015c2 -> uf2_sector
@@ -24,6 +25,10 @@
 @ slot_soft_restart), the watchdog of a trial start (slot_trial_wdg) and its feeds (slot_feed:
 @ slot_confirm, slot_app_start, the update-mode loop, slot_finish, slot_soft_restart,
 @ uf2_erase_page, uf2_program, uf2_finish).
+@ Feature version 3: the three clock waits of the start-up code end after CLK_POLLS reads
+@ (slot.inc; board_02.s fn_08002598 .Lslot_hsi, and the slot copy of fn_080020c4, .Lslot_pll,
+@ .Lslot_sw / .Lslot_back). They run before main, before any watchdog of a start from power-on;
+@ no code of this file is involved.
 
 	.syntax unified
 	.arch armv7e-m

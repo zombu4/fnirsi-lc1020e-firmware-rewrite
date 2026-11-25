@@ -13,6 +13,23 @@
 @ SLOT_INDEX (0 F, 1 A, 2 B) comes from the command line (--defsym), one build per slot.
 @ Feature version 2 (header word +12, bootloader/Makefile SLOT_VERSION): update request word,
 @ hand-over word, result word, the watchdog of a trial start and the feeds of the update path.
+@ Feature version 3: the three clock waits of the start-up code bounded (src/board_02.s
+@ fn_08002598 and fn_080020c4, slot build; constants below).
+
+@ Clock waits (feature version 3; N32G45x user manual 6.3.2 RCC_CTRL, 6.3.3 RCC_CFG). RCC_CTRL
+@ 0x40021000: PLLEN bit 24, PLLRDF bit 25; RCC_CFG 0x40021004: SCLKSW bits 1:0, SCLKSTS bits 3:2
+@ (00 HSI, 10 PLL); the APB prescaler bits fn_080020c4 sets before PLLEN (`orr #0x2000` APB2 / 2,
+@ `orr #0x500` APB1 / 4; bits 13:8 are 0 before them, fn_08002598 masks RCC_CFG with 0xF8FFC000).
+@ CLK_POLLS: the bound of every wait, the 0x8000 polls of fn_080020c4's own HSE wait and of the
+@ application's waits (firmware/own/own.inc CLK_POLLS, own/boot.s).
+        .equ    CLK_POLLS,      0x8000
+        .equ    RCC_PLLEN,      0x01000000
+        .equ    RCC_PLLRDF,     0x02000000
+        .equ    RCC_SCLKSW,     0x00000003
+        .equ    RCC_SCLKSTS,    0x0000000C
+        .equ    RCC_SCLK_PLL,   0x00000008      @ SCLKSTS = 10: the PLL runs the core
+        .equ    RCC_APB2_DIV2,  0x00002000
+        .equ    RCC_APB1_DIV4,  0x00000500
 
         .equ    APP_BASE,       0x08006000      @ application vector table
         .equ    APP_VEC_END,    0x08006800      @ end of the application vector page

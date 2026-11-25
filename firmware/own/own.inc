@@ -160,6 +160,38 @@
         .equ    RES_IMAGE,      2               @ image check failed
         .equ    RES_PROGRAM,    3               @ programming failed
 
+@ Start-up diagnostics (own/boot.s; MEASUREMENT_FIX_DESIGN.md revision 17, 17.2). Two more
+@ no-init words below FAULT_FLAG: 0x2001E000..0x2001FFEF lies outside every area a start code
+@ writes (starter below 0x20002000 and 0x20000000..0x2000003F, slot below 0x20002B00, the
+@ application's scatter-load 0x20000000..0x200163A7 (src/rodata_04.s region table) and its stack
+@ below 0x200163A8, own_start's clear 0x20018000..0x2001DFFF).
+        .equ    BOOT_PREV,      0x2001FFE8      @ the progress word the previous start left
+                                                @ (copied by own_reset; 0 when its tag is not ours)
+        .equ    BOOT_PROG,      0x2001FFEC      @ progress word of this start: tag << 16 | clock
+                                                @ flags << 8 | stage (byte 0, written alone)
+        .equ    BOOT_TAG,       0x5350          @ "SP"
+        .equ    CLKF_HSI,       0x01            @ clock flags (byte 1): the switch to the HSI timed out
+        .equ    CLKF_PLL,       0x02            @ the PLL did not lock
+        .equ    CLKF_SW,        0x04            @ the switch to the PLL timed out
+        .equ    CLK_POLLS,      0x8000          @ polls of every clock wait (as fn_0800ba4c's HSE wait)
+        .equ    STG_RESET,      1               @ stages (byte 0), each written before what it names:
+        .equ    STG_CLOCK,      2               @ the clock set-up done (own_reset)
+        .equ    STG_GPIO,       3               @ own_pa8_level (fn_08008200, after the scatter-load)
+        .equ    STG_START,      4               @ own_start entered
+        .equ    STG_LOAD,       5               @ own_load (0x08028030)
+        .equ    STG_814C,       6               @ fn_0800814c (0x0802817C)
+        .equ    STG_LCD,        7               @ fn_08009c14, LCD set-up (0x08028180)
+        .equ    STG_LOGO,       8               @ fn_0800ce54, start-up animation (0x0802818A)
+        .equ    STG_B0D8,       9               @ fn_0800b0d8 (0x0802818E)
+        .equ    STG_87D4,       10              @ fn_080087d4 (0x08028192)
+        .equ    STG_8024,       11              @ fn_08008024 (0x08028196)
+        .equ    STG_CA2C,       12              @ 0x0802819A, 0x20001140 not 0: fn_0800ca2c next,
+                                                @ then fn_08008120(50), the IWDG start fn_08010178
+                                                @ and the print "loop"
+        .equ    STG_C86C,       13              @ 0x0802819A, 0x20001140 = 0: fn_0800c86c next
+                                                @ (first-start chooser), then the same as 12
+        .equ    STG_LOOP,       14              @ the first pass of ctl_loop (the main loop)
+
 @ ============================================================================
 @ Registers (N32G45x user manual V3.5.0, docs/; ARMv7-M architecture for the NVIC / SCB)
 @ ============================================================================
@@ -244,6 +276,26 @@
         .equ    RCC_USBPRES,    0x00C00000
         .equ    RCC_SCLKSTS,    0x0000000C
         .equ    RCC_SCLK_PLL,   0x00000008
+@ RCC_CTRL +0x00 (6.3.2): HSIEN bit 0, PLLEN bit 24, PLLRDF bit 25; RCC_CFG SCLKSW bits 1:0 (6.3.3,
+@ 00 HSI, 10 PLL); RCC_CTRLSTS +0x24 (6.3.11, reset value 0x0C000003): reset flags bits 31..25,
+@ 23, 21..19, RMRSTF bit 24 (written 1: the flags cleared), bits 18:2 and 22 reserved, LSIRD
+@ bit 1, LSIEN bit 0.
+        .equ    RCC_CTRL,       0x40021000
+        .equ    RCC_HSIEN,      0x00000001
+        .equ    RCC_PLLEN,      0x01000000
+        .equ    RCC_PLLRDF,     0x02000000
+        .equ    RCC_SCLKSW,     0x00000003
+@ The two prescaler ors of fn_0800ba4c (src/system_40.s, after the LATENCY 4 store, before the PLL
+@ is enabled): RCC_CFG |= 0x2000 (APB2PRES 100, HCLK / 2, manual line 6292) and |= 0x500 (APB1PRES
+@ 101, HCLK / 4, line 6300); fn_0800c274's mask 0xF8FFC000 has cleared bits 13:8 before them.
+        .equ    RCC_APB2_DIV2,  0x00002000
+        .equ    RCC_APB1_DIV4,  0x00000500
+        .equ    RCC_CTRLSTS,    0x40021024
+        .equ    RCC_RMRSTF,     0x01000000
+        .equ    RCC_RSTFLAGS,   0xFEB80000
+@ SCB CPACR (ARMv7-M): CP10 / CP11 full access, bits 23:20, as fn_0800c274 sets them
+        .equ    SCB_CPACR,      0xE000ED88
+        .equ    CPACR_FPU,      0x00F00000
 
 @ EXTI pending register: line 18 (USB wake-up) cleared by writing 0x40000 (as 0x0800FB40 ->
 @ 0x08008D14, USB_CONTROL_DESIGN.md section 3)
@@ -277,6 +329,21 @@
         .equ    DMA2_CH5,       0x40020458
         .equ    DMA2_CH8,       0x40020494
         .equ    DMA_CHEN,       0x00000001
+
+@ TIM1 (manual 11.4: CTRL1 +0x00, STS +0x10, CNT +0x24, AR +0x2C): its CC3 match (CCDAT3 = 1,
+@ meas.s own_tim1_setup) triggers every conversion of ADC1..3 (EXTRSEL TIM1_CC3). fix.s tq_pair
+@ keeps the CHEN store pairs of DMA1 channels 1 and 8 away from a conversion end.
+        .equ    TIM1_BASE,      0x40012C00
+        .equ    TIM_CTRL1,      0x00
+        .equ    TIM_STS,        0x10
+        .equ    TIM_CNT,        0x24
+        .equ    TIM_AR,         0x2C
+        .equ    TIM_CNTEN,      0x0001          @ CTRL1 bit 0: the counter counts
+        .equ    TIM_CC3ITF,     0x0008          @ STS bit 3: CNT matched CCDAT3 (rc_w0)
+        .equ    TIM_STS_CC3CLR, 0x00031EF7      @ STS write: CC3ITF 0, every other flag bit
+                                                @ (0..7, 9..12, 16, 17) 1 = unchanged,
+                                                @ reserved bits 0 (their reset value)
+        .equ    TQ_POLLS,       0x8000          @ CNT reads of tq_pair before it gives up
 
 @ ============================================================================
 @ Flash layout
@@ -478,10 +545,13 @@
         .equ    CAP_OCAL,       1 << 26         @ the own calibration area (ocal.s, OWN_CAL_DESIGN.md
                                                 @ revision 3): OCAL_INFO .. OCAL_TRACE, MONITOR,
                                                 @ event OCAL_CHANGED, MEASURE byte 65
+        .equ    CAP_BOOTDIAG,   1 << 27         @ start-up diagnostics (boot.s, MEASUREMENT_FIX_DESIGN.md
+                                                @ revision 17): INFO bytes 46..57 (the previous
+                                                @ start's progress word, this start's, RCC_CTRLSTS)
 
 @ ============================================================================
 @ Our RAM: 0x20018000..0x2001DFFF (24 KiB above the vendor stack top 0x200163A8, below the
-@ no-init words 0x2001FFF0..0x2001FFFF), absolute addresses only (no section is placed there),
+@ no-init words 0x2001FFE8..0x2001FFFF), absolute addresses only (no section is placed there),
 @ cleared by own_start. Every module owns one area and writes only inside it; another module's
 @ words are read, never written (ctl.s's own_injected is read by save.s).
 @ ============================================================================
@@ -538,11 +608,58 @@
         .equ    OWN_FUNC,       OWN_RAM + O_FUNC
         .equ    OWN_CAL,        OWN_RAM + O_CAL
         .equ    OWN_OCAL,       OWN_RAM + O_OCAL
+@ Area checks (revision 17, 17.6): every area ends at or below the start of the next, in the
+@ order of the offsets above; the staging buffer's size is BLK_SIZE (the settings block it
+@ holds, save.s header line 37: 0xC14 bytes). Our RAM lies above the vendor's RAM and stack
+@ (V_STACK_TOP, the end of the scatter-load region table) and below the no-init words
+@ (BOOT_PREV, BOOT_PROG, then FAULT_FLAG).
+        .if     V_STACK_TOP > OWN_RAM
+        .error  "own.inc: our RAM starts below the vendor stack top"
+        .endif
+        .if     O_RX_RING + RX_RING_SIZE > O_TX_RING
+        .error  "own.inc: O_RX_RING overlaps O_TX_RING"
+        .endif
+        .if     O_TX_RING + TX_RING_SIZE > O_STAGE
+        .error  "own.inc: O_TX_RING overlaps O_STAGE"
+        .endif
+        .if     O_STAGE + BLK_SIZE > O_SAVE
+        .error  "own.inc: O_STAGE overlaps O_SAVE"
+        .endif
+        .if     O_SAVE + SAVE_SIZE > O_USB
+        .error  "own.inc: O_SAVE overlaps O_USB"
+        .endif
+        .if     O_USB + USB_SIZE > O_SCREEN
+        .error  "own.inc: O_USB overlaps O_SCREEN"
+        .endif
+        .if     O_SCREEN + SCREEN_SIZE > O_CTL
+        .error  "own.inc: O_SCREEN overlaps O_CTL"
+        .endif
+        .if     OWN_RAM + OWN_RAM_SIZE > BOOT_PREV
+        .error  "own.inc: our RAM overlaps the no-init word BOOT_PREV"
+        .endif
+        .if     BOOT_PREV + 4 > BOOT_PROG
+        .error  "own.inc: BOOT_PREV overlaps BOOT_PROG"
+        .endif
+        .if     BOOT_PROG + 4 > FAULT_FLAG
+        .error  "own.inc: BOOT_PROG overlaps FAULT_FLAG"
+        .endif
         .if     O_OCAL + OCAL_SIZE > O_CAL
         .error  "own.inc: O_OCAL overlaps O_CAL"
         .endif
         .if     O_CTL + CTL_SIZE > O_OCAL
         .error  "own.inc: O_CTL overlaps O_OCAL"
+        .endif
+        .if     O_CAL + CAL_SIZE > O_FUNC
+        .error  "own.inc: O_CAL overlaps O_FUNC"
+        .endif
+        .if     O_FUNC + FUNC_SIZE > O_MEAS
+        .error  "own.inc: O_FUNC overlaps O_MEAS"
+        .endif
+        .if     O_MEAS + MEAS_SIZE > O_PWR
+        .error  "own.inc: O_MEAS overlaps O_PWR"
+        .endif
+        .if     O_PWR + PWR_SIZE > OWN_RAM_SIZE
+        .error  "own.inc: O_PWR runs past the end of our RAM"
         .endif
         .equ    OWN_PWR,        OWN_RAM + O_PWR
 
@@ -592,8 +709,9 @@
         .equ    MF_RHI,         0x90            @ meas.s: the same for I (0x90 current, 0x92 previous)
         .equ    MF_RHT,         0x94            @ meas.s: tick word 0x20000480 at the bucket's start
         .equ    MF_RHN,         0x98            @ meas.s: settled acquisitions in the current bucket
-        .equ    MF_SECPICK,     0x9C            @ cmp.s own_sec_pick (callers: own_cmp_key, key_step
-                                                @ after fn_08009400, dset.s ds_secondary): 1 while
+        .equ    MF_SECPICK,     0x9C            @ cmp.s own_sec_key (1, at 0x080097B8) and own_sec_pick
+                                                @ (key_step 0 after fn_08009400, dset.s
+                                                @ ds_secondary 1 / 0; revision 17): 1 while
                                                 @ the secondary key or LCR_SET secondary is handled
                                                 @ (own_auto_class keeps that secondary), else 0
         .equ    MF_END,         0xA0
@@ -662,7 +780,10 @@
 
 @ meas.s words written by another module (offsets in its area; the others: meas.s header)
         .equ    MO_G,           0x00            @ re-arm generation: +1 per re-arm of DMA1 channel 1,
-                                                @ written only by own_dma_rearm (fix.s) inside the
+                                                @ +1 more when tq_pair could not prove that V and I
+                                                @ start on the same conversion (the acquisition is
+                                                @ then not ours, own_measure re-arms); written only
+                                                @ by own_dma_rearm / tq_pair (fix.s) inside the
                                                 @ DMA2 channel 3 interrupt; meas.s only reads it
 
 @ save.s words (offsets in its area)

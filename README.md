@@ -66,7 +66,8 @@ The result is `firmware/build/own/APP_OWN.uf2`.
 ## Testing
 
 The tests run in an emulator of the chip, its USB device and the measurement hardware. They need
-[Unicorn](https://www.unicorn-engine.org/):
+[Unicorn](https://www.unicorn-engine.org/) and a C compiler (`cc`, for the emulator's instruction
+counter `tests/blockcount.c`, built on first use):
 
     python3 -m venv venv && venv/bin/pip install unicorn
     venv/bin/python -I tests/check_never_brick.py --app

@@ -22,7 +22,7 @@
  * own_image_end must stay at or below 0x08062000, the end of the application area of the
  * two-part bootloader (bootloader/src/slot.inc APP_END).
  *
- * Our RAM 0x20018000..0x2001DFFF and the no-init words 0x2001FFF0..0x2001FFFF are absolute
+ * Our RAM 0x20018000..0x2001DFFF and the no-init words 0x2001FFE8..0x2001FFFF are absolute
  * addresses in own/own.inc: no section is placed in RAM, and the ASSERT below refuses an
  * image whose objects hold any .data or .bss bytes.
  */

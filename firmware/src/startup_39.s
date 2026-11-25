@@ -45,6 +45,9 @@ fn_08006260:
 @ (0x08006271). No parameters, never returns.
 @ Calls fn_0800c274 (address from the literal at 0x0800628c) with blx, then
 @ jumps with bx to the word at 0x08006290 (0x08006259 = fn_08006258).
+@ Our build (.ifdef OWN at the literal 0x0800628C): the call goes to own_reset
+@ (own/boot.s: progress word, SCLKSW = HSI alone with a bounded wait for SCLKSTS,
+@ then fn_0800c274; MEASUREMENT_FIX_DESIGN.md revision 17).
 @ ----------------------------------------------------------------------------
 	.section .text.Reset_Handler,"ax",%progbits
 	.p2align 2
@@ -159,6 +162,10 @@ branch_to_self_08006288:
 branch_to_self_0800628a:
 	b.n	branch_to_self_0800628a
 .L0800628c:
+.ifdef OWN
+	.word	own_reset		@ 0x0800628C: own/boot.s, which then calls fn_0800c274
+.else
 	.word	fn_0800c274
+.endif
 .L08006290:
 	.word	fn_08006258

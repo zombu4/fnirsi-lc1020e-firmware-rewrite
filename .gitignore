@@ -9,3 +9,7 @@ __pycache__/
 .claude/
 **/assets/vendor/
 starter/build/
+# a worktree links these to the main checkout's build directories; a pattern with a trailing
+# slash matches only a directory, not a symbolic link
+bootloader/build
+starter/build

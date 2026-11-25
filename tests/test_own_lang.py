@@ -370,10 +370,11 @@ def l05_settings_set_ids_and_jobs():
     rig = Ctl().up()
     info = rig.ask_ok('INFO', size=INFO_SIZE)
     caps = struct.unpack_from('<I', info, 1)[0]
-    check(caps == 0x07EFFFFF and not caps >> 20 & 1, 'capabilities 0x%X' % caps)   # bits 22..24:
+    check(caps == 0x0FEFFFFF and not caps >> 20 & 1, 'capabilities 0x%X' % caps)   # bits 22..24:
                                                      # MEASUREMENT_FIX_DESIGN.md stage 2 (revision 6),
                                                      # bit 25 the stage-3 sweep (revision 7), bit 26
-                                                     # the own calibration area (ocal.s)
+                                                     # the own calibration area (ocal.s), bit 27 the
+                                                     # start-up diagnostics (boot.s, revision 17)
     for p in (b'', b'\x00', b'\x01'):
         st, d = rig.ask('SETUP_LANGUAGE', p)
         check(st == S_UNKNOWN and not d, 'SETUP_LANGUAGE %r: status %d data %r' % (p, st, d))

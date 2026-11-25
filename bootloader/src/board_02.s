@@ -4,6 +4,9 @@
 	.arch armv7e-m
 	.fpu fpv4-sp-d16
 	.thumb
+.ifdef SLOT
+	.include "src/slot.inc"
+.endif
 
 @ ----------------------------------------------------------------------------
 @ fn_08001ad8 - set or clear bits in RCC_APB1PRST (0x40021010).
@@ -205,12 +208,154 @@ fn_08001b20:
 @ RCC_CTRL bit 24 is set and
 @ polled until bit 25 is set; RCC_CFG bits 1:0 are cleared and bit 1 set, and
 @ the function waits until RCC_CFG bits 3:2 read 2. Returns nothing.
+@ Slot build (feature version 3, src/slot.inc): the function is assembled from the copy under
+@ .ifdef SLOT below, the stock code under .else is untouched (make check). The copy is the stock
+@ code instruction for instruction except:
+@ - labels .Lslot_* in place of the stock .L080020xx / .L080021xx;
+@ - the bit-17 test after the HSE wait is `cmp r1, #0; beq.n .Lslot_exit` instead of the stock
+@   `cbz r1, .L08002170` (the bounded waits below lengthen its span past the cbz range of 126 bytes);
+@ - the HSE-failure exit .Lslot_exit without the stock branch to the next instruction (.L08002170
+@   `b.n .L08002172`) and without the padding halfword (the code is 244 bytes, a multiple of 4, so
+@   the literal words stay word aligned);
+@ - PLL lock: up to CLK_POLLS (0x8000, the bound of the HSE wait above) reads of RCC_CTRL until
+@   PLLRDF (bit 25). Timeout: PLLEN cleared (SCLKSW is still 00, so the PLL is not the system clock,
+@   manual 6.3.2), the two APB prescaler fields set above cleared again (.Lslot_apb), then the stock
+@   HSE-failure exit (.Lslot_exit): the core stays on the HSI;
+@ - switch to the PLL: up to CLK_POLLS reads of RCC_CFG until SCLKSTS = 10. Timeout: SCLKSW = 00
+@   again (the HSI is ready: it ran the core when SCLKSW = 10 was written), up to CLK_POLLS reads
+@   until SCLKSTS = 00, and only once it reads 00 the prescaler fields cleared (should SCLKSTS read
+@   10 after all, the PLL's 144 MHz needs them: PCLK2 <= 72 MHz, PCLK1 <= 36 MHz, manual lines 6294,
+@   6302); then the same exit. The PLL stays enabled (nothing selects it).
+@ The same three exits as the application's own_pll_wait / own_sw_wait (firmware/own/boot.s).
+@ The exit stores 8000000 to 0x20000060; reset_handler runs the scatter-load after this code
+@ (fn_08000198, src/system_05.s), which copies the initial RAM image over it (src/rodata.s:
+@ 0x20000060 = 0x08954400, 144 MHz), as on the stock bootloader's own HSE-failure path.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_080020c4,"ax",%progbits
 	.p2align 2
 	.global fn_080020c4
 	.thumb_func
 	.type fn_080020c4, %function
+.ifdef SLOT
+fn_080020c4:
+	push	{r2, r3, lr}
+	movs	r0, #0
+	str	r0, [sp, #0]		@ local status byte = 0
+	strb.w	r0, [sp, #0]
+	str	r0, [sp, #4]		@ local timeout counter = 0
+	ldr	r0, .Lslot_rcc		@ r0 = 0x40021000 (RCC base)
+	ldr	r1, [r0, #0]
+	orr	r1, r1, #0x10000	@ RCC_CTRL bit 16
+	str	r1, [r0, #0]
+	mov.w	r2, #0x8000		@ timeout limit
+.Lslot_hse:
+	ldr	r1, [r0, #0]
+	ubfx	r1, r1, #0x11, #1	@ RCC_CTRL bit 17
+	strb.w	r1, [sp, #0]
+	ldr	r1, [sp, #4]
+	.inst.n	0x1c49			@ adds r1, r1, #1
+	str	r1, [sp, #4]
+	ldrb.w	r1, [sp, #0]
+	cbnz	r1, .Lslot_hse_end
+	ldr	r1, [sp, #4]
+	cmp	r1, r2
+	bne.n	.Lslot_hse
+.Lslot_hse_end:
+	ldr	r1, [r0, #0]
+	ubfx	r1, r1, #0x11, #1
+	strb.w	r1, [sp, #0]
+	ldrb.w	r1, [sp, #0]
+	cmp	r1, #0
+	beq.n	.Lslot_exit		@ bit 17 never came up (stock: cbz)
+	ldr	r1, .Lslot_flash	@ r1 = 0x40022000
+	ldr	r2, [r1, #0]
+	bic	r2, r2, #7
+	str	r2, [r1, #0]
+	ldr	r2, [r1, #0]
+	orr	r2, r2, #4
+	str	r2, [r1, #0]
+	ldr	r1, [r0, #4]		@ RCC_CFG, rewritten with itself
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	orr	r1, r1, #0x2000		@ RCC_APB2_DIV2
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	orr	r1, r1, #0x500		@ RCC_APB1_DIV4
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	ldr	r2, .Lslot_mask		@ mask 0xF7C0FFFF
+	ands	r1, r2
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	ldr	r2, .Lslot_mul		@ 0x08040000: RCC_CFG PLLMULFCT bits 27 and 18 (x 18)
+	orr	r1, r1, #0x10000
+	orrs	r1, r2
+	str	r1, [sp, #0]
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #0]
+	orr	r1, r1, #0x1000000	@ RCC_CTRL bit 24 (PLLEN)
+	str	r1, [r0, #0]
+	mov.w	r2, #CLK_POLLS		@ PLL lock: at most CLK_POLLS reads
+.Lslot_pll:
+	ldr	r1, [r0, #0]
+	tst	r1, #RCC_PLLRDF
+	bne.n	.Lslot_pll_ok		@ locked
+	subs	r2, r2, #1
+	bne.n	.Lslot_pll
+	bic	r1, r1, #RCC_PLLEN
+	str	r1, [r0, #0]		@ timeout: PLL off again (SCLKSW is 00: not the system clock)
+	b.n	.Lslot_apb
+.Lslot_pll_ok:
+	ldr	r1, [r0, #4]
+	bic	r1, r1, #3
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	orr	r1, r1, #2
+	str	r1, [r0, #4]		@ SCLKSW = 10 (PLL)
+	mov.w	r2, #CLK_POLLS		@ switch: at most CLK_POLLS reads
+.Lslot_sw:
+	ldr	r1, [r0, #4]
+	and	r1, r1, #RCC_SCLKSTS
+	cmp	r1, #RCC_SCLK_PLL
+	beq.n	.Lslot_ret		@ the PLL runs the core
+	subs	r2, r2, #1
+	bne.n	.Lslot_sw
+	ldr	r1, [r0, #4]
+	bic	r1, r1, #RCC_SCLKSW
+	str	r1, [r0, #4]		@ timeout: SCLKSW = 00 (HSI) again
+	mov.w	r2, #CLK_POLLS
+.Lslot_back:
+	ldr	r1, [r0, #4]
+	tst	r1, #RCC_SCLKSTS
+	beq.n	.Lslot_apb		@ SCLKSTS = 00: the HSI runs the core
+	subs	r2, r2, #1
+	bne.n	.Lslot_back
+	b.n	.Lslot_exit		@ not 00 within the bound: the prescalers stay
+.Lslot_apb:
+	ldr	r1, [r0, #4]
+	bic	r1, r1, #(RCC_APB2_DIV2 | RCC_APB1_DIV4)
+	str	r1, [r0, #4]		@ APB2 / APB1 not divided (HCLK = SYSCLK = HSI)
+	b.n	.Lslot_exit
+.Lslot_ret:
+	pop	{r2, r3, pc}
+.Lslot_exit:
+	ldr	r1, .Lslot_word		@ r1 = 0x20000060 (RAM word)
+	ldr	r0, .Lslot_8mhz		@ 8000000
+	str	r0, [r1, #0]
+	b.n	.Lslot_ret
+.Lslot_rcc:
+	.word	0x40021000		@ RCC base
+.Lslot_flash:
+	.word	0x40022000
+.Lslot_mask:
+	.word	0xf7c0ffff
+.Lslot_mul:
+	.word	0x08040000		@ RCC_CFG bits, not a flash address
+.Lslot_8mhz:
+	.word	0x007a1200		@ 8000000
+.Lslot_word:
+	.word	0x20000060
+.else
 fn_080020c4:
 	push	{r2, r3, lr}
 	movs	r0, #0
@@ -305,6 +450,7 @@ fn_080020c4:
 	.word	0x007a1200		@ 8000000
 .L08002190:
 	.word	0x20000060
+.endif
 
 @ ----------------------------------------------------------------------------
 @ fn_080021dc - calls fn_08001a98 with r0 = 3, then tail-calls fn_08001ac0
@@ -348,6 +494,18 @@ fn_080021dc:
 @ fn_080020c4 sets LATENCY 0 (allowed up to 32 MHz, 3.2.5.2.1). With the wait
 @ the stock code runs on the HSI as after a reset (there SCLKSTS is 00
 @ already and the wait ends at its first read).
+@ Feature version 3: the wait is at most CLK_POLLS (0x8000) reads of RCC_CFG
+@ (src/slot.inc). Timeout: the PLL still runs the core, and PLLEN, HSEEN and
+@ the PLL fields cannot be changed then (manual 6.3.2, 6.2.4), nor may LATENCY
+@ go to 0 at 144 MHz (3.2.5.2.1); the code goes straight to .Lslot_vtor (the
+@ VTOR store and cpsie i), skipping every RCC, PWR and flash store from the
+@ RCC_CFG mask to the call of fn_080020c4. The core keeps the set-up it runs
+@ on: only fn_080020c4 (here) and fn_0800ba4c (the application, the same code)
+@ select the PLL, both after LATENCY 4 and the APB prescalers (144 MHz, the
+@ set-up the slot makes for itself; the starter changes no clock). Only after a
+@ soft restart can SCLKSTS read other than 00 here (after a reset it reads 00,
+@ manual 6.2.7). The application's own_reset does the same on its timeout
+@ (firmware/own/boot.s).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_08002598,"ax",%progbits
 	.p2align 2
@@ -366,12 +524,18 @@ fn_08002598:
 	str	r1, [r0, #0]
 .ifdef SLOT
 	ldr	r1, [r0, #4]		@ slot build: SYSCLK to HSI first ...
-	bic	r1, r1, #3
+	bic	r1, r1, #RCC_SCLKSW
 	str	r1, [r0, #4]
+	mov.w	r2, #CLK_POLLS		@ ... and at most CLK_POLLS reads ...
 .Lslot_hsi:
 	ldr	r1, [r0, #4]
-	tst	r1, #0xc
-	bne.n	.Lslot_hsi		@ ... and wait until SCLKSTS = 00 (HSI)
+	tst	r1, #RCC_SCLKSTS
+	beq.n	.Lslot_hsi_ok		@ ... until SCLKSTS = 00 (HSI)
+	subs	r2, r2, #1
+	bne.n	.Lslot_hsi
+	b.n	.Lslot_vtor		@ timeout: the PLL still runs the core, no clock store
+	nop				@ padding (never run): the literal words stay word aligned
+.Lslot_hsi_ok:
 .endif
 	ldr	r1, [r0, #4]
 	ldr	r2, .L08002618		@ 0xF8FFC000
@@ -408,6 +572,9 @@ fn_08002598:
 	orr	r1, r1, #0x90
 	str	r1, [r0, #0]
 	bl	fn_080020c4
+.ifdef SLOT
+.Lslot_vtor:				@ slot build: the HSI-switch timeout continues here
+.endif
 	ldr	r1, .L08002610		@ r1 = 0xE000ED88
 .ifdef SLOT
 	ldr.n	r0, .Lslot_vectors	@ slot build: this image's own vector table

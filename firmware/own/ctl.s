@@ -14,6 +14,10 @@
 @ - own_restore_guard replaces the bl fn_0800b4c8 at 0x08009A68 (menu restore of defaults).
 @ - own_pa8_level replaces the bl fn_08008350 at 0x08008210 (periph_34.s fn_08008200: PA8
 @   driven low at the start; kept high after a soft restart).
+@ - own_off_save replaces the bl own_save at 0x08009474 (app_01.s fn_08009400, the meter's
+@   power-off path: the save before fn_0800b274), MEASUREMENT_FIX_DESIGN.md revision 17.
+@ own_pa8_level, own_start and ctl_loop's first pass also store the start-up stages 3, 4 and 14
+@ (own/boot.s, own.inc BOOT_PROG).
 @
 @ One pass of ctl_loop (design section 3; every step bounded, none waits):
 @   on the first pass only usb_start, then ev_prime (sets CF_PRIMED); every pass save_resume (save.s), the pending action (restart / power-off after an answer), the
@@ -21,9 +25,9 @@
 @   the job, so OP_WAITCAL sees its finish in the same pass), (1) one step of the running job, the automatic power-off step
 @   (pwr_step, own/power.s: Off Time, low-voltage countdown), (2) a pending key injection is
 @   posted, (3) the guard flag is set when the event in the slot is the injected one, 0x08009400
-@   runs, the flag is cleared; or, in a pass with no event in the slot and no key down, a
-@   pending direct change runs instead (dset.s ds_run, DIRECT_SET_DESIGN.md revision 2: 0x08009400
-@   returns at once with the slot at 0), (4) events, the screenshot step, the streams, (5) received bytes
+@   runs, the flag is cleared; with no event in the slot 0x08009400 is not called (with code 0
+@   it does nothing, app_01.s 0x08009406), and in such a pass with no key down a pending direct
+@   change runs (dset.s ds_run, DIRECT_SET_DESIGN.md revision 2), (4) events, the screenshot step, the streams, (5) received bytes
 @   are parsed (one request per pass, none while an answer, a job or an action is pending or a
 @   screenshot runs), (6) the pending answer is queued.
 @
@@ -105,12 +109,16 @@ since:
 @   fn_08008350 writes the pin mask to PBSC and PA8 stays high. The same when the system clock
 @   is not the PLL (RCC_CFG SCLKSTS: the crystal did not start, VENDOR_FIXES_DESIGN.md F4): the
 @   start-up then runs on the 8 MHz HSI up to xtal_fault, and the key need not be held through
-@   it. Otherwise the call is the original one. Tail call; uses r2, r3, r12 before it.
+@   it. Otherwise the call is the original one. First the start-up stage 3 (STG_GPIO, own.inc
+@   BOOT_PROG). Tail call; uses r2, r3, r12 before it.
 @ ----------------------------------------------------------------------------
 	.global	own_pa8_level
 	.thumb_func
 	.type	own_pa8_level, %function
 own_pa8_level:
+	ldr	r3, =BOOT_PROG
+	mov	r12, #STG_GPIO
+	strb	r12, [r3]		@ stage 3: after the scatter-load, the GPIO set-up
 	ldr	r3, =RCC_CFG		@ crystal failure (system clock not the PLL, xtal.s): PA8
 	ldr	r3, [r3]		@ high at once, the meter stays on through the slow start-up
 	and	r3, r3, #RCC_SCLKSTS	@ up to xtal_fault without the key held
@@ -130,13 +138,20 @@ own_pa8_level:
 
 @ ----------------------------------------------------------------------------
 @ own_start - replaces bl fn_0801031c at 0x08028018 (r0 = the "\n\nstart\n" text).
-@   Runs the original call, then: own RAM 0x20018000..0x2001DFFF cleared (every module's
-@   area: own_load at 0x08028030 then writes save.s's words); the hand-over word 0x2001FFF8
+@   Stores the start-up stage 4 (STG_START, own.inc BOOT_PROG), runs the original call, then:
+@   own RAM 0x20018000..0x2001DFFF cleared (every module's
+@   area: own_load at 0x08028030 then writes save.s's words); RCC_CTRLSTS read once into
+@   CT_RSTF, then its reset flags cleared (written with the flags 0 and RMRSTF 1, then once more
+@   with RMRSTF 0; the other bits as read: manual 6.3.11, MEASUREMENT_FIX_DESIGN.md 17.2); the
+@   hand-over word 0x2001FFF8
 @   read and cleared (tag 0x534C in bits 31..16, slot index 0..2 in bits 7..0, bit 8 = the
 @   watchdog runs, started by the slot for a trial or left running by soft_restart: then the
 @   IWDG is fed here, before the application's own start 0x08010178; bit 9 = soft restart,
-@   read by own_pa8_level); the result word 0x2001FFFC read and cleared (tag 0x5552, result byte and its
-@   complement); the request word 0x2001FFF4 cleared; ocal_load (ocal.s). USB is started by ctl_loop's first
+@   read by own_pa8_level); the result word 0x2001FFFC read (tag 0x5552, result byte and its
+@   complement): a valid one is kept in RAM for INFO, and the word stays until an INFO answer
+@   is queued whole (ans_step; so a start that stops before that leaves it to the next start,
+@   revision 17, 17.3), any other
+@   value is cleared; the request word 0x2001FFF4 cleared; ocal_load (ocal.s). USB is started by ctl_loop's first
 @   pass, not here: the vendor start-up after this call took 2 s on a meter, and a port
 @   present before requests are served leaves a host's first request unanswered. Last: when
 @   the system clock is not the PLL (the crystal did not start), xtal_fault (xtal.s, F4), which
@@ -149,6 +164,9 @@ own_pa8_level:
 	.type	own_start, %function
 own_start:
 	push	{r4, lr}
+	ldr	r1, =BOOT_PROG
+	movs	r2, #STG_START
+	strb	r2, [r1]		@ stage 4 (r0, the text of the print, kept)
 	bl	fn_0801031c		@ the original call
 	ldr	r0, =OWN_RAM
 	movs	r1, #0
@@ -158,6 +176,15 @@ own_start:
 	subs	r2, r2, #4
 	bne	.Lst_clear
 	ldr	r4, =OWN_CTL
+	ldr	r0, =RCC_CTRLSTS
+	ldr	r1, [r0]
+	str	r1, [r4, #CT_RSTF]	@ the reset flags of this start, read once
+	ldr	r2, =RCC_RSTFLAGS
+	bic	r1, r1, r2		@ flags written 0, reserved bits and LSIEN as read
+	orr	r1, r1, #RCC_RMRSTF
+	str	r1, [r0]		@ RMRSTF 1: the flags cleared
+	bic	r1, r1, #RCC_RMRSTF
+	str	r1, [r0]		@ RMRSTF 0 again (the manual does not say it clears itself)
 	ldr	r0, =HANDOVER_WORD
 	ldr	r1, [r0]
 	str	r1, [r4, #CT_HAND_WORD]
@@ -181,18 +208,20 @@ own_start:
 					@ only, writes OWN_OCAL only; before the first own_measure call
 	ldr	r0, =RESULT_WORD
 	ldr	r1, [r0]
-	movs	r2, #0
-	str	r2, [r0]
+	movs	r2, #0			@ r2 = result, none
 	lsrs	r3, r1, #16
 	movw	r12, #RESULT_TAG
 	cmp	r3, r12
-	bne	.Lst_result
+	bne	.Lst_noresult
 	ubfx	r3, r1, #8, #8		@ result
 	uxtb	r12, r1			@ its complement
 	eor	r12, r12, r3
 	cmp	r12, #0xFF
-	bne	.Lst_result
-	mov	r2, r3
+	bne	.Lst_noresult
+	mov	r2, r3			@ valid: the word stays until INFO's answer is queued (ans_step)
+	b	.Lst_result
+.Lst_noresult:
+	str	r2, [r0]		@ no valid result word: cleared
 .Lst_result:
 	str	r2, [r4, #CT_RESULT]
 	ldr	r0, =REQ_WORD
@@ -241,6 +270,9 @@ ctl_loop:
 	ldr	r0, [r4, #CT_FLAGS]
 	tst	r0, #CF_PRIMED
 	bne	.Lcl_run
+	ldr	r0, =BOOT_PROG
+	movs	r1, #STG_LOOP
+	strb	r1, [r0]		@ first pass: stage 14, the main loop reached
 	bl	usb_start		@ first pass: the host sees the device only from here, when
 					@ requests are served (the start-up before took 2 s on a meter
 					@ with the port present and silent, NOTES "USB start")
@@ -461,7 +493,14 @@ ans_set:
 
 @ ----------------------------------------------------------------------------
 @ ans_step - step (6): the pending answer is queued when the whole frame fits; it stays
-@   pending otherwise (no waiting inside the pass).
+@   pending otherwise (no waiting inside the pass). When the queued answer is INFO's
+@   (CT_REQ_CMD = C_INFO; rx_poll takes no request while an answer is pending, so CT_REQ_CMD
+@   is the answered command), the update result word RESULT_WORD is cleared here, once the
+@   whole frame is in the TX ring (revision 17, 17.3): the last point of the answer path that
+@   knows the frame. The USB driver sends the ring in packets of up to 64 bytes and keeps no
+@   frame boundary (usb.s usb_kick, ep1_done: the tail moves by the packet length), so the
+@   delivery of the INFO frame to the host is seen nowhere; a start that stops while the
+@   frame waits in the ring loses the result (PROTOCOL.md 6.4).
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	ans_step, %function
@@ -486,6 +525,13 @@ ans_step:
 	cmp	r0, #0
 	bne	.Las_out
 	str	r0, [r4, #CT_ANS_LEN]	@ sent
+	ldr	r1, [r4, #CT_REQ_CMD]
+	uxtb	r1, r1
+	cmp	r1, #C_INFO
+	bne	.Las_time
+	ldr	r1, =RESULT_WORD
+	str	r0, [r1]		@ INFO queued (r0 = 0): a later start reports no result
+.Las_time:
 	bl	now
 	str	r0, [r4, #CT_ANS_T]
 	ldr	r0, [r4, #CT_FLAGS]
@@ -664,7 +710,7 @@ act_step:
 @ ----------------------------------------------------------------------------
 @ power_path - starts the meter's own power-off path: the injection of event 0xFE with mask 1,
 @   guard off (IS_POWER: inj_post posts it once the slot is empty and no physical key is down;
-@   0x08009452: save through own_save, beep, 0x0800B274 PA8 low; key_step notes it and
+@   0x08009452: save through own_save, beep, 0x0800B274 PA8 low; own_off_save notes it and
 @   off_step enters the powered-off mode when the meter still runs, USB power). Replaces any
 @   injection not yet started. Used by act_step (POWER_OFF) and power.s pwr_step. Uses r0..r3.
 @ ----------------------------------------------------------------------------
@@ -683,8 +729,9 @@ power_path:
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
-@ off_step - the meter's power-off path ran (key_step saw event 0xFE, mask 1, 0x20001190 =
-@   0) and the meter still runs OFF_WAIT_MS later (powered through USB): powered-off mode
+@ off_step - the meter's power-off path ran (own_off_save at 0x08009474: fn_08009400 read event
+@   0xFE, mask 1, 0x20001190 = 0) and the meter still runs OFF_WAIT_MS later (powered through
+@   USB): powered-off mode
 @   (CF_OFF): backlight off (fn_08009e60(0), as 0x0800B274 ends), keys ignored except the
 @   power key, which restarts the meter (key_step, soft_restart); event POWERED_OFF.
 @ ----------------------------------------------------------------------------
@@ -900,13 +947,24 @@ inj_post:
 @ ----------------------------------------------------------------------------
 @ key_step - step (3). With PRIMASK set the slot is read: when it holds the posted code with
 @   the injected mask, the event is the injected one and own_injected = 1 (unless the guard is
-@   off for it); a different event in its place ends the injection (result 1). Then event
-@   KEY, the OCAL_LOCK released (ocal_unlock), the power-off path noted (code 0xFE, mask 1, 0x20001190 = 0: 0x08009452), own_save's
-@   count noted, 0x08009400 runs, own_injected = 0; a save refused by the guard during the
-@   call marks the job (status 6). IS_WAIT ends when its code was consumed.
+@   off for it); a different event in its place ends the injection (result 1). With an event
+@   in the slot: event KEY, the OCAL_LOCK released (ocal_unlock), own_cmp_key, own_save's
+@   count noted, 0x08009400 runs, MF_SECPICK = 0 (own_sec_pick), own_injected = 0; a save
+@   refused by the guard during the call marks the job (status 6). With the slot empty
+@   0x08009400 is not called (with code 0 it does nothing, app_01.s 0x08009406): a press the
+@   scan stores after the read stays in the slot and is handled, with all of the above, in
+@   the next pass (MEASUREMENT_FIX_DESIGN.md revision 17, 17.4). IS_WAIT ends when its code was
+@   consumed.
+@   The marks that depend on the event fn_08009400 actually dispatches are set there, from the
+@   slot as the vendor code reads it: MF_SECPICK by cmp.s own_sec_key (0x080097B8), the
+@   power-off note (CF_OFF_WAIT, CT_OFF_T) by own_off_save (0x08009474). The key scan stores
+@   into the slot whether or not it is empty (app_01.s 0x080095AE, 0x080095CE), so an event it
+@   stores between the read here and the reads of fn_08009400 / fn_08009614 is the one
+@   dispatched; then the KEY event names the event read here, own_injected follows it (an
+@   injection is posted only while no key is down, and a physical key ends it), and
+@   ocal_unlock has run in this pass all the same (17.4).
 @   Direct change (CT_DS_OP != 0): when the slot is empty and no key is down (0x20000008 = 0),
-@   both read with PRIMASK set, dset.s ds_run makes the change in place of 0x08009400 (which
-@   returns at once with the slot at 0, app_01.s 85-86); otherwise the change waits.
+@   both read with PRIMASK set, dset.s ds_run makes the change; otherwise the change waits.
 @   Powered-off mode: 0x08009400 is not run; a power key event restarts the meter
 @   (soft_restart, REQ_RESTART: the starter drives PA8 high again), any other event is cleared.
 @ ----------------------------------------------------------------------------
@@ -957,17 +1015,19 @@ key_step:
 	bne	.Lk_event		@ yes: the key path
 	ldr	r0, [r4, #CT_DS_OP]	@ a direct change pending?
 	cmp	r0, #0			@ none:
-	beq	.Lk_quiet		@ 0x08009400 as usual (it returns at once)
+	beq	.Lk_quiet		@ nothing to dispatch
 	ldr	r0, =V_KEYS_DOWN	@ a key held down now (the scan's mask, read
 	ldrh	r0, [r0]		@ with PRIMASK set like the slot)?
 	cmp	r0, #0			@ a key down:
 	bne	.Lk_quiet		@ the change waits for a pass without one
 	cpsie	i			@ interrupts on again
-	bl	ds_run			@ the change in place of 0x08009400 (dset.s)
+	bl	ds_run			@ the change (dset.s)
 	b	.Lk_wait		@ the injection state as after a call
 .Lk_quiet:
 	cpsie	i			@ interrupts on again
-	b	.Lk_call		@ 0x08009400 with the empty slot
+	b	.Lk_wait		@ empty slot: 0x08009400 not called (with code 0 it does
+					@ nothing, app_01.s 0x08009406); a press the scan stores from
+					@ here on stays in the slot for the next pass
 .Lk_event:
 	cpsie	i			@ interrupts on again
 	bl	ocal_unlock		@ any key event that reaches the key handler ends OCAL_LOCK (2.2)
@@ -977,22 +1037,8 @@ key_step:
 	movs	r0, #E_KEY
 	mov	r1, sp
 	movs	r2, #4
-	bl	ev_send
-	cmp	r7, #KEY_CODE_HELD	@ the meter's power-off path (0x08009452..0x08009468)
-	bne	.Lk_call
-	cmp	r8, #KEY_POWER
-	bne	.Lk_call
-	ldrh	r0, [r5, #-2]		@ 0x20001190
-	cmp	r0, #0
-	bne	.Lk_call
-	ldr	r0, [r4, #CT_FLAGS]
-	tst	r0, #CF_OFF_WAIT
-	bne	.Lk_call
-	orr	r0, r0, #CF_OFF_WAIT
-	str	r0, [r4, #CT_FLAGS]
-	bl	now
-	str	r0, [r4, #CT_OFF_T]
-.Lk_call:
+	bl	ev_send			@ (the meter's power-off path is noted where it runs:
+					@ own_off_save at 0x08009474)
 	mov	r0, r7
 	mov	r1, r8
 	bl	own_cmp_key		@ the counter reset of screen 2 (cmp.s, S2.8 / D16)
@@ -1001,7 +1047,7 @@ key_step:
 	str	r0, [r4, #CT_SAVES_SEEN]
 	bl	fn_08009400
 	movs	r0, #0
-	bl	own_sec_pick		@ the secondary-key mark of own_cmp_key ends (cmp.s)
+	bl	own_sec_pick		@ the secondary-key mark of own_sec_key ends (cmp.s)
 	movs	r0, #0
 	str	r0, [r4, #CTO_INJECTED]	@ guard off
 	ldr	r0, =own_save_count
@@ -1042,6 +1088,32 @@ key_step:
 .Lk_out:
 	add	sp, #8
 	pop	{r4, r5, r6, r7, r8, pc}
+
+@ ----------------------------------------------------------------------------
+@ own_off_save - replaces bl own_save at 0x08009474 (app_01.s fn_08009400): reached only when
+@   fn_08009400 itself read event code 0xFE (0x08009404), mask 1 (0x08009452) and the busy
+@   halfword 0x20001190 = 0 (0x08009468), the meter's power-off path (then fn_08008120(200) and
+@   fn_0800b274: PA8 low). Notes it for off_step: CF_OFF_WAIT and CT_OFF_T = now, once (an
+@   earlier note stays). Then the tail call of own_save with LR unchanged (0x08009479, the
+@   return address the named-save callers know, save.s). r0 is not an argument of own_save.
+@   Uses r0..r3, r12 (own_save's own clobbers).
+@ ----------------------------------------------------------------------------
+	.global	own_off_save
+	.thumb_func
+	.type	own_off_save, %function
+own_off_save:
+	push	{r4, lr}
+	ldr	r4, =OWN_CTL
+	ldr	r0, [r4, #CT_FLAGS]
+	tst	r0, #CF_OFF_WAIT
+	bne	.Los_save
+	orr	r0, r0, #CF_OFF_WAIT
+	str	r0, [r4, #CT_FLAGS]
+	bl	now
+	str	r0, [r4, #CT_OFF_T]
+.Los_save:
+	pop	{r4, lr}
+	b.w	own_save
 
 @ ----------------------------------------------------------------------------
 @ key_refused - r0 = key mask, r1 = 1 for a hold. Returns r0 = 1 when the injection is

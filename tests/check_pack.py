@@ -127,6 +127,17 @@ PATCHES = [
     (0x0802C788, 2, 'F1 range 6 code count'), (0x0802EBD4, 2, 'F2 range 4 code count'),
     # the region table: entry 0 handler (copy_init_addr), entry 1 source (image_end)
     (0x0805151C, 4, 'region table entry 0 handler'), (0x08051520, 4, 'region table entry 1 source'),
+    # MEASUREMENT_FIX_DESIGN.md revision 17: the reset handler's clock call (17.1), the bounded clock
+    # waits of fn_0800ba4c and its cbz as cmp / beq.n / nop, the start-up stage calls of the main
+    # function (17.2), the secondary-key mark at the dispatch (17.4); 0x08028030 and 0x08009474 above
+    (0x0800628C, 4, 'own_reset for fn_0800c274 (Reset_Handler literal)'),
+    (0x0800BA8C, 6, 'cmp r1, #0 / beq.n / nop for ldrb.w r1, [sp] / cbz r1'),
+    (0x0800BAD6, 6, 'bl own_pll_wait / beq.n for the PLLRDF wait'),
+    (0x0800BAEC, 10, 'bl own_sw_wait / beq.n / nop.w for the SCLKSTS wait'),
+    (0x0802817C, 4, 'bl own_stg_814c'), (0x08028180, 4, 'bl own_stg_lcd'), (0x0802818A, 4, 'bl own_stg_logo'),
+    (0x0802818E, 4, 'bl own_stg_b0d8'), (0x08028192, 4, 'bl own_stg_87d4'), (0x08028196, 4, 'bl own_stg_8024'),
+    (0x0802819A, 4, 'bl own_stg_first for ldr.w r0, [r4, #0xbc4]'),
+    (0x080097B8, 4, 'bl own_sec_key for ldr.w r0, [r4, #0xc6c]'),
 ]
 # the speed icon pool words (V1.1 address, V1.1 target of our build): pointer words whose target
 # differs by design (LANGUAGE_DESIGN.md 3)

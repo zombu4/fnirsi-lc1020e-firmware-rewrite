@@ -138,6 +138,7 @@ DAC = 0x40007400
 RCC_CFG, RCC_APB2PRST, RCC_APB1PRST, RCC_AHBEN, RCC_APB2EN, RCC_APB1EN, RCC_AHBPRST, RCC_CFG2 = (
     0x40021004, 0x4002100C, 0x40021010, 0x40021014, 0x40021018, 0x4002101C, 0x40021028, 0x4002102C)
 GPIOA, GPIOC = 0x40010800, 0x40011000
+SRAM_LO, SRAM_HI = 0x20000000, 0x20024000      # meter_model SRAM (plain memory)
 IRQ_DMA1 = (11, 12, 13, 14, 15, 16, 17, 76)
 IRQ_DMA2 = (56, 57, 58, 59, 60, 68, 69, 77)
 # DMA request lines with CHMAPEN 0 (manual tables 8-4, 8-5): (controller, channel) -> source
@@ -242,6 +243,8 @@ class MeasurePath:
         self.t_sync = m.now()
         self.gen = None              # generator epoch (generator())
         self.stats = dict(transfers=[[0] * 8, [0] * 8], held=[[0] * 8, [0] * 8])
+        self._gv, self._gk, self._gc = 0, None, {}      # grid cache (_grid_cache)
+        self._bin1 = {}              # _gen_epoch: bin 1 by table bytes
 
     @staticmethod
     def _adc_reset():
@@ -473,8 +476,30 @@ class MeasurePath:
             return False
         return True
 
+    def _grid_cache(self):
+        """The grids of _adc_grid, _dac_grid and _channel_grid are functions of the register state of
+        this model and of the RCC words RCC_CFG, RCC_CFG2, RCC_AHBEN, RCC_APB2EN, RCC_APB1EN (and the
+        constant core clock); they are computed once per state and kept. self._gv counts the changes
+        of that register state: write() before and after each register write (no write handler
+        computes a grid between its changes and its end), and sync() where a single conversion ends;
+        the RCC words are part of the key. Values are the ones the computation gives (same code)."""
+        r = self.m.st['regs']
+        k = (self._gv, r.get(RCC_CFG, 0), r.get(RCC_CFG2, 0), r.get(RCC_AHBEN, 0), r.get(RCC_APB2EN, 0),
+             r.get(RCC_APB1EN, 0))
+        if k != self._gk:
+            self._gk = k
+            self._gc.clear()
+        return self._gc
+
     def _adc_grid(self, i):
         """(t_first_ready, period, sample_delay, single) of the conversions of ADC i, or None."""
+        c = self._grid_cache()
+        if i in c:
+            return c[i]
+        g = c[i] = self._adc_grid_calc(i)
+        return g
+
+    def _adc_grid_calc(self, i):
         a = self.adc[i]
         if not (a['r'].get(0x08, 0) & 1) or not self.clock_on('adc%d' % (i + 1)):
             return None
@@ -591,6 +616,13 @@ class MeasurePath:
         return bool(c & 1) and bool(c & 4) and (c >> 3) & 7 == 0 and self.clock_on('dac')
 
     def _dac_grid(self):
+        c = self._grid_cache()
+        if 'dac' in c:
+            return c['dac']
+        g = c['dac'] = self._dac_grid_calc()
+        return g
+
+    def _dac_grid_calc(self):
         if not self._dac_ready():
             return None
         g = self._trgo_grid(self.tim[TIM6])
@@ -645,7 +677,12 @@ class MeasurePath:
         raw = bytes(self.m.uc.mem_read(ch.maddr, n * sz))
         fmt = {1: 'B', 2: 'H', 4: 'I'}[sz]
         tab = [x & 0xFFF for x in struct.unpack('<%d%s' % (n, fmt), raw)]
-        c1 = sum(v * cmath.exp(-2j * math.pi * k / n) for k, v in enumerate(tab)) * 2 / n
+        # bin 1 of the table: a function of the table bytes alone, computed once per table (the same
+        # sum in the same order, so the same value)
+        key = (n, sz, raw)
+        c1 = self._bin1.get(key)
+        if c1 is None:
+            c1 = self._bin1[key] = sum(v * cmath.exp(-2j * math.pi * k / n) for k, v in enumerate(tab)) * 2 / n
         s = math.sin(math.pi / n) / (math.pi / n)
         t0, period = g
         # position: the transfer at request k reads item p_k = (p_ref + k - k_ref) mod n into the hold
@@ -751,18 +788,38 @@ class MeasurePath:
             mask = (1 << 8 * min(psz, msz)) - 1
             fmt = {1: 'B', 2: 'H', 4: 'I'}[msz]
             uc = self.m.uc
-            run_addr, run = None, []
-            for j, v in zip(js, vals):
-                off = ((ch.done + j) % init if ch.circ else ch.done + j) if minc else 0
-                addr = ch.maddr + off * msz
-                if run_addr is not None and addr == run_addr + len(run) * msz:
-                    run.append(v & mask)
-                    continue
+            maddr = ch.maddr
+            if SRAM_LO <= maddr and maddr + init * msz <= SRAM_HI:
+                # a buffer inside SRAM (plain memory): uc.mem_write calls no hook and no mmio callback,
+                # so only the bytes in the end matter: the items (js consecutive, at most init of them)
+                # are one run of addresses, or two where a circular buffer wraps to its base;
+                # without MINC every item goes to the base and the last one stays
+                ms = [v & mask for v in vals[:len(js)]]
+                if ms and not minc:
+                    uc.mem_write(maddr, struct.pack('<' + fmt, ms[-1]))
+                elif ms:
+                    s0 = ch.done + js[0]
+                    if ch.circ:
+                        s0 %= init
+                        k = min(len(ms), init - s0)
+                    else:
+                        k = len(ms)
+                    uc.mem_write(maddr + s0 * msz, struct.pack('<%d%s' % (k, fmt), *ms[:k]))
+                    if k < len(ms):
+                        uc.mem_write(maddr, struct.pack('<%d%s' % (len(ms) - k, fmt), *ms[k:]))
+            else:
+                run_addr, run = None, []
+                for j, v in zip(js, vals):
+                    off = ((ch.done + j) % init if ch.circ else ch.done + j) if minc else 0
+                    addr = ch.maddr + off * msz
+                    if run_addr is not None and addr == run_addr + len(run) * msz:
+                        run.append(v & mask)
+                        continue
+                    if run:
+                        uc.mem_write(run_addr, struct.pack('<%d%s' % (len(run), fmt), *run))
+                    run_addr, run = addr, [v & mask]
                 if run:
                     uc.mem_write(run_addr, struct.pack('<%d%s' % (len(run), fmt), *run))
-                run_addr, run = addr, [v & mask]
-            if run:
-                uc.mem_write(run_addr, struct.pack('<%d%s' % (len(run), fmt), *run))
         else:
             if ch.paddr != DAC + 0x08 or src != 'dac1':
                 self.m.violation('DMA%d ch%d memory to 0x%08X not modelled' % (c + 1, x, ch.paddr))
@@ -808,6 +865,14 @@ class MeasurePath:
         self.dma[REQ_CH[src][0]][REQ_CH[src][1] - 1].pending = False
 
     def _channel_grid(self, c, ch):
+        cache = self._grid_cache()
+        key = (c, ch.x)
+        if key in cache:
+            return cache[key]
+        g = cache[key] = self._channel_grid_calc(c, ch)
+        return g
+
+    def _channel_grid_calc(self, c, ch):
         src = self._source_of(c, ch)
         if src is None:
             return None
@@ -907,17 +972,20 @@ class MeasurePath:
             return
         if not self.gen:
             self.gen = self._gen_epoch()           # the generator as it stands at t_a
-        for (c, x) in REQ:
-            ch = self.dma[c][x - 1]
-            g = self._channel_grid(c, ch)
+        cache, dma = self._grid_cache(), self.dma     # no step of this loop changes the cache key
+        for key in REQ:
+            c, x = key
+            ch = dma[c][x - 1]
+            g = cache[key] if key in cache else self._channel_grid(c, ch)
             if g is None:
                 continue
             w = _grid_window(g[0], g[1], t_a, now)
             if w:
                 self._serve(c, x, g[0], g[1], w[0], w[1])
+        cache = self._grid_cache()
         for i in range(4):
             ad = self.adc[i]
-            g = self._adc_grid(i)
+            g = cache[i] if i in cache else self._adc_grid(i)
             if g is None:
                 continue
             if g[3]:                                      # single software conversion
@@ -925,6 +993,8 @@ class MeasurePath:
                     ad['dat'] = self._adc_samples(i, [g[0] - g[2]])[0]
                     ad['sts'] |= 0x32
                     ad['running'] = False
+                    self._gv += 1
+                    cache = self._grid_cache()
                 continue
             if _grid_window(g[0], g[1], t_a, now):
                 ad['sts'] |= 0x32
@@ -1017,6 +1087,7 @@ class MeasurePath:
             now = m.now()
             for i in range(4):                      # DAT keeps the last result of the old set-up
                 self.adc[i]['dat'] = self._adc_dat(i, now)
+        self._gv += 1                               # _grid_cache: the register state changes here
         if DMA1 <= a < DMA1 + 0x400:
             self._dma_write(0, a, size, value)
         elif DMA2 <= a < DMA2 + 0x400:
@@ -1036,6 +1107,7 @@ class MeasurePath:
                 if b <= a < b + 0x400:
                     self._adc_write(i, a, size, value)
                     break
+        self._gv += 1
         m.irq_check()
 
 

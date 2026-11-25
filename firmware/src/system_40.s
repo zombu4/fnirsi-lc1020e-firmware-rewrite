@@ -132,6 +132,17 @@ fn_0800b9d4:
 @     until bit 25 of RCC_CTRL is set; clears bits 1:0 of RCC_CFG and ors 2;
 @     waits until (RCC_CFG & 0xf) >> 2 equals 2; returns.
 @ Frame: push {r2,r3,lr}; the stack words at sp and sp+4 are scratch.
+@ Our build (.ifdef OWN, MEASUREMENT_FIX_DESIGN.md revision 17): the same code at the
+@ same addresses with three same-size changes. Both unbounded waits are bounded
+@ (own/boot.s): 0x0800BAD6 bl own_pll_wait (PLLRDF, at most 0x8000 polls; a timeout
+@ clears PLLEN), 0x0800BAEC bl own_sw_wait (SCLKSTS = PLL, at most 0x8000 polls; a
+@ timeout sets SCLKSW = HSI again); each returns with Z set (r1 = 0) on its timeout,
+@ and beq.n then takes the HSE-failure exit 0x0800BAF8 (clock word 8 MHz, return):
+@ the core stays on the HSI, and own_start shows the fault screen (VENDOR_FIXES_DESIGN
+@ F4). And 0x0800BA8C: ldrb.w r1, [sp, #0] / cbz r1 (6 bytes) as cmp r1, #0 / beq.n /
+@ nop: r1 already holds the byte the strb.w before it stored, so the test is the same;
+@ written as cmp / beq so that no cbz spans the changed lines (asm rule: a cbz at most
+@ 31 lines from its target). The V1.1 text stays unchanged in the .else part.
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800ba4c,"ax",%progbits
 	.p2align 2
@@ -139,6 +150,86 @@ fn_0800b9d4:
 	.thumb_func
 	.type fn_0800ba4c, %function
 fn_0800ba4c:
+.ifdef OWN
+	push	{r2, r3, lr}
+	movs	r0, #0			@ r0 = 0
+	str	r0, [sp, #0]		@ scratch word = 0
+	strb.w	r0, [sp, #0]		@ scratch byte = 0
+	str	r0, [sp, #4]		@ poll counter = 0
+	ldr	r0, .L0800bb04		@ r0 = 0x40021000 (RCC_CTRL)
+	ldr	r1, [r0, #0]
+	orr	r1, r1, #0x10000	@ set bit 16 (HSEEN)
+	str	r1, [r0, #0]
+	mov.w	r2, #0x8000		@ poll limit
+.Lo_ba66:
+	ldr	r1, [r0, #0]
+	ubfx	r1, r1, #0x11, #1	@ bit 17 of RCC_CTRL (HSERDF)
+	strb.w	r1, [sp, #0]
+	ldr	r1, [sp, #4]
+	.inst.n	0x1c49			@ adds r1, r1, #1
+	str	r1, [sp, #4]		@ counter += 1
+	ldrb.w	r1, [sp, #0]
+	cbnz	r1, .Lo_ba82		@ bit seen: leave the loop
+	ldr	r1, [sp, #4]
+	cmp	r1, r2
+	bne.n	.Lo_ba66		@ until 0x8000 polls
+.Lo_ba82:
+	ldr	r1, [r0, #0]
+	ubfx	r1, r1, #0x11, #1
+	strb.w	r1, [sp, #0]
+	cmp	r1, #0			@ 0x0800BA8C: r1 = the byte just stored (V1.1 reads it back)
+	beq.n	.Lo_baf8		@ bit never set: store the fallback value
+	nop
+	ldr	r1, .L0800bb08		@ r1 = 0x40022000 (FLASH_AC)
+	ldr	r2, [r1, #0]
+	bic	r2, r2, #0x7		@ clear bits 2:0 (LATENCY)
+	str	r2, [r1, #0]
+	ldr	r2, [r1, #0]
+	orr	r2, r2, #0x4		@ or 4
+	str	r2, [r1, #0]
+	ldr	r1, [r0, #4]		@ RCC_CFG rewritten unchanged
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	orr	r1, r1, #0x2000		@ APB2PRES 100: HCLK / 2
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	orr	r1, r1, #0x500		@ APB1PRES 101: HCLK / 4
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	ldr	r2, .L0800bb0c		@ r2 = 0xf7c0ffff
+	ands	r1, r2
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	ldr	r2, .L0800bb10		@ r2 = 0x08040000
+	orr	r1, r1, #0x10000
+	orrs	r1, r2
+	str	r1, [sp, #0]
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #0]
+	orr	r1, r1, #0x1000000	@ set bit 24 of RCC_CTRL (PLLEN)
+	str	r1, [r0, #0]
+	bl	own_pll_wait		@ 0x0800BAD6: bounded PLLRDF wait (own/boot.s); Z = timeout
+	beq.n	.Lo_baf8		@ no lock: PLL off, the HSE-failure exit
+	ldr	r1, [r0, #4]
+	bic	r1, r1, #0x3		@ clear bits 1:0 of RCC_CFG
+	str	r1, [r0, #4]
+	ldr	r1, [r0, #4]
+	orr	r1, r1, #0x2		@ or 2 (SCLKSW = PLL)
+	str	r1, [r0, #4]
+	bl	own_sw_wait		@ 0x0800BAEC: bounded wait for SCLKSTS = PLL (own/boot.s);
+					@ Z = timeout
+	beq.n	.Lo_baf8		@ no switch: SCLKSW = HSI again, the HSE-failure exit
+	nop.w				@ the size of the V1.1 wait (10 bytes)
+.Lo_baf6:
+	pop	{r2, r3, pc}
+.Lo_baf8:
+	b.n	.Lo_bafa
+.Lo_bafa:
+	ldr	r1, .L0800bb18		@ r1 = 0x200002b0
+	ldr	r0, .L0800bb14		@ r0 = 8000000
+	str	r0, [r1, #0]
+	b.n	.Lo_baf6
+.else
 	push	{r2, r3, lr}
 	movs	r0, #0			@ r0 = 0
 	str	r0, [sp, #0]		@ scratch word = 0
@@ -219,6 +310,7 @@ fn_0800ba4c:
 	ldr	r0, .L0800bb14		@ r0 = 8000000
 	str	r0, [r1, #0]
 	b.n	.L0800baf6
+.endif
 	.short	0x0000			@ padding
 .L0800bb04:
 	.word	0x40021000
@@ -445,7 +537,8 @@ fn_08027ff4:
 	ldr	r0, .L08028220		@ r0 = 0x2000057c
 	bl	zero_bytes
 .ifdef OWN
-	bl	own_load		@ 0x08028030: load from copy A or B (own/save.s)
+	bl	own_stg_load		@ 0x08028030: stage 5 (own/boot.s), then the load from copy A
+					@ or B (own/save.s own_load)
 .else
 	bl	copy_flash_block_to_ram
 .endif
@@ -578,6 +671,20 @@ fn_08027ff4:
 	.inst.n	0x1c52			@ adds r2, r2, #1
 	cmp	r2, #0xc
 	blt.n	.L08028166
+.ifdef OWN
+@ Our build: each bl below stores a start-up stage first (own/boot.s own_stg_*, then a tail
+@ call of the V1.1 target; MEASUREMENT_FIX_DESIGN.md revision 17, 17.2), and the load of
+@ 0x20001140 at 0x0802819A stores stage 12 or 13 (own_stg_first, the same value in r0).
+	bl	own_stg_814c		@ 0x0802817C: stage 6, fn_0800814c
+	bl	own_stg_lcd		@ 0x08028180: stage 7, fn_08009c14 (LCD set-up)
+	movs	r0, #0x64
+	bl	fn_08011c68		@ argument 100
+	bl	own_stg_logo		@ 0x0802818A: stage 8, fn_0800ce54 (start-up animation)
+	bl	own_stg_b0d8		@ 0x0802818E: stage 9, fn_0800b0d8
+	bl	own_stg_87d4		@ 0x08028192: stage 10, fn_080087d4
+	bl	own_stg_8024		@ 0x08028196: stage 11, fn_08008024
+	bl	own_stg_first		@ 0x0802819A: r0 = word 0x20001140, stage 12 / 13
+.else
 	bl	fn_0800814c
 	bl	fn_08009c14
 	movs	r0, #0x64
@@ -587,6 +694,7 @@ fn_08027ff4:
 	bl	fn_080087d4
 	bl	fn_08008024
 	ldr.w	r0, [r4, #0xbc4]	@ word 0x20001140
+.endif
 	cbz	r0, .L080281f8
 	bl	fn_0800ca2c
 .L080281a4:

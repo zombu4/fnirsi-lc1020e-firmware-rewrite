@@ -44,6 +44,8 @@
         .equ    CT_HAND_WORD,   0x080           @ the hand-over word as found at the start
         .equ    CT_RESULT,      0x084           @ result of the last update (RES_*)
         .equ    CT_SAVES_SEEN,  0x088           @ own_save_count before 0x08009400 ran
+        .equ    CT_RSTF,        0x08C           @ RCC_CTRLSTS as own_start read it (before its
+                                                @ reset flags were cleared; INFO bytes 54..57)
 @ key injection
         .equ    CT_I_STATE,     0x090           @ IS_*
         .equ    CT_I_MASK,      0x094           @ key mask being injected
@@ -201,14 +203,15 @@
                                                 @ except POWER_OFF (USB_CONTROL_DESIGN.md 9)
         .equ    ST_DEFER,       0xFF            @ handler result: the answer comes from the job
                                                 @ (or was made pending by job_answer already)
-        .equ    CAPS_ALL,       0x07EFFFFF      @ capability bits 0..19 (4.8; bit 20, SETUP_LANGUAGE,
+        .equ    CAPS_ALL,       0x0FEFFFFF      @ capability bits 0..19 (4.8; bit 20, SETUP_LANGUAGE,
                                                 @ clear: English only), bit 21: SCREEN, LCR_SET,
                                                 @ HOLD, SETTINGS_SET, COMPARE_SET set directly
                                                 @ (DIRECT_SET_DESIGN.md revision 2), bits 22..24:
                                                 @ CAP_F60, CAP_TOL, CAP_DISP2 (own.inc;
                                                 @ MEASUREMENT_FIX_DESIGN.md stage 2, revision 6),
                                                 @ bit 25: CAP_CAL3 (the sweep of cal.s, stage 3,
-                                                @ revision 7); bit 26: CAP_OCAL (ocal.s)
+                                                @ revision 7); bit 26: CAP_OCAL (ocal.s); bit 27:
+                                                @ CAP_BOOTDIAG (boot.s, INFO 46..57, revision 17)
         .equ    ID_CAL_TABLES,  0xFFFE          @ SETTING_CHANGED id: words changed in the
                                                 @ calibration tables (value = their number)
         .equ    V_SCALE,        0x2000119C      @ sorting nominal unit / scale index 0..3

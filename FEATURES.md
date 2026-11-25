@@ -58,6 +58,18 @@ What the firmware does and how, part by part. The [README](README.md) has the sh
 - Off Time, the low-voltage power-off and the battery icon kept up to date every 30 s.
 - A crystal fault is shown on the display with its repair for 20 s, then a clean power-off, instead of
   the vendor's silent restarts.
+- Start-up (`firmware/own/boot.s`): the clock is switched to the internal oscillator and the switch is
+  waited for before the PLL is turned off (after a restart the PLL still drives the core); every clock
+  wait of the application has a bound, and a PLL that does not lock or switch ends in the crystal-fault
+  screen (with the timer clocks of the vendor's crystal-fault start) instead of a hang. The slot
+  bootloader, which runs first on every start, bounds its own three clock waits from version 3 on
+  (Bootloader, below); a version-2 slot still waits for them without a bound. A progress word in RAM records the last start-up stage reached. A soft restart keeps
+  RAM powered and does not reset the chip, so the next start finds the word; after a chip reset that
+  keeps the power (watchdog, reset pin) the word is found only if main SRAM keeps its contents through
+  it, which the chip's user manual does not state (it names Stop2, Standby and VBAT as losing SRAM; the
+  emulator tests assume it is kept); a power loss clears it. INFO reports the word for this start and
+  the previous one, with the chip's reset-cause flags, and the last update result stays until an INFO
+  answer has been queued for the host.
 
 ## Interface (`firmware/own/lang.s`, `firmware/own/logo.s`, `firmware/own/fix.s`)
 
@@ -94,6 +106,14 @@ with a command-line tool.
   512-byte block names its address, so host write order, cluster layout and extra files do not matter;
   the application's vector page is written last, after the rest has been written and read back, so an
   interrupted update leaves the meter in update mode.
+- **Bounded start-up clock waits** (slot version 3, `bootloader/src/board_02.s`): the switch to the
+  internal oscillator, the PLL lock and the switch to the PLL each end after 0x8000 polls. When the
+  switch to the internal oscillator does not happen, the PLL keeps running the core and nothing of the
+  clock is changed; when the PLL does not lock or switch, the core stays on the internal oscillator
+  (the PLL turned off or deselected, the bus prescalers undone once the internal oscillator is seen to
+  run the core) and the start goes on: the application
+  starts and shows its crystal-fault screen. Update mode is still entered with the key, but USB needs
+  the PLL's 48 MHz, so no update is possible on such a meter.
 - `tools/bin2uf2.py` converts a `.bin`; `tools/iap_write.py` writes the `.uf2` to the drive.
 
 ## The port
@@ -126,12 +146,13 @@ with a command-line tool.
 All run in an emulator of the chip, its USB device and the measurement hardware:
 
 - the whole start chain (starter, slots, application start; records, faults, power cuts after every
-  record write) and the UF2 update path (any block order, junk, repeated and foreign blocks, flash
+  record write, the slot's bounded clock waits) and the UF2 update path (any block order, junk, repeated and foreign blocks, flash
   errors, power cuts);
 - a static never-brick check of every image (no option-byte or protection register, nothing in the
   settings page, flash-controller access only in the listed routines);
 - the settings save with power cuts (`test_own_save.py`);
-- USB control (`test_own_control.py`);
+- USB control and the start-up (clock order with a strict clock model, the bounded clock waits, the
+  progress word and reset flags over a watchdog reset, the kept update result) (`test_own_control.py`);
 - the direct changes of screen, measurement settings, hold, menu settings and compare values against
   the meter's own key path, word by word and pixel by pixel (`test_own_dset.py`);
 - power-off (`test_own_power.py`) and English only with the reset path (`test_own_lang.py`);

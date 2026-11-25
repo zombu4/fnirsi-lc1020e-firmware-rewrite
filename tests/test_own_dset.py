@@ -149,7 +149,10 @@ OBJ_ATTR, OBJ_FLAGS = 0x08, 0x1C                 # fmt.s: attribute block word, 
 DATA_COUNT = 0x20000460
 COVER_DATA_BLOCKS = 2
 # The glyph slots keep their pointers when a screen without the rows is shown (Run of 2026-11-24,
-# d03 / d05: a slot word pointing below the RAM); a pointer is followed only into the GUI heap.
+# d03 / d05: a slot word pointing below the RAM); a pointer is followed only into the GUI heap, and
+# one outside it is skipped only when the capture's screen word 0x20001168 is neither 1 nor 2 (the
+# screens that show the rows); on screens 1 and 2 it fails the check (cover_of; revision 17, 17.5;
+# unit case d08).
 # The unit picture of row 1 (object pointer at 0x20000220, ui_41.s fn_0800d294): its image is set
 # (fn_08021c14) only by the cases that show it (R / X with a unit index 4..7, theta), and the other
 # cases hide it (fn_08023050) and leave the last image. Every path that shows it sets the image first
@@ -482,13 +485,32 @@ def in_heap(p):
 
 
 def cover_of(c, g):
-    """The cover of glyph object g in capture c (fmt.s row_cover_of: the first child), or 0; every
-    pointer on the way is followed only into the GUI heap (UNIT_PIC comment)."""
-    at = word(c, g + OBJ_ATTR) if in_heap(g) else 0
-    if not in_heap(at) or not word(c, at + 4) or not in_heap(word(c, at)):
+    """The cover of glyph object g in capture c (fmt.s row_cover_of: the first child), or 0. 0 is
+    "none" at every step, as row_cover_of reads it (0 glyph, 0 attribute block, child count 0). A
+    pointer that is not 0 is followed only into the GUI heap; one outside it fails the check while the
+    capture's screen word 0x20001168 is 1 or 2 (the rows are shown there) and counts as no cover on any
+    other screen, where the glyph slots keep old pointers (GLYPHS comment; MEASUREMENT_FIX_DESIGN.md
+    revision 17, 17.5)."""
+    shown = word(c, V_SCREEN) in (1, 2)
+
+    def ok(p, what):
+        if in_heap(p):
+            return True
+        check(not shown, 'screen %d: %s 0x%08X of glyph 0x%08X outside the GUI heap'
+              % (word(c, V_SCREEN), what, p, g))
+        return False
+    if not g or not ok(g, 'glyph object'):
         return 0
-    cr = word(c, word(c, at))
-    return cr if in_heap(cr) else 0
+    at = word(c, g + OBJ_ATTR)
+    if not at or not ok(at, 'attribute block'):
+        return 0
+    if not word(c, at + 4):
+        return 0
+    lst = word(c, at)
+    if not ok(lst, 'child list'):
+        return 0
+    cr = word(c, lst)
+    return cr if ok(cr, 'child') else 0
 
 
 def key_only_covers(ref, direct):
@@ -1316,6 +1338,47 @@ def d07_keys_and_events():
     check(st == S_OK and not [fr for fr in ev if fr['cmd'] == E_KEY], 'KEY events of a direct change')
     sc = [struct.unpack_from('<HI', fr['payload']) for fr in ev if fr['cmd'] == E_SETTING]
     check((V_SPEED - V_BLOCK, t) in sc, 'SETTING_CHANGED of the speed word: %r' % sc)
+    return True
+
+
+@case
+def d08_cover_of_by_screen():
+    """cover_of on made-up captures (no emulator; GLYPHS comment, revision 17, 17.5): a glyph object in
+    the GUI heap with an attribute block, child count 1, child list and child; the cover is found on
+    screens 1 and 2. Each pointer in turn (glyph, attribute block, child list, child) set outside the
+    heap: on screens 1 and 2 the check fails, on screens 0 and 3 the result is 0. 0 at each step (no
+    glyph, no attribute block, child count 0) is 0 on every screen."""
+    g, at, lst, cr = HEAP[0] + 0x100, HEAP[0] + 0x200, HEAP[0] + 0x300, HEAP[0] + 0x400
+    bad = 0x0001FFF0                   # below the RAM, as the slot words of d03 / d05
+
+    def cap(screen, **w):
+        ram = bytearray(VRAM_N)
+        words = {V_SCREEN: screen, g + OBJ_ATTR: at, at: lst, at + 4: 1, lst: cr}
+        for k, v in w.items():
+            words[{'attr': g + OBJ_ATTR, 'list': at, 'count': at + 4, 'child': lst}[k]] = v
+        for a, v in words.items():
+            struct.pack_into('<I', ram, a - VRAM_LO, v)
+        return dict(ram=bytes(ram))
+
+    def fails(c, glyph):
+        try:
+            cover_of(c, glyph)
+        except AssertionError:
+            return True
+        return False
+    for screen in (1, 2):
+        check(cover_of(cap(screen), g) == cr, 'screen %d: cover not found' % screen)
+        check(fails(cap(screen), bad), 'screen %d: a glyph object outside the heap passed' % screen)
+        for k in ('attr', 'list', 'child'):
+            check(fails(cap(screen, **{k: bad}), g), 'screen %d: %s outside the heap passed' % (screen, k))
+    for screen in (0, 3):
+        check(cover_of(cap(screen), bad) == 0, 'screen %d: glyph outside the heap not skipped' % screen)
+        for k in ('attr', 'list', 'child'):
+            check(cover_of(cap(screen, **{k: bad}), g) == 0, 'screen %d: %s outside the heap not skipped'
+                  % (screen, k))
+    for screen in (0, 1, 2, 3):
+        check(cover_of(cap(screen), 0) == 0 and cover_of(cap(screen, attr=0), g) == 0
+              and cover_of(cap(screen, count=0), g) == 0, 'screen %d: a 0 step is not "none"' % screen)
     return True
 
 

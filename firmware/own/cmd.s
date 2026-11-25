@@ -91,7 +91,7 @@
 	.equ	MEASURE_SIZE,	66		@ 64 + the marker byte (S2.1) + the OCAL flags byte
 					@ (OWN_CAL_DESIGN.md 2.8)
 	.equ	COMPARE_SIZE,	50		@ 29 + the S2.8 / S2.9 tail
-	.equ	INFO_SIZE,	46
+	.equ	INFO_SIZE,	58		@ 46 + the start-up diagnostics (capability bit 27)
 	.equ	LCR_LISTS,	8
 	.equ	SET_IDS,	6		@ set_tab entries
 	.equ	SET_ENTRY,	28		@ bytes per set_tab entry
@@ -271,7 +271,12 @@ sv_map:
 @ INFO - protocol version u8, capability bits u32, firmware version text 16 bytes, chip UID
 @ 12 bytes (0x1FFFF7F0), running slot u8 (hand-over word: 0 F, 1 A, 2 B, 0xFF unknown), slot
 @ bootloader version u32 (header word +12 of the running slot, 0 when unknown), application
-@ size u32 (end of this image - 0x08006000), last update result u32 (result word).
+@ size u32 (end of this image - 0x08006000), last update result u32 (result word; capability
+@ bit 27, MEASUREMENT_FIX_DESIGN.md revision 17:) the previous start's progress word u32
+@ (BOOT_PREV), this start's u32 (BOOT_PROG), RCC_CTRLSTS u32 as own_start read it (CT_RSTF).
+@ The result word 0x2001FFFC is not cleared here: ctl.s ans_step clears it once this answer
+@ is queued whole in the TX ring (own_start keeps a valid one until then, 17.3); an answer
+@ left pending for want of room keeps it.
 	.thumb_func
 	.type	h_info, %function
 h_info:
@@ -300,6 +305,14 @@ h_info:
 	str	r0, [r6, #38]
 	ldr	r0, [r4, #CT_RESULT]
 	str	r0, [r6, #42]
+	ldr	r0, =BOOT_PREV
+	ldr	r1, [r0]
+	str	r1, [r6, #46]		@ the previous start's progress word
+	ldr	r0, =BOOT_PROG
+	ldr	r1, [r0]
+	str	r1, [r6, #50]		@ this start's
+	ldr	r0, [r4, #CT_RSTF]
+	str	r0, [r6, #54]		@ RCC_CTRLSTS as read at this start
 	movs	r0, #S_OK
 	movs	r1, #INFO_SIZE
 	b	h_ret

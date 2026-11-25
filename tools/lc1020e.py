@@ -183,7 +183,37 @@ CAPS = ['STATE / STREAM', 'SCREEN', 'KEY', 'LCR_TABLES / LCR_SET', 'MEASURE / ME
         '60 Hz (frequency index 5)', 'TOLERANCE_SET / COMPARE tail',
         'MEASURE markers / save result unchanged',                 # bits 22..24
         'calibration sweep of cal.s',                              # bit 25
-        'own calibration area (OCAL_*, MONITOR)']                  # bit 26
+        'own calibration area (OCAL_*, MONITOR)',                  # bit 26
+        'start-up diagnostics (INFO 46..57)']                      # bit 27
+# INFO bytes 46..53 (capability bit 27): progress word = 0x5350 << 16 | clock flags << 8 | stage
+# (firmware/own/own.inc BOOT_PROG, MEASUREMENT_FIX_DESIGN.md revision 17, 17.2)
+BOOT_TAG = 0x5350
+BOOT_STAGE = {1: 'reset handler', 2: 'clock set-up done', 3: 'GPIO set-up', 4: 'own_start',
+              5: 'settings load', 6: 'fn_0800814c', 7: 'LCD set-up', 8: 'start-up animation',
+              9: 'fn_0800b0d8', 10: 'fn_080087d4', 11: 'fn_08008024',
+              12: 'fn_0800ca2c / fn_08008120 / IWDG start', 13: 'fn_0800c86c / fn_08008120 / IWDG start',
+              14: 'main loop'}
+# 0x02 / 0x04 end in the crystal-fault screen before USB starts: this start's word (byte 50) never
+# carries them; they are read over SWD at 0x2001FFEC (PROTOCOL.md 6.4)
+CLOCK_FLAGS = {0x01: 'HSI switch timed out', 0x02: 'PLL did not lock', 0x04: 'PLL switch timed out'}
+# RCC_CTRLSTS reset flags (N32G45x user manual 6.3.11)
+RESET_FLAGS = {1 << 31: 'low power', 1 << 30: 'window watchdog', 1 << 29: 'independent watchdog',
+               1 << 28: 'software', 1 << 27: 'power-on / power-down', 1 << 26: 'NRST pin',
+               1 << 25: 'MMU', 1 << 23: 'RAM', 1 << 21: 'backup domain EMC',
+               1 << 20: 'retention domain EMC', 1 << 19: 'BOR'}
+
+
+def fmt_progress(w):
+    """A progress word of INFO bytes 46..53 as text."""
+    if w is None:
+        return 'not reported'
+    if w >> 16 != BOOT_TAG:
+        return 'none (0x%08X)' % w
+    st, fl = w & 0xFF, w >> 8 & 0xFF
+    s = 'stage %d (%s)' % (st, BOOT_STAGE.get(st, '?'))
+    if fl:
+        s += ', clock: %s' % ', '.join(flag_names(fl, CLOCK_FLAGS) or ['0x%02X' % fl])
+    return s
 
 
 # ----------------------------------------------------------------------------------------------
@@ -322,15 +352,22 @@ class Info:
     app_size: int
     update_result: int
     raw: bytes = field(repr=False, default=b'')
+    # capability bit 27 (PROTOCOL.md 6.4, bytes 46..57), None in a 46-byte answer: the progress
+    # word the previous start left, this start's, and RCC_CTRLSTS as the start read it
+    prev_progress: int = None
+    progress: int = None
+    reset_flags: int = None
     SIZE = 46
+    SIZE_DIAG = 58
 
     @classmethod
     def parse(cls, d):
         if len(d) < cls.SIZE:
             raise MeterError('INFO answer of %d bytes, expected %d' % (len(d), cls.SIZE))
         p, caps, fw, uid, slot, ver, size, res = struct.unpack_from('<BI16s12sBIII', d)
+        diag = struct.unpack_from('<III', d, cls.SIZE) if len(d) >= cls.SIZE_DIAG else (None, None, None)
         return cls(p, caps, fw.rstrip(b'\0').decode('ascii', 'replace'), uid, slot, ver, size,
-                   res, bytes(d))
+                   res, bytes(d), *diag)
 
     def has(self, bit):
         return bool(self.capabilities >> bit & 1)
@@ -1481,12 +1518,18 @@ def fmt_compare(c):
 
 def fmt_info(i):
     caps = [n for b, n in enumerate(CAPS) if i.has(b)]
-    return '\n'.join([
+    lines = [
         'firmware %s, protocol %d, UID %s' % (i.firmware, i.protocol, i.uid.hex().upper()),
         'running slot %s, slot bootloader version %d, application %d bytes, last update %s'
         % (SLOT_NAME.get(i.running_slot, i.running_slot), i.slot_version, i.app_size,
            UPDATE_RESULT.get(i.update_result, i.update_result)),
-        'capabilities 0x%08X: %s' % (i.capabilities, ', '.join(caps))])
+        'capabilities 0x%08X: %s' % (i.capabilities, ', '.join(caps))]
+    if i.progress is not None:
+        lines += ['previous start: %s' % fmt_progress(i.prev_progress),
+                  'this start: %s' % fmt_progress(i.progress),
+                  'reset flags (RCC_CTRLSTS 0x%08X): %s' % (
+                      i.reset_flags, ', '.join(flag_names(i.reset_flags, RESET_FLAGS)) or 'none')]
+    return '\n'.join(lines)
 
 
 def print_record(rec):
@@ -1891,7 +1934,16 @@ def selftest():
     inf = Info.parse(struct.pack('<BI16s12sBIII', 1, 0x0FFFFF, b'LC1020E V1.1 OWN', bytes(12), 1, 2,
                                  300000, 1))
     check('INFO decoder (46 bytes)', inf.has(19) and not inf.has(20) and inf.firmware ==
-          'LC1020E V1.1 OWN' and inf.running_slot == 1)
+          'LC1020E V1.1 OWN' and inf.running_slot == 1 and inf.progress is None)
+    # words a host can see (PROTOCOL.md 6.4): this start with flag 0x01 at the main loop; the
+    # previous start's word with flag 0x02 at stage 4 (the fault screen), which byte 46 shows only
+    # after a reset that kept the meter powered and SRAM
+    inf2 = Info.parse(inf.raw + struct.pack('<III', 0x53500204, 0x5350010E, 0x2C000003))
+    check('INFO decoder (58 bytes, start-up diagnostics)', inf2.prev_progress == 0x53500204
+          and inf2.progress == 0x5350010E and inf2.reset_flags == 0x2C000003
+          and 'stage 4 (own_start), clock: PLL did not lock' in fmt_info(inf2)
+          and 'stage 14 (main loop), clock: HSI switch timed out' in fmt_info(inf2)
+          and 'independent watchdog' in fmt_info(inf2) and fmt_progress(0) == 'none (0x00000000)')
     bs = BootStatus.parse(b''.join(struct.pack('<IIIB', 2, 0x4C68, 0x1234, 1) for _ in range(3)) +
                           struct.pack('<BBIBB', 1, 3, 5, 1, 2))
     check('BOOT_STATUS decoder (47 bytes)', bs.free_slot == 2 and bs.newest_state == 3 and

@@ -270,8 +270,11 @@ update drive; convert the image with `tools/bin2uf2.py` and copy it with `tools/
 
 ## 11. Slot bootloader version 2 and our application
 
-Our application needs slot bootloader version 2 (it keeps the meter on over a restart and serves
-the update request of the control channel). On a meter with the version-1 slots of section 10:
+Our application needs slot bootloader version 2 or later (it keeps the meter on over a restart and
+serves the update request of the control channel). `make -C bootloader slot` builds version 3
+(version 2 plus bounded clock waits at the start, FEATURES.md "Bootloader"); the steps and outputs
+below were written for version 2 and print the version of the images you built. On a meter with
+the version-1 slots of section 10:
 
     make -C bootloader slot
     python3 -I tools/make_install.py --stage slot_a
@@ -301,6 +304,15 @@ a USB serial device (19F5:1020, "LC1020E"); `python3 -I tools/lc1020e.py info` n
 bootloader version 2. Later updates need no key: `python3 -I tools/lc1020e.py update
 firmware/build/own/APP_OWN.uf2 --yes` puts the meter into update mode, copies the file and checks
 the result (PROTOCOL.md section 13).
+
+A newer slot bootloader goes into the free slot over USB, without SWD (PROTOCOL.md 13.2). With
+slot A confirmed and slot B empty, B is the free one (`python3 -I tools/lc1020e.py boot-status`):
+
+    python3 -I tools/lc1020e.py boot-update bootloader/build/slot/BOOT_B.bin --yes
+
+The file is the slot file `make -C bootloader slot` writes (header and image), linked for slot B.
+The meter restarts, the starter starts B on trial and B confirms itself; `info` then names slot B
+and its version. A slot B that never confirms is replaced by slot A at the next start.
 
 ## 12. Recovery
 

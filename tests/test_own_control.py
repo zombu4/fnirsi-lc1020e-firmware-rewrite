@@ -102,11 +102,28 @@ C = dict(INFO=0x00, PING=0x01, RESET=0x02, BATTERY=0x03, POWER_OFF=0x05, FACTORY
          UPDATE_MODE=0x84, BOOT_BEGIN=0x85, BOOT_DATA=0x86, BOOT_END=0x87, BOOT_INSTALL=0x88, BOOT_STATUS=0x89)
 E_KEY, E_SCREEN, E_SETTING, E_POWERED_OFF, E_MEASURE, E_SAVE, E_CAL = 0x90, 0x91, 0x93, 0x94, 0x95, 0x96, 0x97
 OK2, OFF2 = struct.pack('<H', 0x4F4B), struct.pack('<H', 0x4F46)
-CAPS_ALL, INFO_SIZE, STATE_SIZE, MEASURE_SIZE, COMPARE_SIZE = 0x07EFFFFF, 46, 32, 66, 50   # bit 20 clear,
+CAPS_ALL, INFO_SIZE, STATE_SIZE, MEASURE_SIZE, COMPARE_SIZE = 0x0FEFFFFF, 58, 32, 66, 50   # bit 20 clear,
                                      # bit 21 direct set, bits 22..24 MEASUREMENT_FIX_DESIGN.md stage 2
                                      # (60 Hz, tolerance modes, MEASURE marker byte 64 / SV_SAME), bit 25
                                      # the stage-3 sweep (own/cal.s), bit 26 the own calibration area
-                                     # (own/ocal.s); MEASURE 64 + 2, COMPARE 29 + 21
+                                     # (own/ocal.s), bit 27 the start-up diagnostics (own/boot.s, INFO
+                                     # 46..57, revision 17); MEASURE 64 + 2, COMPARE 29 + 21
+# own.inc (MEASUREMENT_FIX_DESIGN.md revision 17): no-init progress words, stages, clock flags; ctl.inc
+# CT_RSTF; own.inc O_FUNC + MF_SECPICK; RCC (manual 6.3.2, 6.3.3, 6.3.11)
+BOOT_PREV, BOOT_PROG, BOOT_TAG = 0x2001FFE8, 0x2001FFEC, 0x5350
+STG_RESET, STG_CLOCK, STG_GPIO, STG_START, STG_LOAD, STG_CA2C, STG_C86C, STG_LOOP = 1, 2, 3, 4, 5, 12, 13, 14
+CLKF_HSI, CLKF_PLL, CLKF_SW = 0x01, 0x02, 0x04
+CT_RSTF = 0x08C
+OWN_FUNC = OWN_RAM + 0x5DE0
+MF_SECPICK = OWN_FUNC + 0x9C
+RCC_CTRL, RCC_CFG = 0x40021000, 0x40021004
+PLLEN = 1 << 24
+APB_PRES = 0x3F00                # RCC_CFG APB2PRES 13:11, APB1PRES 10:8 (manual 6.3.3); fn_0800ba4c ors 0x2000 and
+                                 # 0x500, own_pll_wait / own_sw_wait clear them on their timeouts (own.inc
+                                 # RCC_APB2_DIV2, RCC_APB1_DIV4; fn_0800c274's mask 0xF8FFC000 cleared 13:8)
+CT_OFF_T, CF_OFF_WAIT = 0x078, 0x04      # ctl.inc: tick of the power-off note, its flag in CT_FLAGS
+V_KEY_BUSY = 0x20001190                  # own.inc: hold busy halfword (fn_08009400 0x08009468)
+IWDGRSTF, PORRSTF, RST_FLAGS = 1 << 29, 1 << 27, 0xFEB80000
 KEY_POWER, KEY_UP, KEY_OK = 0x0001, 0x0002, 0x0008
 LSI = 60000                      # the shortest period, 2501 * 16 / 60000 s, for every watchdog check
 PERIOD_MIN = 0.67                # USB_CONTROL_DESIGN.md requirement 2
@@ -627,6 +644,14 @@ def k02_info_ping_unknown():
     size = rig.s['own_image_end'] - APP
     check(d[33] == 1 and struct.unpack_from('<III', d, 34) == (slot_hdr, size, 1),
           'slot %d / version, size, result %r' % (d[33], struct.unpack_from('<III', d, 34)))
+    # bytes 46..57 (capability bit 27): power-on SRAM (no progress word of a previous start: 0), this
+    # start at the main loop, RCC_CTRLSTS as read: the model's power-on value 0x0C000003 (manual
+    # 6.3.11: PORRSTF, PINRSTF, LSIRD, LSIEN), its flags cleared by own_start afterwards
+    prev, prog, rst = struct.unpack_from('<III', d, 46)
+    check(prev == 0 and prog == BOOT_TAG << 16 | STG_LOOP and rst == 0x0C000003,
+          'diagnostics 0x%08X 0x%08X 0x%08X' % (prev, prog, rst))
+    check(rig.m.ctrlsts & RST_FLAGS == 0, 'RCC_CTRLSTS flags not cleared: 0x%08X' % rig.m.ctrlsts)
+    # INFO read the update result: the word is cleared now (own_start kept it, 17.3)
     check(rig.rd(HANDOVER_WORD) == 0 and rig.rd(RESULT_WORD) == 0 and rig.rd(REQ_WORD) == 0, 'no-init words not cleared')
     check(rig.ask_ok('PING', b'abc') == b'abc', 'PING 3')
     big = bytes((7 * i) & 0xFF for i in range(511))
@@ -641,10 +666,16 @@ def k02_info_ping_unknown():
 
 @case
 def k03_start_without_slot_handover():
-    rig = Ctl(ram={HANDOVER_WORD: 0x12345678, REQ_WORD: REQ_MAGIC}).up()
+    """Also (revision 17): a result word with a wrong complement (0x55520100) is no result and is
+    cleared by own_start (17.3); a progress word without the tag 0x5350 is reported as 0 (17.2)."""
+    rig = Ctl(ram={HANDOVER_WORD: 0x12345678, REQ_WORD: REQ_MAGIC, RESULT_WORD: 0x55520100,
+                   BOOT_PROG: 0x12340005}).up()
+    check(rig.rd(RESULT_WORD) == 0, 'foreign result word kept: 0x%08X' % rig.rd(RESULT_WORD))
     d = rig.ask_ok('INFO', size=INFO_SIZE)
     check(d[33] == 0xFF and struct.unpack_from('<I', d, 34)[0] == 0, 'unknown slot: %d' % d[33])
     check(struct.unpack_from('<I', d, 42)[0] == 0, 'result without a result word')
+    check(struct.unpack_from('<I', d, 46)[0] == 0, 'foreign progress word reported 0x%08X'
+          % struct.unpack_from('<I', d, 46)[0])
     check(rig.rd(REQ_WORD) == 0 and rig.rd(HANDOVER_WORD) == 0, 'no-init words not cleared')
     return True
 
@@ -2128,6 +2159,443 @@ def k35_setting_events_of_the_block_compare():
         check(mine == want, '%s: events %r, expected %r' % (step, [(hex(a), hex(b)) for a, b in mine],
                                                              [(hex(a), hex(b)) for a, b in want]))
     check(not rig.m.st['viol'], 'violations %r' % rig.m.st['viol'])
+    return True
+
+
+# ---------------------------------------------------------------- revision 17 (MEASUREMENT_FIX_DESIGN.md)
+
+def strict_rcc(m):
+    """meter_model's opt-in RCC rules (module docstring): SCLKSTS follows SCLKSW only after 3 reads of
+    RCC_CFG; PLLEN / HSEEN cleared while SCLKSTS reads PLL, or the PLL bits changed while PLLEN is 1:
+    a violation."""
+    m.rcc_strict = True
+    m.rcc_switch_reads = 3
+
+
+def prog(rig):
+    return rig.rd(BOOT_PROG)
+
+
+@case
+def k36_clock_switch_order_strict_model():
+    """17.1: (a) a start through starter and slot with strict_rcc: the slot leaves the PLL as the system
+    clock (bootloader/src/board_02.s fn_080020c4), own_reset switches to the HSI alone and waits for
+    SCLKSTS, so fn_0800c274 clears PLLEN only on the HSI: the main loop is reached without a violation,
+    the progress word holds stage 14 and no clock flag, the core runs on the PLL again (SCLKSW and the
+    model's SCLKSTS 2). (b) RESET from the main loop (the PLL runs): check_restart, no violation, the
+    restarted start's BOOT_PREV is the first start's word. (c) Control, the V1.1 order: fn_0800c274
+    called directly while the PLL drives the core is a violation (PLLEN cleared before the switch)."""
+    rig = Ctl(chain=True, patch=strict_rcc).up()
+    m = rig.m
+    check(not m.st['viol'], 'start: violations %r' % m.st['viol'])
+    check(prog(rig) == BOOT_TAG << 16 | STG_LOOP, 'start: progress word 0x%08X' % prog(rig))
+    check(m.st['regs'].get(RCC_CFG, 0) & 3 == 2 and m.st['sws'] == 2, 'start: not on the PLL (SW %d, SWS %d)'
+          % (m.st['regs'].get(RCC_CFG, 0) & 3, m.st['sws']))
+    first = prog(rig)
+    hits = watch_restart(rig)
+    check(rig.ask('RESET')[0] == S_OK, 'RESET status')
+    check_restart(rig, hits, REQ_RESTART, 'RESET with strict RCC rules')
+    rig.run(0.2)
+    check(not m.st['viol'], 'RESET: violations %r' % m.st['viol'])
+    check(rig.rd(BOOT_PREV) == first and prog(rig) == BOOT_TAG << 16 | STG_LOOP,
+          'RESET: BOOT_PREV 0x%08X, progress word 0x%08X' % (rig.rd(BOOT_PREV), prog(rig)))
+    r = m.call(rig.s['fn_0800c274'])
+    check(r is None and m.st['end'] == 'violation' and any('clears PLLEN' in v for v in m.st['viol']),
+          'control: fn_0800c274 with the PLL running: end %r, violations %r' % (m.st['end'], m.st['viol']))
+    return True
+
+
+@case
+def k37_hsi_switch_bound():
+    """17.1: SCLKSTS stuck at PLL (sws_stuck 2) from the reset vector: own_reset's 0x8000 polls run out,
+    flag CLKF_HSI; fn_0800c274 is not called, own_reset makes its CPACR and VTOR stores; the start goes
+    on (SCLKSTS reads PLL, so no fault screen) to the main loop and INFO reports the flag. The start goes
+    through starter and slot (as on the meter): the slot leaves the PLL as the system clock (k36), which
+    the timeout path keeps; a start at the application's reset vector without the slot leaves RCC_CTRL at
+    its reset value 0x1 (PLL off), where USBEN is a model violation (Run of 2026-11-24). SCLKSTS sticks
+    from the entry of own_reset on, so the case tests the application's bound alone: stuck from power-on,
+    slot version 2's own HSI wait (bootloader/src/board_02.s .Lslot_hsi, unbounded there) never ended
+    (Run of 2026-11-24: PC in slot A, no application event); slot version 3 bounds it (test_chain c23)."""
+    rig = Ctl(chain=True)
+    m = rig.m
+
+    def stick(uc, a, size, u):
+        m.sws_stuck = 2
+    m.uc.hook_add(UC_HOOK_CODE, stick, begin=rig.s['own_reset'] & ~1, end=rig.s['own_reset'] & ~1)
+    m.watch(rig.s['fn_0800c274'], 'fn_0800c274')
+    m.watch(rig.s['xtal_fault'], 'xtal_fault')
+    rig.up()
+    check('fn_0800c274' not in m.events() and 'xtal_fault' not in m.events(), 'events %r' % m.events())
+    check(prog(rig) == BOOT_TAG << 16 | CLKF_HSI << 8 | STG_LOOP, 'progress word 0x%08X' % prog(rig))
+    check(m.scs.get(0xE000ED08) == APP and m.scs.get(0xE000ED88, 0) & 0xF00000 == 0xF00000,
+          'VTOR 0x%08X, CPACR 0x%08X' % (m.scs.get(0xE000ED08, 0), m.scs.get(0xE000ED88, 0)))
+    d = rig.ask_ok('INFO', size=INFO_SIZE)
+    check(struct.unpack_from('<I', d, 50)[0] == prog(rig), 'INFO progress word 0x%08X'
+          % struct.unpack_from('<I', d, 50)[0])
+    check(not m.st['viol'], 'violations %r' % m.st['viol'])
+    return True
+
+
+def clock_fault_rig(patch):
+    """k19's rig (8 MHz core, 1 cycle per instruction, no USB) with a meter_model RCC rule; the run stops
+    at xtal_fault (own_start's fault path)."""
+    rig = Ctl(core_hz=8_000_000, usb=False, cpi=1, patch=patch)
+    rig.m.watch(0x0800BAF8, 'hse fallback')
+    rig.m.watch(rig.s['xtal_fault'], 'xtal_fault', stop=True)
+    end = rig.m.run_for(3.0)
+    check(end == 'at xtal_fault', 'end %r (events %r, violations %r)' % (end, rig.m.events(), rig.m.st['viol']))
+    check('hse fallback' in rig.m.events(), 'the exit 0x0800BAF8 not taken: %r' % rig.m.events())
+    pa8 = [e[1] for e in rig.m.st['log'] if e[0] == 'pa8']
+    check(pa8 and 0 not in pa8, 'PA8 levels %r (own_pa8_level latches on the HSI)' % pa8)
+    return rig
+
+
+@case
+def k38_pll_lock_bound():
+    """17.1: the PLL never locks (pll_locks False): own_pll_wait's 0x8000 polls run out, PLLEN is cleared,
+    flag CLKF_PLL, fn_0800ba4c leaves by 0x0800BAF8, SCLKSW stays HSI, and own_start ends in xtal_fault
+    (stage 4: own_start entered)."""
+    def nolock(m):
+        m.pll_locks = False
+    rig = clock_fault_rig(nolock)
+    regs = rig.m.st['regs']
+    check(prog(rig) == BOOT_TAG << 16 | CLKF_PLL << 8 | STG_START, 'progress word 0x%08X' % prog(rig))
+    check(not regs.get(RCC_CTRL, 0) & PLLEN and regs.get(RCC_CFG, 0) & 3 == 0,
+          'RCC_CTRL 0x%08X RCC_CFG 0x%08X' % (regs.get(RCC_CTRL, 0), regs.get(RCC_CFG, 0)))
+    check(regs.get(RCC_CFG, 0) & APB_PRES == 0, 'APB prescalers left set: RCC_CFG 0x%08X' % regs.get(RCC_CFG, 0))
+    return True
+
+
+@case
+def k39_pll_switch_bound():
+    """17.1: SCLKSTS stuck at HSI (sws_stuck 0): own_reset's wait ends at once, the PLL locks, SCLKSW = PLL,
+    own_sw_wait's 0x8000 polls run out: SCLKSW = HSI again, flag CLKF_SW, the exit 0x0800BAF8, and
+    own_start ends in xtal_fault; the PLL stays enabled."""
+    def hsi(m):
+        m.sws_stuck = 0
+    rig = clock_fault_rig(hsi)
+    regs = rig.m.st['regs']
+    check(prog(rig) == BOOT_TAG << 16 | CLKF_SW << 8 | STG_START, 'progress word 0x%08X' % prog(rig))
+    check(regs.get(RCC_CTRL, 0) & PLLEN and regs.get(RCC_CFG, 0) & 3 == 0,
+          'RCC_CTRL 0x%08X RCC_CFG 0x%08X' % (regs.get(RCC_CTRL, 0), regs.get(RCC_CFG, 0)))
+    check(regs.get(RCC_CFG, 0) & APB_PRES == 0, 'APB prescalers left set: RCC_CFG 0x%08X' % regs.get(RCC_CFG, 0))
+    return True
+
+
+HANG_AFTER_IWDG = 0x080281BE      # the adr of "loop\n" after bl fn_08010178 at 0x080281BA (V1.1 address,
+                                  # the port keeps it: link_own.ld)
+
+
+@case
+def k40_progress_word_and_reset_flags_over_an_iwdg_reset():
+    """17.2: first start from power-on with `b .` at 0x080281BE (after the IWDG start fn_08010178): the
+    IWDG resets the chip (end 'iwdg'); the SRAM it leaves holds BOOT_PREV 0 (power-on) and BOOT_PROG at
+    stage 12 (0x20001140 is 1 in the test block: fn_0800ca2c, then fn_08008120, fn_08010178). Second
+    start with that SRAM and the original code: every stage store of a normal start in order (a write
+    hook on BOOT_PROG: the whole word with stage 1, then bytes 2, 3, 4, 5, 6..11, 12, 14), INFO
+    reports the previous start's word (stage 12), this start's (stage 14) and RCC_CTRLSTS with IWDGRSTF
+    and without PORRSTF (cleared by the first start's own_start), and the flags are cleared again."""
+    orig = None
+
+    def hang(m):
+        nonlocal orig
+        orig = m.get(HANG_AFTER_IWDG, 2)
+        m.put(HANG_AFTER_IWDG, b'\xfe\xe7')
+    rig = Ctl(usb=False, patch=hang)
+    m = rig.m
+    end = m.run_for(3.0)
+    check(end == 'iwdg', 'hanging start: end %r' % end)
+    ram = lambda a: struct.unpack_from('<I', m.ram, a - 0x20000000)[0]
+    check(ram(BOOT_PREV) == 0 and ram(BOOT_PROG) == BOOT_TAG << 16 | STG_CA2C,
+          'hanging start: BOOT_PREV 0x%08X BOOT_PROG 0x%08X' % (ram(BOOT_PREV), ram(BOOT_PROG)))
+    check(m.ctrlsts & IWDGRSTF and not m.ctrlsts & PORRSTF, 'RCC_CTRLSTS 0x%08X after the IWDG reset' % m.ctrlsts)
+    m.put(HANG_AFTER_IWDG, orig)
+    rig.start(keep_ram=True)
+    seen = []
+
+    def wr(uc, access, addr, size, value, user):
+        seen.append((addr, size, value))
+    m.uc.hook_add(UC_HOOK_MEM_WRITE, wr, begin=BOOT_PREV, end=BOOT_PROG + 3)
+    rig.usb = True
+    rig.up()
+    want = [(BOOT_PREV, 4, BOOT_TAG << 16 | STG_CA2C), (BOOT_PROG, 4, BOOT_TAG << 16 | STG_RESET)] + \
+        [(BOOT_PROG, 1, s) for s in (STG_CLOCK, STG_GPIO, STG_START, STG_LOAD) + tuple(range(6, 12)) + (STG_CA2C, STG_LOOP)]
+    check(seen == want, 'progress stores %r, expected %r' % (seen, want))
+    d = rig.ask_ok('INFO', size=INFO_SIZE)
+    prev, cur, rst = struct.unpack_from('<III', d, 46)
+    check(prev == BOOT_TAG << 16 | STG_CA2C and cur == BOOT_TAG << 16 | STG_LOOP,
+          'INFO progress 0x%08X / 0x%08X' % (prev, cur))
+    check(rst & IWDGRSTF and not rst & PORRSTF and rig.rd(OWN_CTL + CT_RSTF) == rst,
+          'INFO reset flags 0x%08X (CT_RSTF 0x%08X)' % (rst, rig.rd(OWN_CTL + CT_RSTF)))
+    check(m.ctrlsts & RST_FLAGS == 0, 'flags not cleared: 0x%08X' % m.ctrlsts)
+    check(not m.st['viol'], 'violations %r' % m.st['viol'])
+    return True
+
+
+@case
+def k41_update_result_kept_until_info():
+    """17.3: the result word RES_OK at the first start: own_start keeps it (the start reaches the main
+    loop, no INFO is read); the chip restarts with that SRAM (meter_model halt, a reset that keeps it):
+    INFO reports result 1 and the word is 0 afterwards; the next start reports 0."""
+    rig = Ctl(ram={RESULT_WORD: RESULT_OK}, usb=False)
+    rig.to_main_loop()
+    check(rig.rd(RESULT_WORD) == RESULT_OK and rig.rd(OWN_CTL + CT_RESULT) == 1,
+          'first start: word 0x%08X, CT_RESULT %d' % (rig.rd(RESULT_WORD), rig.rd(OWN_CTL + CT_RESULT)))
+    rig.m.halt()
+    rig.start(keep_ram=True)
+    rig.usb = True
+    rig.up()
+    check(rig.rd(RESULT_WORD) == RESULT_OK, 'second start, before INFO: word 0x%08X' % rig.rd(RESULT_WORD))
+    d = rig.ask_ok('INFO', size=INFO_SIZE)
+    check(struct.unpack_from('<I', d, 42)[0] == 1 and rig.rd(RESULT_WORD) == 0,
+          'second start: result %d, word 0x%08X' % (struct.unpack_from('<I', d, 42)[0], rig.rd(RESULT_WORD)))
+    d = rig.ask_ok('INFO', size=INFO_SIZE)
+    check(struct.unpack_from('<I', d, 42)[0] == 1, 'second INFO of the same start: result %d'
+          % struct.unpack_from('<I', d, 42)[0])
+    rig.m.halt()
+    rig.start(keep_ram=True)
+    rig.up()
+    d = rig.ask_ok('INFO', size=INFO_SIZE)
+    check(struct.unpack_from('<I', d, 42)[0] == 0, 'third start: result %d' % struct.unpack_from('<I', d, 42)[0])
+    return True
+
+
+def key_step_quiet_exit(rig):
+    """Address of the `cpsie i` of key_step's empty-slot exit (ctl.s .Lk_quiet): the second cpsie i
+    (0xB662) after key_step's entry (the first is the direct-change path before ds_run, the third the
+    event path), each read from the image."""
+    a = rig.s['key_step'] & ~1
+    end = min(v & ~1 for k, v in rig.s.items() if isinstance(v, int) and (v & ~1) > a)
+    hits = [x for x in range(a, end, 2) if rig.m.word(x) & 0xFFFF == 0xB662]
+    check(len(hits) == 3, 'key_step: %d cpsie i, expected 3' % len(hits))
+    return hits[1]
+
+
+@case
+def k42_press_after_the_read_of_an_empty_slot():
+    """17.4 (a): a press (code 1, the secondary key 0x0040, physical) is stored into the slot right after
+    key_step read it empty with PRIMASK set (a code hook at the empty-slot exit writes it, as the
+    SysTick scan would): fn_08009400 is not called in that pass; the next pass reads it, sends KEY
+    (mask 0x0040, code 1, source 0) and dispatches it: the secondary 0x200011E8 steps by one and stays
+    (MF_SECPICK at the dispatch, own_sec_key), and the slot is empty afterwards."""
+    rig = Ctl().up()
+    m = rig.m
+    rig.run(0.3)
+    rig.drain(0.05)
+    st = dict(arm=False, pass_=0, at=None, calls=[])
+
+    def ks(uc, a, size, u):
+        st['pass_'] += 1
+
+    def quiet(uc, a, size, u):
+        if st['arm']:
+            st['arm'] = False
+            st['at'] = st['pass_']
+            uc.mem_write(V_KEY_CODE, struct.pack('<HH', 1, 0x0040))
+
+    def disp(uc, a, size, u):
+        st['calls'].append((st['pass_'], struct.unpack('<HH', bytes(uc.mem_read(V_KEY_CODE, 4)))))
+    m.uc.hook_add(UC_HOOK_CODE, ks, begin=rig.s['key_step'] & ~1, end=rig.s['key_step'] & ~1)
+    q = key_step_quiet_exit(rig)
+    m.uc.hook_add(UC_HOOK_CODE, quiet, begin=q, end=q)
+    m.uc.hook_add(UC_HOOK_CODE, disp, begin=rig.s['fn_08009400'] & ~1, end=rig.s['fn_08009400'] & ~1)
+    sec0 = rig.rd(V_SECONDARY)
+    st['arm'] = True
+    end = m.run_for(seconds=1.0, until=lambda mm: st['calls'])
+    check(end is None and st['at'] is not None and st['calls'], 'no dispatch: end %r, %r' % (end, st))
+    check(st['calls'][0] == (st['at'] + 1, (1, 0x0040)), 'dispatch %r, the press stored in pass %r'
+          % (st['calls'][0], st['at']))
+    rig.run(0.5)
+    keys = [f['payload'] for f in rig.drain(0.1) if f['type'] == FR_EVENT and f['cmd'] == E_KEY]
+    check(struct.pack('<HBB', 0x0040, 1, 0) in keys, 'KEY events %r' % [k.hex() for k in keys])
+    check(rig.rd(V_SECONDARY) == (sec0 + 1) % 5 and rig.rd16(V_KEY_CODE) == 0,
+          'secondary %d -> %d, slot code %d' % (sec0, rig.rd(V_SECONDARY), rig.rd16(V_KEY_CODE)))
+    check(rig.rd(MF_SECPICK) == 0, 'MF_SECPICK left at %d' % rig.rd(MF_SECPICK))
+    check(not m.st['viol'], 'violations %r' % m.st['viol'])
+    return True
+
+
+@case
+def k43_secondary_mark_follows_the_dispatched_event():
+    """17.4: MF_SECPICK is 1 only inside the dispatch of the secondary key by fn_08009614 (own_sec_key at
+    0x080097B8), as fn_08009614 read the slot, not as key_step read it. On screen 1 in AUTO (Func 0),
+    three presses written into the slot between two passes, the second and third replaced at the entry
+    of fn_08009400 (a code hook, as the scan could store a new event in that window):
+    (1) 0x0040 dispatched as read: own_sec_key once, own_auto_class sees MF_SECPICK 1 during the
+        dispatch, the secondary steps by one;
+    (2) key_step reads 0x0040, fn_08009400 gets 0x0008: own_sec_key not reached, MF_SECPICK 0 at every
+        own_auto_class call, the secondary unchanged;
+    (3) key_step reads 0x0008, fn_08009400 gets 0x0040: own_sec_key once, MF_SECPICK 1 during it, the
+        secondary steps by one.
+    Outside the dispatches every own_auto_class call (the publishes, meas_tail) sees MF_SECPICK 0.
+    The other key is mask 8 because fn_08009614 returns at once for code 1 with it (app_01.s 389,
+    0x08009670 cmp r0, #8). Mask 2 is no neutral key: fn_0800d940(1) changes the setting under the
+    cursor (app_01.s 415-420), AUTO restarts and stores its class's own secondary (Run of 2026-11-24:
+    secondary 0 -> 4)."""
+    blk = block_with(**{'0x20001148': 0})
+    rig = Ctl(a=copy_image(blk, 2), b=copy_image(blk, 1)).up()
+    m = rig.m
+    rig.run(0.5)
+    check(rig.rd(V_SCREEN) == 1 and rig.rd(V_FUNC) == 0, 'screen %d Func %d' % (rig.rd(V_SCREEN), rig.rd(V_FUNC)))
+    st = dict(inside=False, replace=None, sec=0, auto=[], ret=None)
+
+    def enter(uc, a, size, u):
+        st['inside'] = True
+        st['ret'] = uc.reg_read(UC_ARM_REG_LR) & ~1
+        if st['replace'] is not None:
+            uc.mem_write(V_KEY_CODE, struct.pack('<HH', 1, st['replace']))
+            st['replace'] = None
+
+    def leave(uc, a, size, u):
+        if st['inside'] and a == st['ret']:
+            st['inside'] = False
+
+    def auto(uc, a, size, u):
+        st['auto'].append((st['inside'], struct.unpack('<I', bytes(uc.mem_read(MF_SECPICK, 4)))[0]))
+
+    def sec(uc, a, size, u):
+        st['sec'] += 1
+    m.uc.hook_add(UC_HOOK_CODE, enter, begin=rig.s['fn_08009400'] & ~1, end=rig.s['fn_08009400'] & ~1)
+    ks = rig.s['key_step'] & ~1
+    m.uc.hook_add(UC_HOOK_CODE, leave, begin=ks, end=ks + 0x200)
+    m.uc.hook_add(UC_HOOK_CODE, auto, begin=rig.s['own_auto_class'] & ~1, end=rig.s['own_auto_class'] & ~1)
+    m.uc.hook_add(UC_HOOK_CODE, sec, begin=rig.s['own_sec_key'] & ~1, end=rig.s['own_sec_key'] & ~1)
+    for n, (read, sent, steps) in enumerate(((0x0040, None, 1), (0x0040, 0x0008, 0), (0x0008, 0x0040, 1)), 1):
+        sec0, st['sec'], st['auto'] = rig.rd(V_SECONDARY), 0, []
+        st['replace'] = sent
+        rig.wr(V_KEY_CODE, struct.pack('<HH', 1, read))
+        end = m.run_for(seconds=1.0, until=lambda mm: rig.rd16(V_KEY_CODE) == 0 and not st['inside'])
+        check(end is None, 'press %d: end %r' % (n, end))
+        rig.run(0.6)
+        inside = [v for i, v in st['auto'] if i]
+        outside = [v for i, v in st['auto'] if not i]
+        check(st['sec'] == steps, 'press %d: own_sec_key reached %d times' % (n, st['sec']))
+        check(all(v == steps for v in inside) and (inside or not steps),
+              'press %d: MF_SECPICK in the dispatch %r' % (n, inside))
+        check(not any(outside), 'press %d: MF_SECPICK outside the dispatch %r' % (n, outside))
+        check(rig.rd(V_SECONDARY) == (sec0 + steps) % 5, 'press %d: secondary %d -> %d'
+              % (n, sec0, rig.rd(V_SECONDARY)))
+        check(rig.rd(MF_SECPICK) == 0, 'press %d: MF_SECPICK left at %d' % (n, rig.rd(MF_SECPICK)))
+    check(not m.st['viol'], 'violations %r' % m.st['viol'])
+    return True
+
+
+@case
+def k44_power_off_note_follows_the_dispatched_event():
+    """17.4: the power-off note (CF_OFF_WAIT, CT_OFF_T) is set by own_off_save (ctl.s; the bl at 0x08009474),
+    which is reached only when fn_08009400 itself read code 0xFE (0x08009404), mask 1 (0x08009452) and the
+    busy halfword 0x20001190 = 0 (0x08009468), not from the event key_step read. On screen 1, two events
+    written into the slot between two passes, each replaced at the entry of fn_08009400 (a code hook, as
+    the scan could store a new event in that window; k43's rig pattern):
+    (1) key_step reads 0xFE mask 1 (the power key held), fn_08009400 gets code 1 mask 8 (fn_08009614
+        returns at once for it, app_01.s 0x08009670, k43): own_off_save not reached, CT_OFF_T not written,
+        CF_OFF_WAIT clear; 1.2 s later (OFF_WAIT_MS 1000, off_step) no powered-off mode, PA8 not low;
+    (2) key_step reads code 1 mask 8, fn_08009400 gets 0xFE mask 1 (0x20001190 still 0): own_off_save
+        once, CT_OFF_T written once with the tick of that moment (ctl.s now: the word V_TICK; 10 less
+        when a SysTick came between the load and the store), CF_OFF_WAIT
+        set when key_step returns; the vendor path then drives PA8 low (fn_0800b274), and off_step enters
+        the powered-off mode 1 s after the note (CF_OFF set, CF_OFF_WAIT cleared, ctl.s off_step)."""
+    rig = Ctl().up()
+    m = rig.m
+    rig.run(0.5)
+    check(rig.rd(V_SCREEN) == 1 and rig.rd16(V_KEY_BUSY) == 0 and not rig.rd(OWN_CTL + CT_FLAGS) & (CF_OFF_WAIT | CF_OFF),
+          'start: screen %d, busy %d, flags 0x%X' % (rig.rd(V_SCREEN), rig.rd16(V_KEY_BUSY), rig.rd(OWN_CTL + CT_FLAGS)))
+    st = dict(inside=False, replace=None, ret=None, off=0, offt=[])
+
+    def enter(uc, a, size, u):
+        st['inside'] = True
+        st['ret'] = uc.reg_read(UC_ARM_REG_LR) & ~1
+        if st['replace'] is not None:
+            uc.mem_write(V_KEY_CODE, struct.pack('<HH', *st['replace']))
+            st['replace'] = None
+
+    def leave(uc, a, size, u):
+        if st['inside'] and a == st['ret']:
+            st['inside'] = False
+
+    def off(uc, a, size, u):
+        st['off'] += 1
+
+    def offt(uc, access, addr, size, value, user):
+        st['offt'].append((value, struct.unpack('<I', bytes(uc.mem_read(V_TICK, 4)))[0]))
+    m.uc.hook_add(UC_HOOK_CODE, enter, begin=rig.s['fn_08009400'] & ~1, end=rig.s['fn_08009400'] & ~1)
+    ks = rig.s['key_step'] & ~1
+    m.uc.hook_add(UC_HOOK_CODE, leave, begin=ks, end=ks + 0x200)
+    m.uc.hook_add(UC_HOOK_CODE, off, begin=rig.s['own_off_save'] & ~1, end=rig.s['own_off_save'] & ~1)
+    m.uc.hook_add(UC_HOOK_MEM_WRITE, offt, begin=OWN_CTL + CT_OFF_T, end=OWN_CTL + CT_OFF_T + 3)
+
+    def press(read, sent):
+        st['replace'] = sent
+        rig.wr(V_KEY_CODE, struct.pack('<HH', *read))
+        end = m.run_for(seconds=2.0, until=lambda mm: rig.rd16(V_KEY_CODE) == 0 and not st['inside']
+                        and st['replace'] is None)
+        check(end is None, 'press %r -> %r: end %r' % (read, sent, end))
+
+    press((0xFE, KEY_POWER), (1, 0x0008))                         # (1)
+    check(st['off'] == 0 and not st['offt'] and not rig.rd(OWN_CTL + CT_FLAGS) & CF_OFF_WAIT,
+          '(1): own_off_save %d, CT_OFF_T writes %r, flags 0x%X' % (st['off'], st['offt'], rig.rd(OWN_CTL + CT_FLAGS)))
+    rig.run(1.2)
+    check(not rig.rd(OWN_CTL + CT_FLAGS) & (CF_OFF | CF_OFF_WAIT) and m.st['pa8'] != 0,
+          '(1): flags 0x%X, PA8 %r' % (rig.rd(OWN_CTL + CT_FLAGS), m.st['pa8']))
+    check(rig.rd16(V_KEY_BUSY) == 0, '(1): busy halfword %d' % rig.rd16(V_KEY_BUSY))
+    press((1, 0x0008), (0xFE, KEY_POWER))                         # (2)
+    # the tick when CT_OFF_T is stored: the value now read, or 10 more when a SysTick (+10, ctl.inc V_TICK)
+    # came between now's load and the store
+    check(st['off'] == 1 and len(st['offt']) == 1 and st['offt'][0][1] - st['offt'][0][0] in (0, 10)
+          and rig.rd(OWN_CTL + CT_OFF_T) == st['offt'][0][0] and rig.rd(OWN_CTL + CT_FLAGS) & CF_OFF_WAIT,
+          '(2): own_off_save %d, CT_OFF_T writes (value, tick) %r, flags 0x%X'
+          % (st['off'], st['offt'], rig.rd(OWN_CTL + CT_FLAGS)))
+    check(m.st['pa8'] == 0, '(2): PA8 %r after the power-off path' % m.st['pa8'])
+    rig.run(1.2)
+    fl = rig.rd(OWN_CTL + CT_FLAGS)
+    check(fl & CF_OFF and not fl & CF_OFF_WAIT and st['off'] == 1 and len(st['offt']) == 1,
+          '(2) 1.2 s later: flags 0x%X, own_off_save %d, CT_OFF_T writes %r' % (fl, st['off'], st['offt']))
+    check(not m.st['viol'], 'violations %r' % m.st['viol'])
+    return True
+
+
+PLL_LOCK_READS = 1000            # below CLK_POLLS 0x8000 (own.inc)
+
+
+@case
+def k45_pll_locks_after_polls_below_the_bound():
+    """17.1: pll_lock_reads 1000 (meter_model: PLLRDF reads 0 for the first 1000 reads of RCC_CTRL after
+    PLLEN is set): own_pll_wait polls on and the PLL locks below its bound: no clock flag, the HSE-failure
+    exit 0x0800BAF8 and xtal_fault not reached, the main loop reached on the PLL with the prescalers of
+    fn_0800ba4c (APB2 / 2, APB1 / 4). A code hook on own_pll_wait's loop head .Lpw_poll (own_pll_wait + 4,
+    after the 4-byte mov.w r2, #0x8000; checked: the halfword there is 0x6801, ldr r1, [r0]) counts its
+    polls: fn_0800ba4c sets PLLEN and calls own_pll_wait with no read of RCC_CTRL between (system_40.s),
+    so reads 1..1000 give 0 and read 1001 gives the lock: 1001 polls, 1000 of them reached by the
+    back-edge `bne .Lpw_poll`, and own_pll_wait entered once (the start at the reset vector: the slot's
+    own PLL wait does not run)."""
+    def slow(mm):
+        mm.pll_lock_reads = PLL_LOCK_READS
+    rig = Ctl(usb=False, patch=slow)
+    m = rig.m
+    pw = rig.s['own_pll_wait'] & ~1
+    check(m.get(pw + 4, 2) == b'\x01\x68', 'own_pll_wait + 4: %s, expected ldr r1, [r0]' % m.get(pw + 4, 2).hex())
+    st = dict(entry=0, polls=0)
+
+    def entry(uc, a, size, u):
+        st['entry'] += 1
+
+    def poll(uc, a, size, u):
+        st['polls'] += 1
+    m.uc.hook_add(UC_HOOK_CODE, entry, begin=pw, end=pw)
+    m.uc.hook_add(UC_HOOK_CODE, poll, begin=pw + 4, end=pw + 4)
+    m.watch(0x0800BAF8, 'hse fallback')
+    m.watch(rig.s['xtal_fault'], 'xtal_fault')
+    rig.to_main_loop()
+    check('hse fallback' not in m.events() and 'xtal_fault' not in m.events(), 'events %r' % m.events())
+    check(prog(rig) == BOOT_TAG << 16 | STG_LOOP, 'progress word 0x%08X' % prog(rig))
+    check(st['entry'] == 1 and st['polls'] == PLL_LOCK_READS + 1,
+          'own_pll_wait entered %d times, %d polls (back-edges %d), expected 1 / %d'
+          % (st['entry'], st['polls'], st['polls'] - st['entry'], PLL_LOCK_READS + 1))
+    regs = m.st['regs']
+    check(regs.get(RCC_CTRL, 0) & PLLEN and regs.get(RCC_CFG, 0) & 3 == 2
+          and regs.get(RCC_CFG, 0) & APB_PRES == 0x2500,
+          'RCC_CTRL 0x%08X RCC_CFG 0x%08X' % (regs.get(RCC_CTRL, 0), regs.get(RCC_CFG, 0)))
+    check(not m.st['viol'], 'violations %r' % m.st['viol'])
     return True
 
 

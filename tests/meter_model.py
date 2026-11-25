@@ -62,6 +62,18 @@ Both modes:
   0x40000000..0x4002FFFF  peripherals (mmio), a register file with these behaviours:
                           RCC_CTRL 0x40021000 reads bit 17 = bit 16 (HSE ready) and bit 25 = bit 24
                           (PLL ready); RCC_CFG 0x40021004 reads SWS (bits 3:2) = SW (bits 1:0);
+                          opt-in RCC rules (Meter attributes, defaults keep the lines above;
+                          MEASUREMENT_FIX_DESIGN.md revision 17): pll_locks False: bit 25 never
+                          reads 1; pll_lock_reads n > 0: after a write that sets PLLEN (bit 24,
+                          0 -> 1), bit 25 reads 0 for the next n reads of RCC_CTRL, then as above
+                          (SWS is not affected by it); sws_stuck 0..3: SWS reads that value; rcc_switch_reads n > 0:
+                          after a write that changes SW, SWS keeps the old source for n reads of
+                          RCC_CFG, and a switch to the PLL happens only while bit 25 reads 1
+                          (manual 6.2.7); rcc_strict: a write to RCC_CTRL that clears PLLEN (bit 24)
+                          or HSEEN (bit 16) while SWS reads PLL (manual 6.3.2: "cannot be cleared"),
+                          or a write to RCC_CFG that changes its PLL bits 27, 21:16 while PLLEN is 1
+                          (6.2.4, "can only be written when the PLL is disabled"), is a violation
+                          (these rules apply only while no attached device takes RCC_CTRL);
                           TIM7 CNT 0x40001424 always reads 0x7FFF, so every delay of fn_08003224
                           (count up to 1000) ends at its first poll; USART1 STS 0x40013800 reads
                           0xC0 (TXE, TC); GPIOC PID 0x40011008: bit 7 = PC7 (key: 1 not pressed,
@@ -97,7 +109,8 @@ run exactly as before):
   144000000 / 100 at 0x200002B0 and the PLL 144 MHz of USB_CONTROL_DESIGN.md 3). Instructions are
   counted exactly: a UC_HOOK_BLOCK hook decodes the Thumb instruction lengths of every translated
   block (a halfword whose top five bits are 0b11101, 0b11110 or 0b11111 starts a 32-bit
-  instruction) and the count is corrected to the PC wherever a run stops inside a block. Cycles per
+  instruction) and the count is corrected to the PC wherever a run stops inside a block (the hook
+  is C, tests/blockcount.c, built with cc on first use; "native block hook" below). Cycles per
   instruction: default 5 (the manual gives no instruction timing; FLASH_AC LATENCY must be 4 at
   128..144 MHz, manual 3.2.5.2.1, so one flash access takes 1 + 4 cycles; counting every
   instruction as one such access is the strict choice for the watchdog claims: emulated time runs
@@ -148,15 +161,20 @@ run exactly as before):
   A flash operation that the IWDG reset interrupts (the counter expires within its duration) is
   cut as above (Meter.cut_pattern, 'mixed' when none is set) and the run ends 'iwdg'.
 """
-import bisect
+import ctypes
+import hashlib
 import math
 import os
+import platform
 import struct
 import subprocess
+import tempfile
+import weakref
 import zlib
 
 from unicorn import (Uc, UcError, UC_ARCH_ARM, UC_MODE_THUMB, UC_MODE_MCLASS, UC_HOOK_CODE,
                      UC_HOOK_MEM_WRITE, UC_HOOK_BLOCK, UC_ERR_FETCH_PROT, UC_ERR_EXCEPTION)
+from unicorn.unicorn_py3.unicorn import uclib as _uclib, uc_hook_h as _uc_hook_h
 from unicorn import arm_const
 from unicorn.arm_const import (UC_ARM_REG_PC, UC_ARM_REG_SP, UC_ARM_REG_MSP, UC_ARM_REG_PRIMASK,
                                UC_ARM_REG_LR, UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
@@ -208,6 +226,92 @@ EXC_SYSTICK, EXC_PENDSV = 15, 14
 GPIO_A, GPIO_END = 0x40010800, 0x40012400   # GPIOA..GPIOG, 0x400 each (manual memory map)
 GPIO_POD_RESET = {0: 0xA000, 1: 0x0010}       # manual 7.3.5
 S_REGS = [getattr(arm_const, 'UC_ARM_REG_S%d' % i) for i in range(16)]
+
+
+# ---- native block hook (tests/blockcount.c) ----
+# The instruction counter of the time base (module docstring, "Instructions are counted exactly")
+# runs as a C hook: blockcount.c is the Python block hook it replaced, rule for rule, so no Python
+# runs per executed block. Built once per source text and machine with the C compiler ($CC, else cc)
+# into the temporary directory and loaded with ctypes; the unicorn functions it calls are passed as
+# pointers of the library the unicorn binding loaded. Its state is live only inside the emu_start of
+# a slice (Meter._run); between slices Meter.tm holds 'icount', 'blk' and 'stop_req' as before.
+BC_SRC = os.path.join(HERE, 'blockcount.c')
+
+
+class BcState(ctypes.Structure):
+    """The head of blockcount.c's bc_state (same field order)."""
+    _fields_ = [('icount', ctypes.c_int64), ('stop_req', ctypes.c_int32), ('blk_valid', ctypes.c_int32),
+                ('blk_addr', ctypes.c_uint64), ('blk_size', ctypes.c_uint64), ('blk_base', ctypes.c_int64),
+                ('blk', ctypes.c_void_p), ('blocks', ctypes.c_uint64), ('mem_read', ctypes.c_void_p),
+                ('emu_stop', ctypes.c_void_p), ('reg_read', ctypes.c_void_p)]
+
+
+_BC = []
+
+
+def _bc_lib():
+    if _BC:
+        return _BC[0]
+    if UC_ARM_REG_PC != 11:
+        raise RuntimeError('blockcount.c reads register 11 as the PC; this unicorn has UC_ARM_REG_PC %d'
+                           % UC_ARM_REG_PC)
+    src = open(BC_SRC, 'rb').read()
+    tag = hashlib.sha256(src + platform.machine().encode() + platform.system().encode()).hexdigest()[:16]
+    d = os.path.join(tempfile.gettempdir(), 'meter_model_native')
+    os.makedirs(d, exist_ok=True)
+    so = os.path.join(d, 'blockcount-%s.so' % tag)
+    if not os.path.exists(so):
+        tmp = '%s.%d.tmp' % (so, os.getpid())
+        r = subprocess.run([os.environ.get('CC', 'cc'), '-O2', '-shared', '-fPIC', '-o', tmp, BC_SRC],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError('building %s failed:\n%s%s' % (BC_SRC, r.stdout, r.stderr))
+        os.replace(tmp, so)          # atomic: parallel test processes may build it at the same time
+    lib = ctypes.CDLL(so)
+    lib.bc_new.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    lib.bc_new.restype = ctypes.POINTER(BcState)
+    lib.bc_free.argtypes = [ctypes.c_void_p]
+    lib.bc_free.restype = None
+    lib.bc_icount_at.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+    lib.bc_icount_at.restype = ctypes.c_int64
+    lib.bc_icount_pc.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.bc_icount_pc.restype = ctypes.c_int64
+    _BC.append(lib)
+    return lib
+
+
+_RBUF, _WBUF = ctypes.c_uint64(), ctypes.c_uint64()
+_RREF, _WREF = ctypes.byref(_RBUF), ctypes.byref(_WBUF)
+
+
+def _rr(uch, reg):
+    """Uc.reg_read(reg) for a core register (not a coprocessor or Q register): the binding's own call,
+    uc_reg_read into a zeroed 64-bit word, without its per-call register class selection."""
+    _RBUF.value = 0
+    err = _uclib.uc_reg_read(uch, reg, _RREF)
+    if err:
+        raise UcError(err, reg)
+    return _RBUF.value
+
+
+def _rw(uch, reg, value):
+    """Uc.reg_write(reg, value) for a core register: uc_reg_write of the value as a 64-bit word, as
+    the binding passes it."""
+    _WBUF.value = value
+    err = _uclib.uc_reg_write(uch, reg, _WREF)
+    if err:
+        raise UcError(err, reg)
+
+
+class _Tm(dict):
+    """Meter.tm. While a slice runs (live), a write of 'stop_req' (Meter.irq_check, a test's hook)
+    also reaches the native hook, which takes it at the next block."""
+    __slots__ = ('bc', 'live')
+
+    def __setitem__(self, k, v):
+        dict.__setitem__(self, k, v)
+        if k == 'stop_req' and self.live:
+            self.bc.stop_req = 1 if v else 0
 
 
 def nm(elf):
@@ -303,6 +407,11 @@ class Meter:
         self.stuck = {}            # word address -> bits that stay 1 when programmed
         self.erase_fail = set()    # page bases whose erase leaves word 0 = 0
         self.cut_pattern = None    # how the cut_after-th operation is left (module docstring)
+        self.pll_locks = True      # opt-in RCC rules (module docstring, RCC_CTRL / RCC_CFG)
+        self.sws_stuck = None
+        self.rcc_switch_reads = 0
+        self.rcc_strict = False
+        self.pll_lock_reads = 0    # 0: PLLRDF follows PLLEN at once (the rule before revision 17)
         self.devices = []          # attached peripheral models (attach())
         self.timing = None
         self.uc = None
@@ -372,7 +481,9 @@ class Meter:
         fl = self.flash
         st = dict(locked=True, keyseq=0, ctrl=0, add=0, sts=0, ops=0, log=[], viol=[], end=None,
                   cut_after=None, regs={}, pa8=None, aircr=False, key_dead=False,
-                  pod={GPIO_A + 0x400 * n: GPIO_POD_RESET.get(n, 0) for n in range(7)})
+                  pod={GPIO_A + 0x400 * n: GPIO_POD_RESET.get(n, 0) for n in range(7)},
+                  sws=0, sw_lag=0,          # SCLKSTS after a reset: HSI (manual 6.2.7)
+                  pll_wait=0)               # RCC_CTRL reads left with PLLRDF 0 (pll_lock_reads)
         self.st = st
         self.uc = uc
         if self.flash_mode == 'boot':
@@ -474,6 +585,24 @@ class Meter:
 
         regs = st['regs']
 
+        def rcc_sws(read):
+            """SCLKSTS (RCC_CFG bits 3:2) by the RCC rules of the module docstring; read: one read
+            of RCC_CFG (it counts down rcc_switch_reads)."""
+            sw = regs.get(0x40021004, 0) & 3
+            if self.sws_stuck is not None:
+                return self.sws_stuck
+            if not self.rcc_switch_reads and self.pll_locks:
+                return sw
+            if st['sws'] != sw:
+                ready = sw != 2 or (self.pll_locks and regs.get(0x40021000, 0) >> 24 & 1)
+                if ready:
+                    if st['sw_lag'] > 0:
+                        if read:
+                            st['sw_lag'] -= 1
+                    else:
+                        st['sws'] = sw
+            return st['sws']
+
         def p_read(uc_, off, size, user):
             a = 0x40000000 + off
             for d in self.devices:
@@ -496,8 +625,13 @@ class Meter:
                 v = st['pod'][a & ~0x3FF]
             if a == 0x40021000:
                 v |= ((v >> 16) & 1) << 17 | ((v >> 24) & 1) << 25
+                if not self.pll_locks:
+                    v &= ~(1 << 25)
+                elif v >> 24 & 1 and st['pll_wait'] > 0:
+                    st['pll_wait'] -= 1
+                    v &= ~(1 << 25)
             elif a == 0x40021004:
-                v = (v & ~0xC) | ((v & 3) << 2)
+                v = (v & ~0xC) | (rcc_sws(True) << 2)
             elif a == 0x40001424:
                 v = 0x7FFF
             elif a == 0x40013800:
@@ -579,6 +713,20 @@ class Meter:
                     self.ctrlsts &= ~RST_FLAGS
                 self.ctrlsts = (self.ctrlsts & ~1) | (value & 1)
                 return
+            if a in (0x40021000, 0x40021004) and size == 4:        # RCC rules (module docstring)
+                old = regs.get(a, 0)
+                if a == 0x40021004:
+                    if (value ^ old) & 3:
+                        st['sw_lag'] = self.rcc_switch_reads
+                    if self.rcc_strict and regs.get(0x40021000, 0) >> 24 & 1 and (value ^ old) & 0x083F0000:
+                        viol('RCC_CFG PLL bits changed 0x%08X -> 0x%08X while PLLEN is 1' % (old, value))
+                        return
+                else:
+                    if self.rcc_strict and old & ~value & 0x01010000 and rcc_sws(False) == 2:
+                        viol('RCC_CTRL 0x%08X -> 0x%08X clears PLLEN / HSEEN while SCLKSTS reads PLL' % (old, value))
+                        return
+                    if value & ~old & 1 << 24:
+                        st['pll_wait'] = self.pll_lock_reads
             if GPIO_A <= a < GPIO_END and 0x0C <= a & 0x3FF < 0x18:
                 port, r = a & ~0x3FF, a & 0x3FF
                 w = value << 8 * (r & 3)
@@ -792,8 +940,19 @@ class Meter:
 
     # ---- timing: time base, interrupts, SysTick, IWDG ----
     def _tm_make(self, uc):
-        tm = dict(icount=0, blk=None, extra=0.0, t0=self.clock, stop_req=False, active=[], excret=[],
-                  pend=set(), en=set(), irq_count={}, prigroup=0, ncache={})
+        lib = _bc_lib()
+        bcp = lib.bc_new(ctypes.cast(_uclib.uc_mem_read, ctypes.c_void_p),
+                         ctypes.cast(_uclib.uc_emu_stop, ctypes.c_void_p),
+                         ctypes.cast(_uclib.uc_reg_read, ctypes.c_void_p))
+        weakref.finalize(uc, lib.bc_free, ctypes.cast(bcp, ctypes.c_void_p))
+        self.bc = bc = bcp.contents
+        self._bc_at = lib.bc_icount_at
+        self._bc_pc = lib.bc_icount_pc
+        self._bc_ptr = ctypes.cast(bcp, ctypes.c_void_p)
+        self._uch = uc._uch
+        tm = _Tm(icount=0, blk=None, extra=0.0, t0=self.clock, stop_req=False, active=[], excret=[],
+                 pend=set(), en=set(), irq_count={}, prigroup=0)
+        tm.bc, tm.live = bc, False
         tm['st'] = dict(csr=0, rvr=0, v0=0, t_ref=self.clock, done=0)
         iw = dict(running=False, unlocked=False, pr=0, rl=0xFFF, pr_pend=None, rl_pend=None, cnt=0xFFF,
                   load_t=self.clock, load_val=0xFFF, div=4)
@@ -805,40 +964,27 @@ class Meter:
             iw.update(running=True, pr=carry['pr'], rl=carry['rl'], div=4 << min(carry['pr'], 6),
                       load_t=self.clock, load_val=carry['left_ticks'])
             self._iw_log('carried', self.clock)
-        ncache = tm['ncache']
-
-        def blk(uc_, addr, size, user):
-            if tm['stop_req']:
-                tm['stop_req'] = False
-                tm['blk'] = None
-                uc_.emu_stop()
-                return
-            key = (addr, size)
-            offs = ncache.get(key)
-            if offs is None:
-                offs = ncache[key] = thumb_offsets(bytes(uc_.mem_read(addr, size)))
-            tm['blk'] = (addr, size, tm['icount'], offs)
-            tm['icount'] += len(offs)
-        uc.hook_add(UC_HOOK_BLOCK, blk)
+        h = _uc_hook_h()
+        err = _uclib.uc_hook_add(uc._uch, ctypes.byref(h), UC_HOOK_BLOCK,
+                                 ctypes.cast(lib.bc_block, ctypes.c_void_p), self._bc_ptr,
+                                 ctypes.c_uint64(1), ctypes.c_uint64(0))
+        if err:
+            raise UcError(err)
 
     def _icount_at(self, pc):
-        tm = self.tm
-        b = tm['blk']
-        if b is not None:
-            addr, size, base, offs = b
-            if addr <= pc < addr + size:
-                return base + bisect.bisect_left(offs, pc - addr)
-        return tm['icount']
+        if self.tm.live:
+            return self._bc_at(self._bc_ptr, pc)
+        return self.tm['icount']            # between slices nothing is booked (tm['blk'] is None)
 
     def now(self):
         """Emulated seconds since power-on (timing only)."""
         t, tm = self.timing, self.tm
-        ic = self._icount_at(self.uc.reg_read(UC_ARM_REG_PC))
+        ic = self._bc_pc(self._bc_ptr, self._uch) if tm.live else tm['icount']
         return tm['t0'] + ic * t['cpi'] / t['core'] + tm['extra']
 
     def icount(self):
         """Instructions since power-on (timing only)."""
-        return self.icount_total + self._icount_at(self.uc.reg_read(UC_ARM_REG_PC))
+        return self.icount_total + self._icount_at(_rr(self._uch, UC_ARM_REG_PC))
 
     def irq_check(self):
         """A register write that may change an interrupt line: end the slice at the next block."""
@@ -847,7 +993,12 @@ class Meter:
 
     def _settle(self):
         tm = self.tm
-        tm['icount'] = self._icount_at(self.uc.reg_read(UC_ARM_REG_PC))
+        if tm.live:                         # end of a slice: the count back from the native hook
+            tm.live = False
+            bc = self.bc
+            tm['icount'] = self._bc_at(self._bc_ptr, _rr(self._uch, UC_ARM_REG_PC))
+            tm['stop_req'] = bool(bc.stop_req)
+            bc.blk_valid = 0
         tm['blk'] = None
 
     def _end(self, reason):
@@ -885,9 +1036,9 @@ class Meter:
     def _run(self, pc, budget=None, until_t=None, until=None):
         """Timing loop: slices, events, interrupts. Returns when the run ends, the instruction budget
         is used (end 'timeout'), the emulated time until_t is reached or until(m) is true (None)."""
-        uc, st, tm, t = self.uc, self.st, self.tm, self.timing
+        uc, st, tm, t, uch = self.uc, self.st, self.tm, self.timing, self._uch
         done = 0
-        uc.reg_write(UC_ARM_REG_PC, pc | 1)
+        _rw(uch, UC_ARM_REG_PC, pc | 1)
         while st['end'] is None:
             if until is not None and until(self):
                 return None
@@ -905,12 +1056,21 @@ class Meter:
                 n = min(n, max(1, math.ceil((nxt - now) * t['core'] / t['cpi'])))
             if budget is not None:
                 n = min(n, budget - done)
-            ic0 = tm['icount']
             tm['stop_req'] = False
+            bc = self.bc
+            if tm.live:
+                # a hook's exception left the last slice unsettled: the count and the booked block
+                # stay as the hook left them (as tm did with the Python hook)
+                ic0 = bc.icount
+                bc.stop_req = 0
+            else:
+                ic0 = tm['icount']          # the native hook takes over the count for the slice
+                bc.icount, bc.stop_req, bc.blk_valid = ic0, 0, 0
+                tm.live = True
             try:
-                uc.emu_start(uc.reg_read(UC_ARM_REG_PC) | 1, NO_UNTIL, count=n)
+                uc.emu_start(_rr(uch, UC_ARM_REG_PC) | 1, NO_UNTIL, count=n)
             except UcError as e:
-                p = uc.reg_read(UC_ARM_REG_PC)
+                p = _rr(uch, UC_ARM_REG_PC)
                 self._settle()
                 if e.errno == UC_ERR_EXCEPTION and p >= 0xFFFFFFE0 and st['end'] is None:
                     self._exc_return(p)
@@ -1138,7 +1298,7 @@ class Meter:
         return prio & ~((1 << (g + 1)) - 1) & 0xFF if prio >= 0 else prio
 
     def _irq(self):
-        uc, tm = self.uc, self.tm
+        uc, tm, uch = self.uc, self.tm, self._uch
         for d in self.devices:
             if hasattr(d, 'irqs'):
                 for n in d.irqs(self):
@@ -1148,9 +1308,9 @@ class Meter:
         if not cand:
             return
         cur = min((self._group(self._prio(e)) for e in tm['active']), default=256)
-        if uc.reg_read(UC_ARM_REG_PRIMASK) & 1:
+        if _rr(uch, UC_ARM_REG_PRIMASK) & 1:
             cur = min(cur, 0)
-        bp = uc.reg_read(UC_ARM_REG_BASEPRI) & 0xF0
+        bp = _rr(uch, UC_ARM_REG_BASEPRI) & 0xF0
         if bp:
             cur = min(cur, self._group(bp))
         best = min(cand, key=lambda e: (self._group(self._prio(e)), self._prio(e), e))
@@ -1167,20 +1327,20 @@ class Meter:
         return struct.unpack('<I', bytes(self.uc.mem_read(a, 4)))[0]
 
     def _enter(self, exc):
-        uc, tm = self.uc, self.tm
-        control = uc.reg_read(UC_ARM_REG_CONTROL)
+        uc, tm, uch = self.uc, self.tm, self._uch
+        control = _rr(uch, UC_ARM_REG_CONTROL)
         if control & 2:
             self._end('model: exception entry from a thread on PSP not modelled')
             return
         fp = bool(control & 4)
-        regs = [uc.reg_read(r) for r in (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+        regs = [_rr(uch, r) for r in (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
                                          UC_ARM_REG_R12, UC_ARM_REG_LR)]
-        ret = uc.reg_read(UC_ARM_REG_PC) & ~1
-        xpsr = uc.reg_read(UC_ARM_REG_XPSR)
+        ret = _rr(uch, UC_ARM_REG_PC) & ~1
+        xpsr = _rr(uch, UC_ARM_REG_XPSR)
         if xpsr & 0x0600FC00:
             self._end('model: exception entry inside an IT block (xPSR 0x%08X)' % xpsr)
             return
-        sp = uc.reg_read(UC_ARM_REG_MSP)
+        sp = _rr(uch, UC_ARM_REG_MSP)
         size = 0x68 if fp else 0x20
         align = (sp >> 2) & 1
         frame = (sp - size) & ~(4 if align else 0)
@@ -1192,7 +1352,7 @@ class Meter:
         sx = (xpsr & 0xFF0FFC00 & ~(1 << 9)) | (1 << 24) | (align << 9) | ipsr
         words = regs + [ret, sx]
         if fp:
-            words += [uc.reg_read(r) for r in S_REGS] + [uc.reg_read(UC_ARM_REG_FPSCR), 0]
+            words += [_rr(uch, r) for r in S_REGS] + [_rr(uch, UC_ARM_REG_FPSCR), 0]
         nested = bool(tm['active'])
         excret = (0xFFFFFFE1 if fp else 0xFFFFFFF1) if nested else (0xFFFFFFE9 if fp else 0xFFFFFFF9)
         vec = self._vector(exc)
@@ -1201,12 +1361,12 @@ class Meter:
             self._end('violation')
             return
         uc.mem_write(frame, struct.pack('<%dI' % len(words), *[w & 0xFFFFFFFF for w in words]))
-        uc.reg_write(UC_ARM_REG_MSP, frame)
-        uc.reg_write(UC_ARM_REG_SP, frame)
-        uc.reg_write(UC_ARM_REG_LR, excret)
+        _rw(uch, UC_ARM_REG_MSP, frame)
+        _rw(uch, UC_ARM_REG_SP, frame)
+        _rw(uch, UC_ARM_REG_LR, excret)
         if fp:
-            uc.reg_write(UC_ARM_REG_CONTROL, control & ~4)
-        uc.reg_write(UC_ARM_REG_PC, vec)
+            _rw(uch, UC_ARM_REG_CONTROL, control & ~4)
+        _rw(uch, UC_ARM_REG_PC, vec)
         tm['pend'].discard(exc)
         tm['active'].append(exc)
         tm['excret'].append((excret, frame, fp))
@@ -1214,7 +1374,7 @@ class Meter:
         tm['blk'] = None
 
     def _exc_return(self, p):
-        uc, tm = self.uc, self.tm
+        uc, tm, uch = self.uc, self.tm, self._uch
         if not tm['active']:
             self._end('emu error: EXC_RETURN 0x%08X in thread mode' % p)
             return
@@ -1223,7 +1383,7 @@ class Meter:
             self.st['viol'].append('EXC_RETURN 0x%08X, entry gave 0x%08X' % (p | 1, excret))
             self._end('violation')
             return
-        sp = uc.reg_read(UC_ARM_REG_MSP)
+        sp = _rr(uch, UC_ARM_REG_MSP)
         if sp != frame:
             self.st['viol'].append('exception return with SP 0x%08X, frame at 0x%08X' % (sp, frame))
             self._end('violation')
@@ -1232,17 +1392,17 @@ class Meter:
         w = struct.unpack('<%dI' % n, bytes(uc.mem_read(sp, 4 * n)))
         for r, v in zip((UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R12,
                          UC_ARM_REG_LR), w[:6]):
-            uc.reg_write(r, v)
+            _rw(uch, r, v)
         if fp:
             for r, v in zip(S_REGS, w[8:24]):
-                uc.reg_write(r, v)
-            uc.reg_write(UC_ARM_REG_FPSCR, w[24])
-            uc.reg_write(UC_ARM_REG_CONTROL, uc.reg_read(UC_ARM_REG_CONTROL) | 4)
+                _rw(uch, r, v)
+            _rw(uch, UC_ARM_REG_FPSCR, w[24])
+            _rw(uch, UC_ARM_REG_CONTROL, _rr(uch, UC_ARM_REG_CONTROL) | 4)
         sp += 4 * n + (4 if w[7] >> 9 & 1 else 0)
-        uc.reg_write(UC_ARM_REG_XPSR, (w[7] & 0xF80F0000) | (1 << 24))
-        uc.reg_write(UC_ARM_REG_MSP, sp)
-        uc.reg_write(UC_ARM_REG_SP, sp)
-        uc.reg_write(UC_ARM_REG_PC, w[6] | 1)
+        _rw(uch, UC_ARM_REG_XPSR, (w[7] & 0xF80F0000) | (1 << 24))
+        _rw(uch, UC_ARM_REG_MSP, sp)
+        _rw(uch, UC_ARM_REG_SP, sp)
+        _rw(uch, UC_ARM_REG_PC, w[6] | 1)
         tm['active'].pop()
         tm['excret'].pop()
         tm['blk'] = None
@@ -1419,6 +1579,19 @@ class Meter:
             self.uc.reg_write(UC_ARM_REG_SP, sp)
         self.uc.reg_write(UC_ARM_REG_PC, pc | 1)
         self.st['end'] = None
+
+    def halt(self, reason='halt'):
+        """Timing: end the started chip's run here, booked as run_for() books an end (SRAM kept in
+        self.ram, clock, reset flags: 'iwdg' sets IWDGRSTF, 'reset' SFTRSTF, any other reason none),
+        so that the next make(keep_ram=True) / start_app(keep_ram=True) starts with this SRAM, as a
+        reset that keeps it. Returns the reason."""
+        if not self.timing:
+            raise RuntimeError('halt() needs set_timing()')
+        if self.st['end'] is None:
+            self.st['end'] = reason
+            self._epilogue()
+            self._finish_start()
+        return self.st['end']
 
     def start_app(self, keep_ram=False):
         """Timing: a start directly at the application's reset vector (no chain), not yet run."""

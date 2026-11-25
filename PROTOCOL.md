@@ -138,7 +138,7 @@ is their data length. RESET, UPDATE_MODE and the BOOT_* commands take no confirm
 
 | cmd | Name | Request | Answer |
 |---|---|---|---|
-| 0x00 | INFO | - | INFO record (section 6.4), 46 bytes |
+| 0x00 | INFO | - | INFO record (section 6.4), 58 bytes (46 before capability bit 27) |
 | 0x01 | PING | any, 0..511 bytes (512: status 2) | the request bytes |
 | 0x02 | RESET | - | none. After the answer: soft restart (section 7.6): the meter stays on, the port disappears and comes back with the next start. Status 6 (no data) when the slot bootloader that would start next is feature version 1 (it does not keep the watchdog fed after a soft restart): the meter would switch off |
 | 0x03 | BATTERY | - | supply voltage f32 V (0x20005100: mean of 128 ADC samples x 6.6 / 4095), icon level u8 0..4 (the number of the thresholds 3.4 / 3.6 / 3.8 / 4.0 V the value is above, as the meter's battery icon 0x0800C724 compares them), low-voltage popup u8 (1 while 0x20005118 != 0); 6 bytes |
@@ -498,7 +498,7 @@ applied; everywhere else the result is the one without the area.
 | 45 | u8 | secondary limit: 0 none, 1 D maximum, 2 Q minimum, 3 ESR maximum |
 | 46 | f32 | its value |
 
-### 6.4 INFO (46 bytes)
+### 6.4 INFO (58 bytes; 46 before capability bit 27)
 
 | Offset | Type | Field |
 |---|---|---|
@@ -510,9 +510,39 @@ applied; everywhere else the result is the one without the area.
 | 34 | u32 | version of the running slot (its header word +12), 0 when the slot is unknown or its header has no "SLOT" magic |
 | 38 | u32 | application size in bytes (end of our image - 0x08006000) |
 | 42 | u32 | result of the last update (from the result word the slot bootloader writes before its restart after an update; tag and complement checked): 0 none, 1 written and checked, 2 image check failed, 3 programming failed |
+| 46 | u32 | (capability bit 27) progress word of the previous start, as this start found it: bits 31..16 the tag 0x5350, 15..8 clock flags, 7..0 the last stage reached (table below); 0 when the word had no tag (power-on: main SRAM does not keep its contents without power, or firmware without the word) |
+| 50 | u32 | (capability bit 27) progress word of this start (the same format; stage 14 once the main loop runs) |
+| 54 | u32 | (capability bit 27) RCC_CTRLSTS (0x40021024, N32G45x user manual 6.3.11) as this start read it before it cleared the reset flags: bit 31 low-power, 30 window watchdog, 29 independent watchdog, 28 software, 27 power-on / power-down, 26 NRST pin, 25 MMU, 23 RAM, 21 backup domain EMC, 20 retention domain EMC, 19 BOR reset; bits 1 / 0 LSI ready / enabled. The flags gather every reset since the last start that cleared them (a start that stops earlier leaves them) |
 
-The hand-over and result words are read once at start and cleared, so INFO reports them for the
-start that followed them.
+Progress word stages (each stored just before the step it names; firmware/own/boot.s): 1 reset
+handler, 2 clock set-up done, 3 GPIO set-up (after the RAM initialisation), 4 own start code, 5
+settings load, 6 timer / GPIOB set-up (0x0800814C), 7 LCD set-up, 8 start-up animation, 9
+0x0800B0D8, 10 0x080087D4, 11 0x08008024, 12 0x0800CA2C (first-start flag set) or 13 0x0800C86C (flag
+clear), each followed by 0x08008120, the watchdog start 0x08010178 and the print "loop", 14 the main
+loop. Clock flags: 0x01 the switch to the internal oscillator did not happen within 0x8000 polls (the
+clock is left as the slot bootloader set it), 0x02 the PLL did not lock (the meter runs on the
+internal 8 MHz oscillator and shows the crystal-fault screen), 0x04 the switch to the PLL did not
+happen (the same).
+
+Where a clock flag can be read: 0x01 leaves a normal start (USB runs), so INFO byte 50 reports it.
+0x02 and 0x04 never reach a host through byte 50: both starts end in the crystal-fault screen
+(firmware/own/ctl.s own_start, `bne.w xtal_fault` before its return; firmware/own/xtal.s
+xtal_fault never returns), which runs before USB is started (ctl_loop's first pass,
+usb_start) and starts nothing after it; on battery the screen ends with the power off, which
+loses main SRAM. They are read over SWD at 0x2001FFEC (BOOT_PROG; stage 4) while the fault
+screen or its end loop runs. Byte 46 of a later start could show them only after a reset that
+keeps the meter powered (USB power, the fault loop running) and main SRAM, which the user manual
+does not state for a reset (N32G45x user manual V3.5.0, 3.2.3 SRAM: "SRAM data cannot be
+retained in Stop2, Standby and VBAT modes"; resets are not named).
+
+The hand-over word is read once at start and cleared, so INFO reports it for the start that
+followed it. The result word is kept until an INFO answer has been queued whole for sending (the
+meter clears it when the answer frame enters its USB send buffer, firmware/own/ctl.s ans_step; a
+start that stops before that leaves it to the next start; firmware before capability bit 27
+cleared it at every start); a result word with a wrong tag or complement is cleared at start.
+The meter does not see whether the host received the frame (its USB driver sends the buffer in
+packets and keeps no frame boundary): an INFO answer queued but not received, for example
+because the port was closed or the meter restarted first, loses the result.
 
 ## 7. Keys
 
@@ -870,7 +900,7 @@ BOOT_STATUS and BOOT_BEGIN (the free slot is erased and written again).
 
 ## 14. Capability bits and versioning
 
-INFO bits (bits 0..19 and 21..26 set in this firmware, 0x07EFFFFF): 0 STATE / STREAM, 1 SCREEN, 2 KEY,
+INFO bits (bits 0..19 and 21..27 set in this firmware, 0x0FEFFFFF): 0 STATE / STREAM, 1 SCREEN, 2 KEY,
 3 LCR_TABLES / LCR_SET, 4 MEASURE / MEASURE_STREAM, 5 COMPARE / COMPARE_SET, 6 HOLD, 7 CALIBRATE,
 8 SETTINGS_TABLES / SET / SAVE, 9 CAL_READ, 10 SCREENSHOT, 11 MEM_READ, 12 events, 13 UPDATE_MODE,
 14 BOOT_*, 15 BATTERY, 16 POWER_OFF, 17 RESTORE_DEFAULTS, 18 settings recovery (SETTINGS_RESTORE_B,
@@ -886,6 +916,9 @@ section 4.3 by this bit: firmware without it runs these commands as jobs of key 
 25 the calibration sweep of section 5.3.3: CALIBRATE answers 8 bytes (failed point and reason),
 waits up to 360 000 ms in the meter, and the CALIBRATION step counts windows and points.
 26 the own calibration area: OCAL_INFO .. OCAL_TRACE and MONITOR (section 5.7), event OCAL_CHANGED, the MEASURE OCAL flags byte 65 (section 16).
+27 the start-up diagnostics: INFO bytes 46..57 (the previous start's progress word, this start's,
+RCC_CTRLSTS as read at start; section 6.4), and the update result kept until an INFO answer is
+queued (section 6.4).
 
 Rules: the protocol version changes only when the frame format or the meaning of an existing field
 changes. Within a version, records and answers grow only at the end, new commands and events get

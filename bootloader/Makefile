@@ -10,7 +10,7 @@
 #   make check    build/BOOT.bin, then its size and SHA-256 compared with bytes 0x0000..0x467B of the
 #                 stock bootloader (the byte proof of the port)
 #   make slot     the slot bootloader: build/slot/BOOT_F.bin, BOOT_A.bin, BOOT_B.bin, each the
-#                 0x200-byte slot header (../tools/slot_header.py, version SLOT_VERSION, default 2)
+#                 0x200-byte slot header (../tools/slot_header.py, version SLOT_VERSION, default 3)
 #                 and the image assembled with
 #                 --defsym SLOT=1 (src/slot_10.s and every .ifdef SLOT change) and the slot index,
 #                 linked for slot + 0x200 (link_slot.ld); then ../tools/slot_check.py: functions at
@@ -89,8 +89,9 @@ SLOT_BASE_A  := 0x0806F000
 SLOT_INDEX_B := 2
 SLOT_BASE_B  := 0x08075000
 # feature version in the slot header word +12: 2 = update request, hand-over and result words,
-# watchdog of a trial start (src/slot_10.s); the slot images built before it carry 1
-SLOT_VERSION ?= 2
+# watchdog of a trial start (src/slot_10.s); 3 = version 2 plus the bounded clock waits of the
+# start-up code (src/board_02.s fn_08002598, fn_080020c4); the slot images built before 2 carry 1
+SLOT_VERSION ?= 3
 SLOT_BLOBS   := assets/vendor/08003f65.bin assets/vendor/080044f2.bin
 SLOT_BOOTS   := build/slot/BOOT_F.bin build/slot/BOOT_A.bin build/slot/BOOT_B.bin
 SLOT_SPECS    = $(foreach s,F A B,$(SLOT_BASE_$(s)):build/slot/$(s)/boot.elf:build/slot/BOOT_$(s).bin)

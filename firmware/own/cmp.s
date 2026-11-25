@@ -13,7 +13,9 @@
 @ - own_cmp_step: ctl_loop (own/ctl.s) once per main-loop pass: the beeper steps and the LED idle
 @   level off screen 2;
 @ - own_cmp_key: key_step (own/ctl.s) before fn_08009400: the counter reset (long key 0x100 on
-@   screen 2, design D16) and the secondary-key mark MF_SECPICK;
+@   screen 2, design D16);
+@ - own_sec_key: fn_08009614's mask-0x40 block (src/app_01.s 0x080097B8, .ifdef OWN): the
+@   secondary-key mark MF_SECPICK = 1 where the press is dispatched (revision 17);
 @ - own_sec_pick: key_step after fn_08009400 and dset.s ds_secondary (MF_SECPICK);
 @ - own_tol_set: TOLERANCE_SET (own/cmd.s h_tol_set).
 @
@@ -122,13 +124,15 @@
 @   C: R when theta > -9 or C not valid, else C; L: R when theta < 9 or L not valid, else L
 @   (C and L change only through R). Then, when the class differs from the one before (a change, or
 @   the first decision after a setting change or restart, which leave it undecided) or the main row
-@   byte 0x200011E4 differs from the class's (the vendor's test, ui_44.s 817 / 833 / 842), with the
-@   class's secondary (R: 1 / 4 theta, D3; C: 2 / 2 D; L: 3 / 3 Q; a secondary the user picked with
-@   its key is kept while the class stays): the class
+@   byte 0x200011E4 differs from the class's (the vendor's test, ui_44.s 817 / 833 / 842): the class
 @   picture (R d_0803d2fc, C d_0803d3d4, L d_0803d584, the vendor's) on the object [0x200001E8] by
-@   fn_08021c14, and the two words stored; the secondary is not stored while MF_SECPICK is 1 (this
-@   call is the display update of the secondary key or of LCR_SET secondary, which set the value
-@   the user picks: revision 16, a first decision after a reset had undone that pick, d01c).
+@   fn_08021c14, the main row byte = the class, and the secondary 0x200011E8 = the class's (R: 1 / 4
+@   theta, D3; C: 2 / 2 D; L: 3 / 3 Q) unless MF_SECPICK is 1. MF_SECPICK 1 means this call is the
+@   display update of the secondary key (own_sec_key) or of LCR_SET secondary (dset.s
+@   ds_secondary), which set the value the user picks: it is kept, also when this same call changes
+@   or first decides the class (revision 16: a first decision after a reset had undone the pick,
+@   d01c; revision 17 keeps this, as the revision-16 rule says). Otherwise, while the class and the
+@   row byte stay, nothing is drawn or stored, so a secondary picked earlier stays shown.
 @   AAPCS (fn_0800f854 keeps its r4..r7).
 @ ----------------------------------------------------------------------------
 	.global	own_auto_class
@@ -791,30 +795,14 @@ own_cmp_step:
 @   code 0xFE (held) with mask 0x100 on screen 2 while the busy halfword 0x20001190 is 0: busy = 1
 @   (one reset per hold, as the vendor's long presses; the release 0xFF clears it, app_01.s
 @   0x08009490), both counters 0 and printed. V1.1 does nothing with this long press on screens 1
-@   and 2 (MEASUREMENT_DESIGN.md 4: free 0xFE masks). Also MF_SECPICK (own_sec_pick) = 1 for
-@   code 1 with mask 0x40 on screen 1 or 2 (fn_08009400 hands it to fn_08009614, which steps the
-@   secondary 0x200011E8 and calls fn_0800f854, app_01.s 0x080097B8), else 0; key_step clears it
-@   after fn_08009400. AAPCS.
+@   and 2 (MEASUREMENT_DESIGN.md 4: free 0xFE masks). (Until revision 16 it also set MF_SECPICK
+@   from key_step's copy of the slot; since revision 17 own_sec_key sets it where fn_08009614
+@   dispatches the press it read itself.) AAPCS.
 @ ----------------------------------------------------------------------------
 	.global	own_cmp_key
 	.thumb_func
 	.type	own_cmp_key, %function
 own_cmp_key:
-	movs	r2, #0			@ r2 = 1: the secondary key on screen 1 or 2
-	cmp	r0, #1
-	bne	.Lck_pick
-	cmp	r1, #KEY_0040
-	bne	.Lck_pick
-	ldr	r2, =V_SCREEN
-	ldr	r2, [r2]
-	subs	r2, r2, #1
-	cmp	r2, #1
-	ite	ls
-	movls	r2, #1			@ screen 1 or 2
-	movhi	r2, #0
-.Lck_pick:
-	ldr	r3, =OWN_FUNC
-	str	r2, [r3, #MF_SECPICK]
 	cmp	r0, #0xFE
 	bne	.Lck_ret
 	cmp	r1, #KEY_RESET
@@ -835,6 +823,28 @@ own_cmp_key:
 	str	r1, [r0]
 	b	cmp_counters		@ printed (tail call)
 .Lck_ret:
+	bx	lr
+
+@ ----------------------------------------------------------------------------
+@ own_sec_key - in place of `ldr.w r0, [r4, #0xc6c]` at 0x080097B8, the first instruction of the
+@   mask-0x40 block of fn_08009614 (src/app_01.s). That block is entered only from
+@   `cmp r0, #0x40; beq .L08009784` (0x08009684, .L08009784 `b.n .L080097b8`), after fn_08009614
+@   itself read event code 1 (0x08009620) and mask 0x40 (0x0800962A), and fn_08009614 runs only
+@   for screens 1 and 2 (its two calls in fn_08009400, 0x0800943A and 0x08009484, follow the
+@   screen tests). MF_SECPICK = 1 (the press is the secondary key: own_auto_class keeps the value
+@   it steps to), r0 = the word 0x200011E8 (the replaced load). The block ends in the tail call of
+@   fn_0800f854; key_step clears the mark after fn_08009400 (own_sec_pick). Uses r0, r12 and the
+@   flags (the block's next instructions set them again before they are read).
+@ ----------------------------------------------------------------------------
+	.global	own_sec_key
+	.thumb_func
+	.type	own_sec_key, %function
+own_sec_key:
+	ldr	r12, =OWN_FUNC
+	movs	r0, #1
+	str	r0, [r12, #MF_SECPICK]
+	ldr	r0, =V_SECONDARY
+	ldr	r0, [r0]
 	bx	lr
 
 @ ----------------------------------------------------------------------------
