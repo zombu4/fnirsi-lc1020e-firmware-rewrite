@@ -1,9 +1,8 @@
 # FNIRSI LC1020E firmware rewrite
 
-Firmware for the **FNIRSI LC1020E** LCR meter in **Thumb-2 assembly**: the vendor's application
-V1.1 as assembly source (it rebuilds the vendor image byte for byte), extended with our own modules
-for measurement, calibration, settings storage and USB control, plus a two-part bootloader. An
-application update that is cut off leaves the meter in update mode, ready to try again.
+Replacement firmware for the **FNIRSI LC1020E** LCR meter in **Thumb-2 assembly**:
+a new measurement core, calibration and display, a two-part bootloader that an interrupted update
+cannot break, and full control over USB.
 
 <p align="center">
   <img src=".github/assets/screen-measure.png" alt="Measure screen: the main reading and the secondary reading" width="320">
