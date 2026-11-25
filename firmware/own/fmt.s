@@ -1,4 +1,4 @@
-@ fmt.s - the measured-value formatters of our build (MEASUREMENT_FIX_DESIGN.md stage 2: S2.1 OL
+@ fmt.s - the measured-value formatters of our build (stage 2: S2.1 OL
 @ and the specified range, S2.2 signs, S2.4 digits).
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
@@ -13,12 +13,11 @@
 @ so the quantity is told by the call site, not by a RAM word. The outputs:
 @ - every wrapper: OL (the vendor's text "0L  ", unit text empty, index 0, MF_MARK 0) at the test
 @   frequencies 60, 100 and 120 Hz when the published |Z| 0x200050C4 lies above 1e7 ohm, the
-@   highest impedance the manual specifies in its 100 Hz column (design revision 14 rule 2,
+@   highest impedance the manual specifies in its 100 Hz column (revision 14, rule 2,
 @   fmt_lowz);
 @ - R, |Z|, X (ohm), C (nF) and L (uH):
 @   - OL when the value is not finite or its magnitude lies above the manual's measurement range
-@     (UM 1543: R 0..10 Mohm, C 0..100 mF, L 0..100 H; |Z| and X by the R row, design S2.1 "The
-@     other quantities");
+@     (UM 1543: R 0..10 Mohm, C 0..100 mF, L 0..100 H; |Z| and X by the R row);
 @   - a finite negative value by its quantity (revision 14 rule 1, owner 2026-11-24; it corrects
 @     revision 13, which showed every negative as 0): the true value lies at one end of its range.
 @     Quantities proportional to a near-zero component, series R (Rs = Re Z), parallel C (Cp = Im
@@ -27,7 +26,7 @@
 @     accuracy table). Reciprocals of a near-zero component, parallel R (Rp = 1 / Re Y), series C
 @     (Cs = -1 / (w Xs)), parallel L (Lp = -1 / (w Bp)): OL. Series or parallel is the word
 @     0x200011EC (0 / 1), which meas_publish writes in the same block as R, C and L (its only
-@     writer besides the start-up zero fill; design revision 14.1). |Z| (own_fmt_z) takes 0 and is
+@     writer besides the start-up zero fill; revision 14). |Z| (own_fmt_z) takes 0 and is
 @     never negative (revision 10). X (own_fmt_x) keeps its sign;
 @   - else the vendor formatter (0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L) on the magnitude, one
 @     decimal less where its text would exceed 19,999 counts (S2.4, D5; C 2000.0 .. 7999.9 uF
@@ -36,10 +35,10 @@
 @     vendor gets the magnitude); a text of more than 7 characters with its sign is OL (never
 @     reached by the vendor formats: at most 6 characters);
 @   - MF_MARK = 1 when the magnitude lies outside the accuracy table of the manual for the
-@     frequency now (UM 1596-1646 as read in design S2.1; 120 Hz in the 100 Hz column; 60 Hz has no
-@     column: always marked), else 0 (design D6: the value is shown, with a marker);
+@     frequency now (UM 1596-1646; 120 Hz in the 100 Hz column; 60 Hz has no
+@     column: always marked), else 0 (the value is shown, with a marker);
 @ - D, Q (0x0800DD44) and theta (0x0800DFC4): the vendor formatter on the value, the S2.4 decimal
-@   rule, MF_MARK = 0 (no table entry, design S2.1); a D below 0 is given to it as +0 ("0.0000",
+@   rule, MF_MARK = 0 (no table entry, S2.1); a D below 0 is given to it as +0 ("0.0000",
 @   "%0.4f" below 10), a Q below 0 is OL (revision 14 rule 1; meas_publish stores both as
 @   magnitudes, so neither is negative there today); theta keeps its sign. Beside a main row C or L
 @   whose text is 0 ("0.0" pF / uH, fmt_dq), D is OL and Q is "0.0000" (revision 15).
@@ -79,7 +78,7 @@
 	.p2align 2
 
 @ ----------------------------------------------------------------------------
-@ The wrappers (file header; design revision 14.2). All: r0 = text, r1 = unit text, r2 = index
+@ The wrappers (file header; revision 14). All: r0 = text, r1 = unit text, r2 = index
 @   word address (the vendor interface); s0 = the value, except own_fmt_rz / own_fmt_dqs (r3 =
 @   the address of the value word) and own_fmt_rs (0x200050B8). AAPCS: r0..r3, r12, s0..s15
 @   changed.
@@ -783,7 +782,7 @@ fmt_vendor:
 fmt_hard:
 	.word	0x4B189680, 0x4CBEBC20, 0x4CBEBC20
 
-@ the accuracy table (design S2.1, from UM 1596-1646): {lower, upper} per kind and column
+@ the accuracy table (S2.1, from UM 1596-1646): {lower, upper} per kind and column
 @ (columns 100 / 1k / 10k / 100k Hz; units ohm, nF, uH); the R upper limit of the 100 Hz column
 @ (fmt_spec + 4) is also fmt_lowz's limit of |Z|
 fmt_spec:

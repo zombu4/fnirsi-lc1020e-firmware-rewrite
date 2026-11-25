@@ -132,14 +132,14 @@ fn_0800b9d4:
 @     until bit 25 of RCC_CTRL is set; clears bits 1:0 of RCC_CFG and ors 2;
 @     waits until (RCC_CFG & 0xf) >> 2 equals 2; returns.
 @ Frame: push {r2,r3,lr}; the stack words at sp and sp+4 are scratch.
-@ Our build (.ifdef OWN, MEASUREMENT_FIX_DESIGN.md revision 17): the same code at the
+@ Our build (.ifdef OWN, revision 17): the same code at the
 @ same addresses with three same-size changes. Both unbounded waits are bounded
 @ (own/boot.s): 0x0800BAD6 bl own_pll_wait (PLLRDF, at most 0x8000 polls; a timeout
 @ clears PLLEN), 0x0800BAEC bl own_sw_wait (SCLKSTS = PLL, at most 0x8000 polls; a
 @ timeout sets SCLKSW = HSI again); each returns with Z set (r1 = 0) on its timeout,
 @ and beq.n then takes the HSE-failure exit 0x0800BAF8 (clock word 8 MHz, return):
-@ the core stays on the HSI, and own_start shows the fault screen (VENDOR_FIXES_DESIGN
-@ F4). And 0x0800BA8C: ldrb.w r1, [sp, #0] / cbz r1 (6 bytes) as cmp r1, #0 / beq.n /
+@ the core stays on the HSI, and own_start shows the fault screen (F4).
+@ And 0x0800BA8C: ldrb.w r1, [sp, #0] / cbz r1 (6 bytes) as cmp r1, #0 / beq.n /
 @ nop: r1 already holds the byte the strb.w before it stored, so the test is the same;
 @ written as cmp / beq so that no cbz spans the changed lines (asm rule: a cbz at most
 @ 31 lines from its target). The V1.1 text stays unchanged in the .else part.
@@ -673,7 +673,7 @@ fn_08027ff4:
 	blt.n	.L08028166
 .ifdef OWN
 @ Our build: each bl below stores a start-up stage first (own/boot.s own_stg_*, then a tail
-@ call of the V1.1 target; MEASUREMENT_FIX_DESIGN.md revision 17, 17.2), and the load of
+@ call of the V1.1 target; revision 17), and the load of
 @ 0x20001140 at 0x0802819A stores stage 12 or 13 (own_stg_first, the same value in r0).
 	bl	own_stg_814c		@ 0x0802817C: stage 6, fn_0800814c
 	bl	own_stg_lcd		@ 0x08028180: stage 7, fn_08009c14 (LCD set-up)

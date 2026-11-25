@@ -23,8 +23,7 @@ Per image:
       exactly the listed ones (ALLOWED below), with the offsets they store to
 Exit status 0 only when every image passes and every control is reported as expected.
 
-Application mode (our build, `make own` in firmware/; SETTINGS_SAVE_DESIGN.md "Tests",
-USB_CONTROL_DESIGN.md 7):
+Application mode (our build, `make own` in firmware/):
     python3 -I tests/check_never_brick.py --app [APP_OWN.bin app_own.elf]
         (default firmware/build/own/APP_OWN.bin and app_own.elf, image at 0x08006000), then the
         application-mode controls
@@ -49,7 +48,7 @@ USB_CONTROL_DESIGN.md 7):
   A6  every flash address (0x08000000..0x08080000) constructed in an own/ocal.s function, and every
       word of an ocal.s data label, lies in the own calibration area 0x08062000..0x08065FFF, or is
       0x08066000 (OCAL_END, the area's exclusive end bound), or is the address of an ocal.s or
-      save.s symbol (OWN_CAL_DESIGN.md 1.4); A5 applies to ocal.s unchanged
+      save.s symbol; A5 applies to ocal.s unchanged
   W3 / W4 do not apply (the settings pages are this mode's own targets; the application holds
   addresses of its own area).
 """

@@ -1,11 +1,11 @@
 @ lang.s - English only in our build: the settings menu without the language item.
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ Specification: LANGUAGE_DESIGN.md revision 2. The language word 0x2000115C (block 0xBE0) selects
+@ Revision 2. The language word 0x2000115C (block 0xBE0) selects
 @ row 0 (Chinese) or row 1 (English) of 17 pointer tables in RAM; save.s keeps it and the
 @ first-start flag 0x20001140 (block 0xBC4) at 1 in RAM and in every copy it writes. In our
 @ build row 0 of every table already equals row 1 in the initial RAM image (src/rodata_04.s
-@ ram_image, PACKING_DESIGN.md section 4), so every reader gets an English text whatever the
+@ ram_image), so every reader gets an English text whatever the
 @ language word holds. The Chinese strings, the Chinese glyphs of the fonts 0x0802ce5c /
 @ 0x0802f0d8 and the Chinese speed icons are freed in our build (src/rodata_01..04.s,
 @ .ifdef OWN; link_own.ld). Addresses of data below are V1.1 addresses, reached through their

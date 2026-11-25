@@ -11,10 +11,12 @@ one hold time. Each case builds and navigates one rig for its state, snapshots t
 run instead (the slow reference). k30 prints one 'k30rec' line per run (state, bit, hold, answer status,
 refused, check values) in both modes.
 
-Specification: USB_CONTROL_DESIGN.md revision 4 (section 9 decisions override the older text; section 7
-lists these tests), SETTINGS_SAVE_DESIGN.md revision 4, and the interface comments of firmware/own/
-ctl.s, cmd.s, usb.s, screen.s, save.s, own.inc, ctl.inc. Expected values come from those texts or
-from the RAM words the code reads (named per check).
+Specification: the requirements and decisions of the USB control channel (never brick, never lose the
+calibration, the IWDG period 0.67..1.33 s, own RAM 0x20018000..0x2001DFFF, every confirming command takes
+the u16 0x4F4B, the soft restart through the request word 0x2001FFF4) and of the settings save (copies
+A and B, saves held while no copy is valid or A is damaged, the trailer mark read back before any erase),
+and the interface comments of firmware/own/ctl.s, cmd.s, usb.s, screen.s, save.s, own.inc, ctl.inc.
+Expected values come from those rules or from the RAM words the code reads (named per check).
 
 Model: tests/meter_model.py in flash mode 'app' with timing (core 144 MHz, the IWDG at the LSI each
 case names, NVIC, SysTick), tests/usb_host.py (UsbDevice on the chip side, UsbHost driving it), and
@@ -37,7 +39,7 @@ these test-side device models:
 The application runs with the copies A / B made from the block the firmware itself builds on a
 first start (default_block(): erased copies -> own_load finds none, 0x0800B4C8(1) writes the
 defaults into RAM, its save is held), with the first-start flag 0x20001140 (block 0xBC4) set to 1.
-Our build is English only (LANGUAGE_DESIGN.md, tests/test_own_lang.py): own_load and own_save keep the
+Our build is English only (the language chooser and the Chinese texts are removed; tests/test_own_lang.py): own_load and own_save keep the
 first-start flag and the language word at 1, so screen 0 (the language chooser) is never reached, and
 the settings menu shows the vendor items 0, 2, 3, 4, 5, 6 (own_menu).
 """
@@ -103,12 +105,12 @@ C = dict(INFO=0x00, PING=0x01, RESET=0x02, BATTERY=0x03, POWER_OFF=0x05, FACTORY
 E_KEY, E_SCREEN, E_SETTING, E_POWERED_OFF, E_MEASURE, E_SAVE, E_CAL = 0x90, 0x91, 0x93, 0x94, 0x95, 0x96, 0x97
 OK2, OFF2 = struct.pack('<H', 0x4F4B), struct.pack('<H', 0x4F46)
 CAPS_ALL, INFO_SIZE, STATE_SIZE, MEASURE_SIZE, COMPARE_SIZE = 0x0FEFFFFF, 58, 32, 66, 50   # bit 20 clear,
-                                     # bit 21 direct set, bits 22..24 MEASUREMENT_FIX_DESIGN.md stage 2
+                                     # bit 21 direct set, bits 22..24 the stage-2 features
                                      # (60 Hz, tolerance modes, MEASURE marker byte 64 / SV_SAME), bit 25
                                      # the stage-3 sweep (own/cal.s), bit 26 the own calibration area
                                      # (own/ocal.s), bit 27 the start-up diagnostics (own/boot.s, INFO
                                      # 46..57, revision 17); MEASURE 64 + 2, COMPARE 29 + 21
-# own.inc (MEASUREMENT_FIX_DESIGN.md revision 17): no-init progress words, stages, clock flags; ctl.inc
+# own.inc (revision 17, safe clock start-up and start-up diagnostics): no-init progress words, stages, clock flags; ctl.inc
 # CT_RSTF; own.inc O_FUNC + MF_SECPICK; RCC (manual 6.3.2, 6.3.3, 6.3.11)
 BOOT_PREV, BOOT_PROG, BOOT_TAG = 0x2001FFE8, 0x2001FFEC, 0x5350
 STG_RESET, STG_CLOCK, STG_GPIO, STG_START, STG_LOAD, STG_CA2C, STG_C86C, STG_LOOP = 1, 2, 3, 4, 5, 12, 13, 14
@@ -126,7 +128,7 @@ V_KEY_BUSY = 0x20001190                  # own.inc: hold busy halfword (fn_08009
 IWDGRSTF, PORRSTF, RST_FLAGS = 1 << 29, 1 << 27, 0xFEB80000
 KEY_POWER, KEY_UP, KEY_OK = 0x0001, 0x0002, 0x0008
 LSI = 60000                      # the shortest period, 2501 * 16 / 60000 s, for every watchdog check
-PERIOD_MIN = 0.67                # USB_CONTROL_DESIGN.md requirement 2
+PERIOD_MIN = 0.67                # the shortest IWDG period (the period is 0.67..1.33 s): the bound for every stretch
 SYSMEM = 0x1FFF0000
 UID = bytes(range(0x10, 0x1C))
 POWER_OFF_LR = 0x08009479        # return address of the bl own_save at 0x08009474 (app_01.s; a same-size
@@ -890,7 +892,7 @@ def k09_reset_and_power_off():
     # the path from 0x08009452: own_save writes both copies (2 page erases and about 0xC14 / 4 words
     # each: 4 x T_ERASE 100 ms + 1550 x T_PROG 225 us of meter_model = 0.75 s), fn_08008120(200),
     # then 0x0800B274 sets PA8 low; with the block unchanged in both copies the save writes nothing
-    # and reports SV_SAME 9 (MEASUREMENT_FIX_DESIGN.md S2.10)
+    # and reports SV_SAME 9 (S2.10: the save is skipped when A and B already hold the staged block)
     rig.run(1.5)
     check(rig.m.st['pa8'] == 0, 'PA8 not low after POWER_OFF')
     want = 9 if same else 0
@@ -1018,7 +1020,7 @@ def k12_state_and_measure_stream_framing():
 def k13_events_key_screen_setting():
     rig = Ctl().up()
     rig.drain(0.1)
-    rig.press(0x0400, 1200)                              # long key 0x400: screen 1 -> 2 (NOTES Keys)
+    rig.press(0x0400, 1200)                              # long key 0x400: screen 1 -> 2 (V1.1 key behaviour)
     ev = [f for f in rig.drain(0.3) if f['type'] == FR_EVENT]
     keys = [f for f in ev if f['cmd'] == E_KEY]
     scr = [f for f in ev if f['cmd'] == E_SCREEN]
@@ -1291,7 +1293,7 @@ class HseFails:
 def k19_hse_failure_no_usb_start():
     """fn_0800ba4c: HSE not ready after 0x8000 polls -> the branch 0x0800BAF8, no PLL, the core
     stays on the HSI (8 MHz). Our build latches the power at once (own_pa8_level: PA8 high while
-    SCLKSTS is not the PLL, VENDOR_FIXES_DESIGN.md F4) and ends in xtal_fault (k33), so ctl_loop,
+    SCLKSTS is not the PLL; fix F4, a clean power-off instead of the vendor's endless IWDG restarts) and ends in xtal_fault (k33), so ctl_loop,
     which starts USB, is never reached: no USBEN, no pull-up over 3 s from the reset vector, PA8
     high. Then usb_start is called directly in that HSI state: it returns 1 (SCLKSTS is not the
     PLL) and starts nothing.
@@ -1390,7 +1392,7 @@ def k21_write_block_then_restart():
 
 @case
 def k22_setup_language():
-    """English only (LANGUAGE_DESIGN.md): SETUP_LANGUAGE has no handler, status 1 for any payload, also
+    """English only (the language chooser and the Chinese texts are removed): SETUP_LANGUAGE has no handler, status 1 for any payload, also
     with a block whose first-start flag and language are 0 (it starts on the measure screen)."""
     blk0 = block_with(lang_set=0, **{'0x2000115c': 0})
     rig = Ctl(a=copy_image(blk0, 2), b=copy_image(blk0, 1)).up()
@@ -1424,7 +1426,7 @@ def k23_update_mode_refused_on_version_1_slots():
         rig.run(1.0)
         check(rig.rd(REQ_WORD) == 0, 'request word written')
         # RESET is refused the same way (a version-1 slot does not feed the watchdog after a
-        # soft restart, USB_CONTROL_DESIGN.md 6b), with no data and no restart word
+        # soft restart), with no data and no restart word
         st, d = rig.ask('RESET')
         check(st == S_SAFETY and d == b'', 'RESET on slot %d version 1: status %d data %r' % (slot, st, d.hex()))
         rig.run(1.0)
@@ -1664,7 +1666,7 @@ def nav_settings(rig, item, dialog=False):
         rig.press(mask, ms)
         rig.m.run_for(seconds=3.0, until=lambda mm: rig.rd16(V_KEY_CODE) == 0)
         check(rig.rd16(V_KEY_CODE) == 0, 'nav_settings: key 0x%X not consumed within 3 s' % mask)
-    tap(KEY_OK, 1200)                                # long 8: settings (NOTES "8 long: settings screen")
+    tap(KEY_OK, 1200)                                # long 8: settings (V1.1 key behaviour: key 8 long opens the settings screen)
     for _ in range(item - 1 if item else 0):
         tap(0x0020)                                  # next visible item (cmd.s add_menu: key 0x20)
     if dialog:
@@ -1684,7 +1686,7 @@ STATES = [
     ('calibration running', 1, lambda r: (nav_settings(r, 5, dialog=True), r.press(KEY_OK)),
      lambda r: r.rd(V_CAL_RUN) != 0, {POWER_OFF_LR, CAL_FINISH_LR}),
 ]
-# block words a key may change (NOTES "User functions, settings ..."): the settings, the screen word;
+# block words a key may change (the V1.1 user functions and settings): the settings, the screen word;
 # never the markers, the calibration tables, the calibration work area 0x200010C0..0x20001137
 # (block 0xB44..0xBBB), the first-start flag or the undocumented words 0x2000117C / 0x20001180
 ALLOWED = {a - V_BLOCK for a in (V_LEVEL, V_BIAS, V_FREQ, V_FUNC, V_RANGE, V_SPEED, V_CIRCUIT, V_BRIGHT,
@@ -1778,7 +1780,7 @@ def _k30_guard(state):
                     rig.run(0.05)
                 b1 = rig.rd(V_BLOCK, BLK)
                 bad = [o for o in block_diff(b0, b1) if o not in ALLOWED]
-                # revision 10 item 4 of MEASUREMENT_FIX_DESIGN: an injected key 8 in the calibration dialog starts
+                # revision 10 item 4 (remote control of the calibration menu): an injected key 8 in the calibration dialog starts
                 # the calibration as the meter's key does; the start zero-fills 0x200010C0..0x20001137 (block
                 # 0xB44..0xBBB, ui_44.s 0x0800F740) and its sweep (own/cal.s) runs
                 started = name != 'calibration running' and rig.rd(V_CAL_RUN) != 0
@@ -1958,7 +1960,7 @@ def fb_replay(flushes):
 
 def f1_draw(rig, fb, x, top, text, shades):
     """Test's own rendering of text in font F1 (object d_0802ce5c) from the font data in the image,
-    by the format of RESOURCE_FACTS.md section 7 (ranges type 2 / 3, glyph entry, 2-bpp stream,
+    by the format the vendor font engine reads (font object, font record, ranges type 2 / 3, glyph entry, 2-bpp stream,
     top = line top + line height - base line - box height - y offset). Returns the pen x after it."""
     def rd(a, n):
         return bytes(rig.m.uc.mem_read(a, n))
@@ -2010,7 +2012,7 @@ XT_LINES = [(6, XT_RED, 'CRYSTAL FAULT'), (44, XT_WHITE, 'The 8 MHz crystal of t
 
 @case
 def k33_crystal_fault_screen_then_power_off():
-    """VENDOR_FIXES_DESIGN.md F4: HSE never ready (HseFails), started through starter and slot A on
+    """Fix F4 (crystal failure): HSE never ready (HseFails), started through starter and slot A on
     trial (INSTALL A), so the slot's IWDG runs (hand-over bit 8) through the whole fault screen. The
     model core runs at 8 MHz, one cycle per instruction (as k19). Expected: xtal_fault reached with
     PA8 high; at the power-off (fn_0800b274) the panel shows the nine lines of xtal.s in F1 (this
@@ -2085,7 +2087,7 @@ def logo_compose(rig, pic, rows, table):
 
 @case
 def k34_start_up_logo_fu_nirsi():
-    """VENDOR_FIXES_DESIGN.md F9: own_logo (logo.s) draws the white word, the three drops and the blue
+    """Fix F9 (start-up logo): own_logo (logo.s) draws the white word, the three drops and the blue
     word. Expected (panel model, the windows between own_logo and the GUI set-up fn_08021e98):
     244 one-column windows of 27 rows at x 38.., y 106 with this test's composition of the white
     table, then 244 of 28 rows at y 105 with the blue one; the drops' one-pixel windows (fn_08009ba0)
@@ -2162,7 +2164,7 @@ def k35_setting_events_of_the_block_compare():
     return True
 
 
-# ---------------------------------------------------------------- revision 17 (MEASUREMENT_FIX_DESIGN.md)
+# ---------------------------------------------------------------- revision 17 (safe clock start-up, start-up diagnostics)
 
 def strict_rcc(m):
     """meter_model's opt-in RCC rules (module docstring): SCLKSTS follows SCLKSW only after 3 reads of
@@ -2596,6 +2598,228 @@ def k45_pll_locks_after_polls_below_the_bound():
           and regs.get(RCC_CFG, 0) & APB_PRES == 0x2500,
           'RCC_CTRL 0x%08X RCC_CFG 0x%08X' % (regs.get(RCC_CTRL, 0), regs.get(RCC_CFG, 0)))
     check(not m.st['viol'], 'violations %r' % m.st['viol'])
+    return True
+
+
+# ---------------------------------------------------------------- settings recovery over USB (k46..k50)
+
+# own.inc 390..397 (SF_*), 416..418 (COPY_*), 794 (SVO_LOADED 0x0C)
+SF_DIFFERS, SF_A_ONLY, SF_A_DAMAGED = 0x02, 0x10, 0x20
+COPY_A, COPY_B = 1, 2
+SAVE_LOADED = OWN_SAVE + 0x0C
+REC_USR0 = 0x20000B20            # block offset 0x5A4: the first word of the user table (inside 0x04..0xB43)
+U_0125, U_025 = 0x3E000000, 0x3E800000   # float32 0.125 and 0.25 (IEEE 754 bits)
+MARKER_BYTES = struct.pack('<I', 0x12345678)  # own.inc BLK_MARKER, block offsets 0 and 0xC10
+
+
+def recovery_blocks():
+    """Two blocks that differ only in the user table word 0x20000B20 (block offset 0x5A4, inside the
+    calibration tables 0x04..0xB43 that own_load compares, save.s 1107..1121): A 0.125, B 0.25; the
+    first-start flag and the language word 1 in both (save.s stage_seal 820 sets them to 1 in every
+    copy written, so the copy written equals its source block byte for byte)."""
+    blk_a = block_with(lang_set=1, **{'0x2000115c': 1, '0x20000b20': U_0125})
+    blk_b = block_with(lang_set=1, **{'0x2000115c': 1, '0x20000b20': U_025})
+    check(blk_a[0x04:0xB44] != blk_b[0x04:0xB44] and blk_a[:0x5A4] == blk_b[:0x5A4]
+          and blk_a[0x5A8:] == blk_b[0x5A8:], 'recovery blocks: not one differing calibration word')
+    return blk_a, blk_b
+
+
+def recovery_rig(a, b, flags, loaded):
+    """Ctl with copies a / b; checks the load state the case needs (own_load, save.s 1087..1186) and
+    that the start wrote no flash (both copies still the images given); then the frames so far
+    dropped and the operation log cleared."""
+    rig = Ctl(a=a, b=b).up()
+    check(rig.rd(SAVE_FLAGS) == flags and rig.rd(SAVE_LOADED) == loaded,
+          'after the load: flags 0x%X loaded %d, expected 0x%X / %d'
+          % (rig.rd(SAVE_FLAGS), rig.rd(SAVE_LOADED), flags, loaded))
+    check(rig.m.get(SET_A, 0x1000) == a and rig.m.get(SET_B, 0x1000) == b, 'the start changed a copy')
+    rig.drain(0.3)
+    del rig.host.frames[:]
+    del rig.m.st['log'][:]
+    return rig
+
+
+def recovery_ops(rig, hits, target, other, what):
+    """The flash operations of the command (those before the restart's starter entry, if any): the two
+    pages of target erased once each (write_copy, save.s 855..957: (b) erases both pages, one attempt
+    when nothing fails), every word programmed inside target (trailer sequence, the 0x305 block words,
+    the CRC word: 775), none in other."""
+    end = hits['starter'][0]['log'] if hits['starter'] else len(rig.m.st['log'])
+    ops = [x for x in rig.m.st['log'][:end] if x[0] in ('word', 'erase')]
+    er = [x[1] for x in ops if x[0] == 'erase']
+    wd = [x[1] for x in ops if x[0] == 'word']
+    check(er == [target, target + PAGE], '%s: erases %r, expected the two pages of 0x%08X'
+          % (what, ['0x%08X' % e for e in er], target))
+    check(len(wd) == 2 + BLK // 4 and all(target <= w < target + 0x1000 for w in wd),
+          '%s: %d words, outside 0x%08X: %r' % (what, len(wd), target,
+                                                ['0x%08X' % w for w in wd if not target <= w < target + 0x1000][:4]))
+    check(not [x for x in ops if other <= x[1] < other + 0x1000], '%s: copy 0x%08X touched' % (what, other))
+
+
+def save_events(rig, seconds):
+    """SAVE_RESULT (0x96) payloads among the frames read during the request and the next seconds."""
+    fr = list(rig.host.frames) + rig.drain(seconds)
+    return [f['payload'] for f in fr if f['type'] == FR_EVENT and f['cmd'] == E_SAVE]
+
+
+@case
+def k46_restore_b_with_a_loaded_then_restart():
+    """SETTINGS_RESTORE_B (0x55) allowed: input A = blk_a seq 8, B = blk_b seq 7 (recovery_blocks):
+    own_load takes A (both valid, sequence B 7 <= A 8: save.s 1103..1104) and sets SF_DIFFERS (the
+    calibration words differ, 1107..1121): flags 0x02, loaded COPY_A, checked before the command.
+    PROTOCOL.md 752 allows it (not held, flag 1). Expected:
+    - answer status 0 (sv_map of SV_OK, cmd.s 240; PROTOCOL.md 717), 8 data bytes (save_answer, cmd.s
+      1134): save status 0, save flags 0x80: save_restore_b clears SF_DIFFERS | SF_A_ONLY |
+      SF_REWRITE_A and sets SF_RESTART because A was the loaded copy (save.s 1411..1418);
+    - copy A = blk_b with B's sequence 7 (MODE_A, r1 = B's sequence, save.s 1405..1410; write_copy
+      855..957: block, 0xFF, sequence, CRC-32 of block + sequence = copy_image), copy B unchanged;
+      only A's two pages erased and programmed (recovery_ops);
+    - the restart: h_restore_b sets r5 = 1 (cmd.s 1245..1251) and SF_RESTART is set, so ACT_RESET
+      (cmd.s 1280..1291) -> soft_restart with REQ_RESTART after the answer (ctl.s act_step; PROTOCOL.md
+      330 "After status 0 the meter restarts"); check_restart;
+    - after it own_load sees equal sequences 7 / 7 and equal blocks: A loaded, flags 0 (save.s
+      1103..1121), and RAM word 0x20000B20 = 0.25 (B's value; before the command it was A's 0.125)."""
+    blk_a, blk_b = recovery_blocks()
+    a, b = copy_image(blk_a, 8), copy_image(blk_b, 7)
+    rig = recovery_rig(a, b, SF_DIFFERS, COPY_A)
+    check(rig.rd(REC_USR0) == U_0125, 'RAM user word 0x%08X before the command, expected A\'s' % rig.rd(REC_USR0))
+    hits = watch_restart(rig)
+    st, d = rig.ask('RESTORE_B', OK2)
+    check(st == S_OK and d == struct.pack('<II', 0, SF_RESTART), 'RESTORE_B: status %d data %s' % (st, d.hex()))
+    check_restart(rig, hits, REQ_RESTART, 'RESTORE_B')
+    recovery_ops(rig, hits, SET_A, SET_B, 'RESTORE_B')
+    check(rig.m.get(SET_A, 0x1000) == copy_image(blk_b, 7), 'copy A is not blk_b with sequence 7')
+    check(rig.m.get(SET_B, 0x1000) == b, 'copy B changed')
+    check(rig.rd(SAVE_FLAGS) == 0 and rig.rd(SAVE_LOADED) == COPY_A,
+          'after the restart: flags 0x%X loaded %d' % (rig.rd(SAVE_FLAGS), rig.rd(SAVE_LOADED)))
+    check(rig.rd(REC_USR0) == U_025, 'after the restart: RAM user word 0x%08X, expected B\'s 0.25' % rig.rd(REC_USR0))
+    return True
+
+
+@case
+def k47_accept_a_with_a_loaded_no_restart():
+    """SETTINGS_ACCEPT_A (0x56) allowed, A loaded: input as k46 (A = blk_a seq 8, B = blk_b seq 7;
+    flags SF_DIFFERS 0x02, COPY_A, save.s 1103..1121). PROTOCOL.md 753 allows it (not held, flag 1).
+    Expected:
+    - answer status 0, data save status 0, flags 0: save_accept_a clears SF_DIFFERS | SF_A_ONLY and
+      sets SF_RESTART only when B was loaded (save.s 1456..1463; A was loaded here);
+    - copy B = blk_a with A's sequence 8 (MODE_B, r1 = A's sequence, save.s 1450..1455; copy_image),
+      copy A unchanged; only B's two pages erased and programmed (recovery_ops);
+    - no restart: h_accept_a sets r5 = 0 (cmd.s 1253..1259) and SF_RESTART stays clear, so no ACT_RESET
+      (cmd.s 1280..1291); 1.2 s after the answer (longer than ACT_LIMIT_MS 1000, ctl.inc 135, the bound
+      of a pending action) the starter was not entered;
+    - one SAVE_RESULT event (0x96, PROTOCOL.md 791: the save counter changed, finish, save.s 1020..1040)
+      with save status 0 and flags 0 (ctl.s 1915..1931: own_save_status, own_save_flags);
+    - RAM flags 0 and the RAM user word still A's 0.125 (nothing reloaded)."""
+    blk_a, blk_b = recovery_blocks()
+    a, b = copy_image(blk_a, 8), copy_image(blk_b, 7)
+    rig = recovery_rig(a, b, SF_DIFFERS, COPY_A)
+    hits = watch_restart(rig)
+    st, d = rig.ask('ACCEPT_A', OK2)
+    check(st == S_OK and d == struct.pack('<II', 0, 0), 'ACCEPT_A: status %d data %s' % (st, d.hex()))
+    ev = save_events(rig, 1.2)
+    check(not hits['starter'], 'ACCEPT_A with A loaded restarted the meter')
+    check(ev == [struct.pack('<II', 0, 0)], 'SAVE_RESULT events %r' % [e.hex() for e in ev])
+    recovery_ops(rig, hits, SET_B, SET_A, 'ACCEPT_A')
+    check(rig.m.get(SET_B, 0x1000) == copy_image(blk_a, 8), 'copy B is not blk_a with sequence 8')
+    check(rig.m.get(SET_A, 0x1000) == a, 'copy A changed')
+    check(rig.rd(SAVE_FLAGS) == 0 and rig.rd(REC_USR0) == U_0125,
+          'flags 0x%X, RAM user word 0x%08X' % (rig.rd(SAVE_FLAGS), rig.rd(REC_USR0)))
+    return True
+
+
+@case
+def k48_accept_a_with_b_loaded_then_restart():
+    """SETTINGS_ACCEPT_A (0x56) allowed, B loaded: input A = blk_a seq 7, B = blk_b seq 8: own_load
+    takes B (sequence B 8 > A 7, save.s 1103..1106: SF_A_ONLY) and sets SF_DIFFERS (1107..1121):
+    flags 0x12, COPY_B; RAM user word B's 0.25. PROTOCOL.md 753 allows it. Expected:
+    - answer status 0, data save status 0, flags 0x80: SF_DIFFERS | SF_A_ONLY cleared, SF_RESTART set
+      because B was the loaded copy (save.s 1456..1463);
+    - copy B = blk_a with A's sequence 7 (save.s 1450..1455), copy A unchanged; only B written;
+    - the restart: SF_RESTART set -> ACT_RESET (cmd.s 1280..1291; PROTOCOL.md 753 "restart when B was
+      the loaded copy"); check_restart;
+    - after it own_load: sequences 7 / 7, blocks equal: A loaded, flags 0, RAM user word 0.125."""
+    blk_a, blk_b = recovery_blocks()
+    a, b = copy_image(blk_a, 7), copy_image(blk_b, 8)
+    rig = recovery_rig(a, b, SF_DIFFERS | SF_A_ONLY, COPY_B)
+    check(rig.rd(REC_USR0) == U_025, 'RAM user word 0x%08X before the command, expected B\'s' % rig.rd(REC_USR0))
+    hits = watch_restart(rig)
+    st, d = rig.ask('ACCEPT_A', OK2)
+    check(st == S_OK and d == struct.pack('<II', 0, SF_RESTART), 'ACCEPT_A: status %d data %s' % (st, d.hex()))
+    check_restart(rig, hits, REQ_RESTART, 'ACCEPT_A')
+    recovery_ops(rig, hits, SET_B, SET_A, 'ACCEPT_A')
+    check(rig.m.get(SET_B, 0x1000) == copy_image(blk_a, 7), 'copy B is not blk_a with sequence 7')
+    check(rig.m.get(SET_A, 0x1000) == a, 'copy A changed')
+    check(rig.rd(SAVE_FLAGS) == 0 and rig.rd(SAVE_LOADED) == COPY_A and rig.rd(REC_USR0) == U_0125,
+          'after the restart: flags 0x%X loaded %d RAM user word 0x%08X'
+          % (rig.rd(SAVE_FLAGS), rig.rd(SAVE_LOADED), rig.rd(REC_USR0)))
+    return True
+
+
+@case
+def k49_accept_b_with_a_damaged():
+    """SETTINGS_ACCEPT_B (0x59) allowed: input A = blk_a seq 5 with byte 0x300 flipped (both markers
+    kept, CRC wrong: copy_check, save.s 469..500; checked on the input), B = blk_b seq 4 valid:
+    own_load takes B and, A's first word being the marker (not 0xFFFFFFFF) with both markers, sets
+    SF_A_ONLY | SF_HELD | SF_A_DAMAGED (save.s 1122..1136): flags 0x31, COPY_B. PROTOCOL.md 754 allows
+    it (flag 5). Expected:
+    - answer status 0, data save status 0, flags 0x10: save_accept_b clears SF_HELD | SF_A_DAMAGED |
+      SF_REWRITE_A and sets nothing (save.s 1299..1301); SF_A_ONLY stays (B is still the loaded copy);
+    - copy A = blk_b with B's sequence 4 (MODE_A, r1 = B's sequence, save.s 1293..1298), copy B
+      unchanged; only A's two pages written;
+    - no restart: h_accept_b r5 = 0 (cmd.s 1261..1267), SF_RESTART clear; 1.2 s after the answer
+      (ACT_LIMIT_MS 1000, ctl.inc 135) the starter was not entered;
+    - one SAVE_RESULT event (0x96, PROTOCOL.md 791) with save status 0 and flags 0x10;
+    - saves no longer held: SETTINGS_SAVE then answers status 0 with save result 0 or 9, not 1 (held)
+      (own_save holds only with SF_HELD | SF_RESTART, save.s 1188..1235; PROTOCOL.md 717..727: 0 OK, 9
+      unchanged, both status 0 by sv_map, cmd.s 240..262)."""
+    blk_a, blk_b = recovery_blocks()
+    damaged = bytearray(copy_image(blk_a, 5))
+    damaged[0x300] ^= 1
+    a, b = bytes(damaged), copy_image(blk_b, 4)
+    check(a[:4] == MARKER_BYTES and a[0xC10:0xC14] == MARKER_BYTES
+          and zlib.crc32(a[:BLK] + a[0xFF8:0xFFC]) != struct.unpack_from('<I', a, 0xFFC)[0]
+          and a[0xFF8:0x1000] != b'\xff' * 8, 'input A: not both markers with a wrong CRC')
+    rig = recovery_rig(a, b, SF_HELD | SF_A_ONLY | SF_A_DAMAGED, COPY_B)
+    hits = watch_restart(rig)
+    st, d = rig.ask('ACCEPT_B', OK2)
+    check(st == S_OK and d == struct.pack('<II', 0, SF_A_ONLY), 'ACCEPT_B: status %d data %s' % (st, d.hex()))
+    ev = save_events(rig, 1.2)
+    check(not hits['starter'], 'ACCEPT_B restarted the meter')
+    check(ev == [struct.pack('<II', 0, SF_A_ONLY)], 'SAVE_RESULT events %r' % [e.hex() for e in ev])
+    recovery_ops(rig, hits, SET_A, SET_B, 'ACCEPT_B')
+    check(rig.m.get(SET_A, 0x1000) == copy_image(blk_b, 4), 'copy A is not blk_b with sequence 4')
+    check(rig.m.get(SET_B, 0x1000) == b, 'copy B changed')
+    check(rig.rd(SAVE_FLAGS) == SF_A_ONLY, 'flags 0x%X' % rig.rd(SAVE_FLAGS))
+    st, d = rig.ask('SET_SAVE', OK2)
+    check(st == S_OK and len(d) == 8 and struct.unpack_from('<I', d)[0] & 0xFF in (0, 9),
+          'SETTINGS_SAVE after ACCEPT_B: status %d data %s' % (st, d.hex()))
+    return True
+
+
+@case
+def k50_restore_b_with_b_loaded_then_restart():
+    """SETTINGS_RESTORE_B (0x55) allowed with B loaded: input as k48 (A = blk_a seq 7, B = blk_b seq 8;
+    flags 0x12, COPY_B, save.s 1103..1121). Expected:
+    - answer status 0, data save status 0, flags 0: SF_DIFFERS | SF_A_ONLY | SF_REWRITE_A cleared, no
+      SF_RESTART (set only when A was the loaded copy, save.s 1411..1418: the RAM block is B's);
+    - copy A = blk_b with B's sequence 8 (save.s 1405..1410), copy B unchanged; only A written;
+    - the restart all the same: h_restore_b r5 = 1 restarts after every SV_OK (cmd.s 1245..1251,
+      1280..1291; PROTOCOL.md 752 "restart after result 0"); check_restart;
+    - after it own_load: sequences 8 / 8, blocks equal: A loaded, flags 0, RAM user word 0.25."""
+    blk_a, blk_b = recovery_blocks()
+    a, b = copy_image(blk_a, 7), copy_image(blk_b, 8)
+    rig = recovery_rig(a, b, SF_DIFFERS | SF_A_ONLY, COPY_B)
+    hits = watch_restart(rig)
+    st, d = rig.ask('RESTORE_B', OK2)
+    check(st == S_OK and d == struct.pack('<II', 0, 0), 'RESTORE_B: status %d data %s' % (st, d.hex()))
+    check_restart(rig, hits, REQ_RESTART, 'RESTORE_B')
+    recovery_ops(rig, hits, SET_A, SET_B, 'RESTORE_B')
+    check(rig.m.get(SET_A, 0x1000) == copy_image(blk_b, 8), 'copy A is not blk_b with sequence 8')
+    check(rig.m.get(SET_B, 0x1000) == b, 'copy B changed')
+    check(rig.rd(SAVE_FLAGS) == 0 and rig.rd(SAVE_LOADED) == COPY_A and rig.rd(REC_USR0) == U_025,
+          'after the restart: flags 0x%X loaded %d RAM user word 0x%08X'
+          % (rig.rd(SAVE_FLAGS), rig.rd(SAVE_LOADED), rig.rd(REC_USR0)))
     return True
 
 

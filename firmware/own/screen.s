@@ -1,8 +1,7 @@
 @ screen.s - screenshot of our build: the screen sent band by band as stream frames over USB.
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ The panel has no read-back used by V1.1 and there is no frame buffer (NOTES.md "Display, keys,
-@ power, measurement state of V1.1"): the GUI draws into the draw buffer 0x20006700 (0xC80
+@ The panel has no read-back used by V1.1 and there is no frame buffer: the GUI draws into the draw buffer 0x20006700 (0xC80
 @ pixels = 10 rows of 320) and hands each finished rectangle to the flush 0x08014F9C, which sets
 @ the panel window (fn_08009e30 x1, y1, x2, y2) and writes the (x2 - x1 + 1) * (y2 - y1 + 1)
 @ halfwords row by row to 0x60020000, then ends in b.w 0x0801DCC0 (clears words +0x10 and +0x14
@@ -36,7 +35,7 @@
 @ - The flush pointer literal 0x08026A3C (gui_25.s) is the only place that names fn_08014f9c;
 @   the hook (`.ifdef OWN`) puts own_flush there.
 @
-@ Capture of one band b (rows 10 b .. 10 b + 9, USB_CONTROL_DESIGN.md section 5 and 9):
+@ Capture of one band b (rows 10 b .. 10 b + 9):
 @ 1. scr_step waits (one check per main-loop pass, no loop) until the TX ring has SCR_ROOM bytes
 @    free, then calls fn_080124d8(0, {0, 10 b, 319, 10 b + 9}) and clears the row mask.
 @ 2. own_flush, for every flush while the band is captured: clips the rectangle to the band's
@@ -60,7 +59,7 @@
 @
 @ GUI tick: word 0x20000480 (fn_080277a0), +10 per SysTick (0x0802A720 ->
 @ add_to_word_20000480_clear_byte_2000047c), SysTick 10 ms while word 0x200002B0 holds
-@ 144000000 (NOTES.md "Keys"): 1 tick = 1 ms under that condition.
+@ 144000000: 1 tick = 1 ms under that condition.
 @
 @ Exports (AAPCS: r0..r3, r12 and the flags clobbered, r4..r11 kept, no FPU register used):
 @   scr_start(r0 = band 0..23, or SCR_ALL) -> r0 = S_OK, S_BUSY (a capture runs), S_NOT_NOW

@@ -1312,7 +1312,7 @@ fn_0800d14c:
 @ 0x08023558(0x20000220, 1).
 @ Our build (.ifdef OWN): the formatter calls go to the wrappers of own/fmt.s; cases 2 and 3
 @ load r3 = the address of D 0x200050D4 / Q 0x200050D0 (`addw` at 0x0800D340 / 0x0800D34C, the
-@ size of the vldr) for own_fmt_dqs at 0x0800D356 (MEASUREMENT_FIX_DESIGN.md revision 14).
+@ size of the vldr) for own_fmt_dqs at 0x0800D356 (revision 14).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800d294,"ax",%progbits
 	.p2align 2
@@ -1514,7 +1514,7 @@ fn_0800d294:
 @ unit index is 0, otherwise 0x08023558(object, 1).
 @ Our build (.ifdef OWN): the formatter calls go to the wrappers of own/fmt.s; cases 4 and 1
 @ load r3 = the address of |Z| 0x200050C4 / R 0x200050B8 (`addw` at 0x0800D406 / 0x0800D432, the
-@ size of the vldr) for own_fmt_rz at 0x0800D43C (MEASUREMENT_FIX_DESIGN.md revision 14).
+@ size of the vldr) for own_fmt_rz at 0x0800D43C (revision 14).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800d3d8,"ax",%progbits
 	.p2align 2

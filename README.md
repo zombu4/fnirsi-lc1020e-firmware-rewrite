@@ -1,8 +1,9 @@
 # FNIRSI LC1020E firmware rewrite
 
-Replacement firmware for the **FNIRSI LC1020E** LCR meter, written by hand in **Thumb-2 assembly**:
-a new measurement core, calibration and display, a two-part bootloader that an interrupted update
-cannot break, and full control over USB.
+Firmware for the **FNIRSI LC1020E** LCR meter in **Thumb-2 assembly**: the vendor's application
+V1.1 as assembly source (it rebuilds the vendor image byte for byte), extended with our own modules
+for measurement, calibration, settings storage and USB control, plus a two-part bootloader. An
+application update that is cut off leaves the meter in update mode, ready to try again.
 
 <p align="center">
   <img src=".github/assets/screen-measure.png" alt="Measure screen: the main reading and the secondary reading" width="320">
@@ -69,7 +70,7 @@ The tests run in an emulator of the chip, its USB device and the measurement har
 [Unicorn](https://www.unicorn-engine.org/) and a C compiler (`cc`, for the emulator's instruction
 counter `tests/blockcount.c`, built on first use):
 
-    python3 -m venv venv && venv/bin/pip install unicorn
+    python3 -m venv venv && venv/bin/pip install unicorn==2.1.4
     venv/bin/python -I tests/check_never_brick.py --app
     venv/bin/python -I tests/test_chain.py
     venv/bin/python -I tests/test_own_measure.py

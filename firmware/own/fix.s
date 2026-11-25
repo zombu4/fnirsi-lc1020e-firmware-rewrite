@@ -82,10 +82,10 @@ own_event_obj:
 @   period at 1 kHz); the user manual (DMA chapter, end of transfer): "To start a new DMA transfer,
 @   need to rewrite the transfer number in the DMA_TXNUMx register with the DMA channel disabled";
 @   written while enabled, the count is lost and the channel is enabled with count 0: the
-@   measurement stops (emulator, NOTES "Measurement path in the emulator").
+@   measurement stops (seen in the emulator).
 @   The fix: CHCFG bit 0 (CHEN) cleared first (the acquisition still running is restarted, which is
 @   what the request byte 0x200011C4 asks for), then the count as before; fn_08008770 enables it.
-@   The re-arm generation (MEASUREMENT_FIX_DESIGN.md S1.4): for DMA1 channel 1 (r0 = 0x40020008,
+@   The re-arm generation (S1.4): for DMA1 channel 1 (r0 = 0x40020008,
 @   the first of the three calls, periph_34.s; one call per re-arm, made only while the request
 @   byte was set) the word OWN_MEAS + MO_G is incremented, so own_measure (meas.s) can tell its
 @   own acquisition from one started by another writer of the request byte. Only this code writes
@@ -137,7 +137,7 @@ own_dma_rearm:
 @   r1 = DMA1 ch8, r2 = DMA2 ch5 register block (CHCFG at +0). The defect: the vendor enables
 @   the three channels one after the other while TIM1 keeps triggering the ADCs, so a CC3
 @   trigger between the enable of ch1 (ADC1, V) and ch8 (ADC2, I) gives buffers one sample apart
-@   (MEASUREMENT_FIX_DESIGN.md 2 "offset by one sample"); in the emulator 386 of 1531
+@   ("offset by one sample"); in the emulator 386 of 1531
 @   acquisitions at 10 kHz had theta 11.25 deg (= 360 / 32, one sample) below the others
 @   (2026-11-22, a calibration sweep point), and the outlier rule then reset the window on
 @   every such run. The fix: both CHCFG words are computed (each as fn_08008770 does: CHCFG | 1)

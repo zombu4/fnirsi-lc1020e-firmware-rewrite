@@ -4,7 +4,7 @@
 Usage (from the repository root, after `make -C firmware own`):
     <python with unicorn 2.1.4> tests/test_own_save.py [case-name-prefix ...]
 
-Specification: SETTINGS_SAVE_DESIGN.md revision 4 ("Save", "Load at start-up", "Held saves", "Tests")
+Specification: revision 4 of the settings storage (save, load at start-up, held saves)
 and the interface comments of firmware/own/save.s and own.inc. The functions of the built image
 (firmware/build/own/APP_OWN.bin at 0x08006000, symbols from app_own.elf) are called directly through
 tests/meter_model.py in flash mode 'app' (the four settings pages are flash with controller semantics,
@@ -22,7 +22,7 @@ own_crc32_update) of the block bytes and the 4 sequence bytes at +0xFFC; copy A 
 format has 0xFFFFFFFF in both trailer words (save.s header).
 
 The expected result of a load is computed by ref_load() from the rules in the header of save.s
-own_load (which follows SETTINGS_SAVE_DESIGN.md "Load at start-up"); the load-combination case checks
+own_load; the load-combination case checks
 ref_load against the expectation written out per case, so a mistake in ref_load shows there.
 """
 import struct
@@ -56,8 +56,8 @@ COPY_NONE, COPY_A, COPY_B = 0, 1, 2
 FL_OK, FL_GATE, FL_NOT_ERASED = 0, 1, 2
 SLOT_A, SLOT_B, SLOT_F = SLOTS[1], SLOTS[2], SLOTS[0]
 PATTERNS = ('unchanged', 'ff', 'mixed')  # the cut patterns meter_model defines for erase and word alike
-IWDG_PERIOD_MIN = 0.67                   # SETTINGS_SAVE_DESIGN.md "Held saves": every bound uses 0.67 s
-FEED_BOUND = 0.12                        # design "Save" 5: about 120 ms between two feeds
+IWDG_PERIOD_MIN = 0.67                   # every bound uses 0.67 s
+FEED_BOUND = 0.12                        # about 120 ms between two feeds
 RAM_CODE, RAM_VT = 0x2001F000, 0x2001F800  # above our RAM (ends 0x2001E000), below the no-init words
 CORE_HZ_1MS = 144_000_000 // 1000        # meter_model CORE_HZ: SysTick reload of 1 ms
 
@@ -77,7 +77,7 @@ def status(result, step=0, copy=0):
     return result | step << 8 | copy << 16
 
 
-# the setting words save.s load_fix checks (MEASUREMENT_FIX_DESIGN.md S2.11), block offset -> a valid
+# the setting words save.s load_fix checks (S2.11), block offset -> a valid
 # value (fn_0800b4c8's defaults): frequency 1000, level 0.6, bias 0, Func 0, range 0, circuit 0,
 # compare quantity 1, nominal 1000.0, tolerance 5.0
 VALID_WORDS = {0xBC8: 1000, 0xBBC: 0x3F19999A, 0xBC0: 0, 0xBCC: 0, 0xBD0: 0, 0xBD8: 0, 0xBFC: 1,
@@ -222,7 +222,7 @@ def valid_copy(img, blk, seq):
 
 @case
 def s01_every_load_combination():
-    """Every combination of SETTINGS_SAVE_DESIGN.md "Load": expected values written out from the
+    """Every combination of the load: expected values written out from the
     header of save.s own_load; ref_load must agree with each."""
     b1, b2 = block(1), block(2)
     erased = b'\xff' * SET_SIZE
@@ -470,7 +470,7 @@ def s06_stuck_bit_in_b():
     rig.clear_log()
     r = rig.call('own_save')
     # flash_word reads back -> FL_VERIFY, write_copy: SV_PROGRAM | STEP_PROGRAM, retried once from
-    # (b), save_stage adds COPY_B; A is not touched (design "Save" 4)
+    # (b), save_stage adds COPY_B; A is not touched
     check(r == status(SV_PROGRAM, STEP_PROGRAM, COPY_B), 'status 0x%X' % r)
     check(rig.flags() & SF_FAILED, 'SF_FAILED not set: 0x%X' % rig.flags())
     ops = rig.ops()
@@ -545,7 +545,7 @@ def s09_trailer_mark_failure_stops_before_any_erase():
 
 @case
 def s10_first_save_on_vendor_format():
-    """V1.1's copy A, B erased: B, then the mark, then A (design "Save" 4 (a))."""
+    """V1.1's copy A, B erased: B, then the mark, then A."""
     b1, b2 = block(1), block(2)
     rig = loaded_rig(copy_image(b1), b'\xff' * SET_SIZE)
     rig.wr(V_BLOCK, b2)
@@ -791,7 +791,7 @@ def s19_interrupt_changes_live_block_during_save():
     m.tm['st'].update(csr=7, rvr=CORE_HZ_1MS - 1, v0=0, t_ref=m.now(), done=0)
     # one word changed before the save (0x104, not the handler's word): the block differs from both
     # copies whether or not a tick lands before the snapshot, so the save writes (an unchanged
-    # snapshot would be SV_SAME, MEASUREMENT_FIX_DESIGN.md S2.10)
+    # snapshot would be SV_SAME, S2.10)
     rig.wr(V_BLOCK + 0x104, w32(rig.ram_block(), 0x104) ^ 0x01)
     v0 = w32(rig.ram_block(), 0x100)
     rig.clear_log()
@@ -818,8 +818,8 @@ def feeds_between(m, t0, t1):
 @case
 def s20_watchdog_stretch_of_whole_saves():
     """IWDG started as V1.1 does (0x08010178); own_load, then saves with LSI 60 kHz (the shortest
-    period 2501 * 16 / 60000 s): longest stretch between two counter loads below 0.12 s (design
-    "Save" 5) and so below 0.67 s; the 16 feeds of a two-copy save: flash_erase_page feeds before
+    period 2501 * 16 / 60000 s): longest stretch between two counter loads below 0.12 s
+    and so below 0.67 s; the 16 feeds of a two-copy save: flash_erase_page feeds before
     and after each of the 4 erases, write_copy after the words at block offsets 0x400, 0x800, 0xC00
     (r5 a multiple of 0x400) and after the last word, per copy."""
     b1 = block(1)
@@ -853,8 +853,8 @@ def s20_watchdog_stretch_of_whole_saves():
     return True
 
 
-# ---------------------------------------------------------------- MEASUREMENT_FIX_DESIGN.md stage 2 / 2F
-# (the design's s06..s09 and the S2.12 persistence; named s21.. here, s06..s20 are taken)
+# ---------------------------------------------------------------- stage 2 / 2F
+# (the cases s06..s09 and the S2.12 persistence; named s21.. here, s06..s20 are taken)
 
 SV_SAME = 9                               # own.inc: both copies hold the block, nothing written
 FREQ_OFF = 0xBC8                          # block offset of 0x20001144
@@ -906,7 +906,7 @@ def s22_one_changed_byte_saves():
 @case
 def s23_vendor_format_a_is_saved():
     """S2.10: A in the vendor format with the same bytes as RAM and B: not skipped, A gets its trailer
-    (SETTINGS_SAVE_DESIGN step 4 (a))."""
+    (step 4 (a))."""
     b1 = block(1)
     rig = loaded_rig(copy_image(b1), copy_image(b1, 3))
     rig.clear_log()

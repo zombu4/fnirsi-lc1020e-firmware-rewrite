@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""test_own_measure.py - the measurement core of our build (firmware/own/meas.s, MEASUREMENT_FIX_DESIGN.md
-revision 4, stage 1: S1.1..S1.9, tests of section 5.1), in the emulator.
+"""test_own_measure.py - the measurement core of our build (firmware/own/meas.s,
+revision 4, stage 1: S1.1..S1.9), in the emulator.
 
 Usage (from the repository root, after `make -C starter`, `make -C bootloader slot`, `make -C firmware`
 (build/app.elf: the vendor build V1.1, byte-identical by `make check`) and `make -C firmware own`):
@@ -16,7 +16,7 @@ The settings come from test_own_control.block_with() (the block 0x0800B4C8(1) wr
 short entries 0, breakpoints 0.01 .. 1e7, so the decade interpolation is the identity up to float
 rounding) with the words a case names; copy A holds it (sequence 2), copy B the same (sequence 1).
 
-Signal sources (test side, measure_model.DutSource extended as the design's "Model extensions" ask):
+Signal sources (test side, measure_model.DutSource extended as these tests require):
   - DutSource: a device under test, z(f) (measure_model.py);
   - TDut: z(f, t), a part that changes at a time; per-channel adc mid (mid_v / mid_i, "adc_mid per
     channel"); a function that may replace the ADC2 codes;
@@ -37,8 +37,8 @@ Probes (hooks of this file, Probe below), each record with the emulated time:
   - re-arms: own_dma_rearm for DMA1 channel 1 (G after it); own re-arm requests: meas_arm;
   - m15, the factory-table write-watch (TableWatch), armed from reset in every case: a
     UC_HOOK_MEM_WRITE on 0x20000580..0x20000B1F and one on the user table 0x20000B20..0x200010BF, each
-    write with PC, LR, address and size; the expected writers of the design's 5.1 m15, plus one the
-    design's list lacks (found by this watch, recorded in its revision 5): at reset __scatterload's
+    write with PC, LR, address and size; the expected writers of m15, plus one the
+    list lacks (found by this watch, revision 5): at reset __scatterload's
     region-table entry 1 (0x0804F190, 0x2000057C, 0x15E2C, zero_fill_words) clears 0x2000057C..
     0x200163A7 before main, RAM only, before own_load.
 
@@ -297,8 +297,7 @@ class VRig:
 
     def run_end(self, seconds):
         """The run for `seconds`; returns its end reason (None while the chip still runs), no check:
-        for controls where V1.1 is known to stop (the re-arm race of fn_080085d0, NOTES "Measurement
-        path in the emulator": a channel enabled at TXNUM 0, then fn_08007efc waits and the IWDG resets)."""
+        for controls where V1.1 is known to stop (the re-arm race of fn_080085d0: a channel enabled at TXNUM 0, then fn_08007efc waits and the IWDG resets)."""
         return self.m.run_for(seconds)
 
     def press(self, mask, ms=60):
@@ -361,7 +360,7 @@ def func_ranges(sym):
 
 
 class TableWatch:
-    """m15: every write to the factory table and the user table (MEASUREMENT_FIX_DESIGN.md 5.1 m15)."""
+    """m15: every write to the factory table and the user table."""
 
     def __init__(self, rig):
         self.rig, m, s = rig, rig.m, rig.s
@@ -635,7 +634,7 @@ def m03_dft():
     """S1.2 at k = 1 / 4 / 16 (1 kHz, 10 kHz, 100 kHz, R 1 kohm, both channels in band 1500..3600 p-p):
     for captured buffers the own bin equals the vendor fn_080069dc bin within B = 2^-16 sum|x|; S1 equals
     the integer sum; sigma^2 >= 0 in every acquisition and within 1e-4 count^2 + 2e-5 sigma^2 of the float64
-    residual (the design's 1e-4 is the model's bound for noise up to 1 count; a buffer with a large residual
+    residual (1e-4 is the model's bound for noise up to 1 count; a buffer with a large residual
     (an acquisition out of band, the 100 kHz DAC images) adds the float32 summation error of 128 rounded
     squares, at most 128 * 2^-24 = 7.6e-6 of the sum, and the rounding of each residual term)."""
     for f in (1000, 10000, 100000):
@@ -710,7 +709,7 @@ def m04_complex_estimate():
     |Z| from the same samples, nothing NaN; (b) ADC2 at code 0 (saturated): the 1e10 / -400 set, never NaN;
     (c) noise-free: a sine on both channels is resolved, a constant ADC2 noise-limited (the no-reading
     set), sigma^2 >= 0 always; (d) |V| ~ |I| (1000 counts each, ratio 1.00 and 1.05, theta -60 deg, S/N
-    50 by the design's 8 A / sigma, sigma = noise_lsb / sqrt 3 for the uniform noise): the mean theta
+    50 by 8 A / sigma, sigma = noise_lsb / sqrt 3 for the uniform noise): the mean theta
     error over 40 windows within 0.15 deg, and every window recomputed; (e) a forced non-finite Zbar
     (sum I' = 1e-30, sum V' = 1e10 written at the publish entry) publishes the overload set, no Inf."""
     # (a) the model's source is ideal (I = k G6 R8 v / z): with the default k a 0.1 ohm part saturates ADC2
@@ -1143,7 +1142,7 @@ def serpar_rule(zc, sp):
 
 
 def expect_words(rig, p, sp=None):
-    """Every output word of a publish from its sums and K (design section 2 / S1.8), float64; series /
+    """Every output word of a publish from its sums and K (S1.8), float64; series /
     parallel by serpar_rule with the state list sp (one per run from its start: undecided)."""
     sv = complex(p['sum'][0], p['sum'][1])
     si = complex(p['sum'][2], p['sum'][3])
@@ -1947,7 +1946,7 @@ def m21_level_steps():
     V p-p = 2 a_v 2^c5): from the start V p-p 2400 at c5 3 and I 2400 at c6 3 (a_v 150, a_i 15); at T1 = 2 s the
     I amplitude / 8 (p-p 300 at c6 3): the step up waits until no history bucket holds an acquisition from
     before the drop, at least one bucket (more than 100 ms) and at most two (2 x (110 ms + 10 ms + one
-    acquisition)) plus one display update (0.12 s, NOTES "Load of a publish"), then the walk c6 3 -> 6 (p-p
+    acquisition)) plus one display update (0.12 s), then the walk c6 3 -> 6 (p-p
     2400) at three acquisitions per step: the first step 0.10..0.45 s after T1, c6 = 6 within 0.65 s; at T2 = 3 s
     the I amplitude x 8 (c6 6 saturated): down at once (the S1.6 two-discard rule: the third out-of-band
     acquisition), the first step within 0.15 s, c6 = 3 within 0.25 s (one display update included); the same

@@ -529,7 +529,7 @@ class UsbDevice:
         return 'ACK', data, pid
 
 
-# ---- frames of the control channel (USB_CONTROL_DESIGN.md section 2; little-endian) ----
+# ---- frames of the control channel (little-endian) ----
 FR_SYNC = 0xA5
 FR_REQUEST, FR_ANSWER, FR_STREAM, FR_EVENT = 1, 2, 3, 4
 

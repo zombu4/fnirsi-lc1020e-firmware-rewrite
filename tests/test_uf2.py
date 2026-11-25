@@ -532,7 +532,7 @@ def u16_update_path_feeds_the_watchdog():
     """A whole update (every sector of the V1.1 .uf2 in order, the CRC and vector page of uf2_finish,
     then slot_finish up to the starter's reset entry, which its soft restart slot_soft_restart
     branches to through word 0x00000004 of the boot space) under a running IWDG: no IWDG reset and
-    the longest stretch between two counter loads below 0.67 s (USB_CONTROL_DESIGN.md section 6 (e)).
+    the longest stretch between two counter loads below 0.67 s (feature version 2, item (e)).
     The state the soft restart leaves is checked by test_chain.py (soft_restart_state). The time
     between two uf2_sector calls is 0 here (direct calls); on the meter the update-mode loop between
     them feeds as well (system_05.s main, slot_feed in every pass)."""

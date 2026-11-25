@@ -407,8 +407,8 @@ fn_080095f0:
 @   mask 0x40: increments word 0x200011e8 (stored 0 when above 4) and
 @     tail-calls fn_0800f854. Our build (.ifdef OWN at 0x080097B8): the load of
 @     0x200011e8 is bl own_sec_key (own/cmp.s), which also sets MF_SECPICK = 1, so
-@     own_auto_class keeps the value the key picks (MEASUREMENT_FIX_DESIGN.md
-@     revisions 16, 17); key_step (own/ctl.s) clears it after fn_08009400.
+@     own_auto_class keeps the value the key picks (revisions
+@     16, 17); key_step (own/ctl.s) clears it after fn_08009400.
 @   mask 0x1000: increments word 0x20001150 (stored 0 when above 2); r2 = word
 @     0x2000115c; calls fn_08021c14(word [0x200001e0], p) with p = 0x08040f10
 @     (value 0, r2 nonzero), 0x0803c690 (0, r2 = 0), 0x08041184 (1, r2

@@ -1,8 +1,7 @@
 @ power.s - automatic power-off of our build: the Off Time setting and the low-voltage countdown.
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ Two vendor defects of V1.1 (VENDOR_FIXES_DESIGN.md F2, F3; NOTES.md "User functions, settings
-@ and measured values of V1.1"):
+@ Two vendor defects of V1.1 (F2, F3):
 @ - F2: the menu setting Off Time (word 0x20001164: 0 off, 1 5 min, 2 15 min, 3 30 min) is stored
 @   and shown, but nothing reads it.
 @ - F3: 0x0800C724 shows the popup "Shutdown Countdown" with 10 when the supply voltage float

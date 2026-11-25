@@ -533,8 +533,7 @@ fn_0800d8f0:
 @ 3: adds r0 to the word 0x2000114c, wraps 5 to 0 and below 0 to 4.
 @ After a change in the modes 0 to 2 it tail-calls fn_08009f10.
 @ Our build: mode 0 branches to own_freq_step (own/meas.s, .ifdef OWN at 0x0800D97A), the
-@ cycle 60 -> 100 -> 120 -> 1000 -> 10000 -> 100000 -> 60 and back (MEASUREMENT_FIX_DESIGN.md
-@ S2.12).
+@ cycle 60 -> 100 -> 120 -> 1000 -> 10000 -> 100000 -> 60 and back (S2.12).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800d940,"ax",%progbits
 	.p2align 2

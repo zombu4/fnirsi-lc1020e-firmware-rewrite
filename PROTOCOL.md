@@ -151,7 +151,7 @@ is their data length. RESET, UPDATE_MODE and the BOOT_* commands take no confirm
 |---|---|---|---|
 | 0x10 | STATE | - | STATE record (section 6.1), 32 bytes |
 | 0x11 | STREAM | period u16 ms, 0 stops | none; STATE records follow as stream frames cmd 0x10 every period (section 11) |
-| 0x12 | SCREEN | screen u8: 1 measure, 2 compare, 3 settings | STATE. Direct (section 5.3.4): the meter's own screen builder of the requested screen runs (from the settings screen an open sorting or calibration dialog is closed first). Status 6 while a calibration runs and from the settings screen while the restore-defaults dialog (item 6) is open; from the calibration dialog (item 5) with no calibration running the dialog is closed (status 0; firmware before MEASUREMENT_FIX_DESIGN revision 10 answered 6); status 3 in screen 0 (the vendor's language chooser; it never occurs: the firmware is English only, section 5.6) |
+| 0x12 | SCREEN | screen u8: 1 measure, 2 compare, 3 settings | STATE. Direct (section 5.3.4): the meter's own screen builder of the requested screen runs (from the settings screen an open sorting or calibration dialog is closed first). Status 6 while a calibration runs and from the settings screen while the restore-defaults dialog (item 6) is open; from the calibration dialog (item 5) with no calibration running the dialog is closed (status 0; firmware before revision 10 answered 6); status 3 in screen 0 (the vendor's language chooser; it never occurs: the firmware is English only, section 5.6) |
 | 0x13 | KEY | key bit u8 0..13, hold u16 ms (optional, 0 or missing: short press) | STATE after the meter handled the key. Status 6 when the key is refused (section 7.3) or the guard stopped a flash write or defaults change; status 4 when a physical key ended the injection or the time limit passed; status 3 in powered-off mode |
 
 ### 5.3 Measurement
@@ -215,7 +215,7 @@ its key that lands on the value; the key is named for reference, it is not press
   the main loop; the job waits for status 2 (finish; the meter saves the result itself) -> answer
   status 0, or 3 (fail) -> status 3. When the running word goes to 0 for 1000 ms without one of
   them: status 3 (counted from the start of the waiting step). After the sweep's end (finish or
-  fail; revision 10 of MEASUREMENT_FIX_DESIGN) the job presses long key 0x008 until the dialog is
+  fail; revision 10) the job presses long key 0x008 until the dialog is
   closed and then returns to the screen it found at the request (1, 2 or 3), so no physical key is
   needed afterwards; the calibration status, the failed point and the reason stay for the answer.
   When a check of the start fails (status 3) the job ends there. Progress comes as CALIBRATION
@@ -441,7 +441,7 @@ Value block (15 bytes):
 | 4 | u8 | unit code of the display text: 0 none, 1 ohm, 2 kohm, 3 Mohm, 4 pF, 5 nF, 6 uF, 7 mF, 8 uH, 9 mH, 10 H, 11 degree |
 | 5 | u8 | decimals: digits after the point in the display text |
 | 6 | u8 | validity: 0 valid, 1 overload ("0L" from the formatter), 2 no reading (the meter's no-reading counter 0x2000120C above 200), 3 held. Checked in the order 3, 2, 1 |
-| 7 | 8 | display text, ASCII, zero padded: the text the display shows (firmware/own/fmt.s on the meter's formatters 0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L, 0x0800DD44 D / Q, 0x0800DFC4 theta): "0L" above the measurement range (R, Z, X above 10 Mohm, C above 100 mF, L above 100 H, or not finite); "0L" in every value block at 60, 100 and 120 Hz when \|Z\| (offset 41) is above 1e7 ohm, the highest impedance the manual specifies at 100 Hz (MEASUREMENT_FIX_DESIGN revision 14; 1, 10 and 100 kHz unchanged); a negative value by its quantity (revision 14, by offset 40): series R (main or secondary), parallel C and series L shown as 0 ("0.0000" with unit code 1 and 4 decimals, "0.0" with unit code 4 and 1 decimal, "0.0" with unit code 8 and 1 decimal; marker bit set), parallel R, series C and parallel L shown as "0L" (validity 1, unit code 0, marker bit clear), a negative D as "0.0000" and a negative Q as "0L" (the meter stores D and Q as magnitudes, so neither comes negative today); D "0L" (validity 1) and Q "0.0000" when the main value is C or L and its text is 0 ("0.0": a negative value shown as 0, or one below the last place; D goes to infinity and Q to 0 as C or L goes to 0; revision 15); revision 13 showed all of them as 0, firmware before it sent them with a '-'; a '-' in front of a negative X or theta, at most 19,999 counts (one decimal less above; C 2000.0 .. 7999.9 uF is sent in mF with 3 decimals, unit code 7; D and Q from 20,000 have no decimal to drop and keep 5 digits). Every byte after the terminating 0 is 0 (firmware before MEASUREMENT_FIX_DESIGN revision 12 could leave bytes of the vendor's longer text there: read the text up to its first 0) |
+| 7 | 8 | display text, ASCII, zero padded: the text the display shows (firmware/own/fmt.s on the meter's formatters 0x0800E028 ohm, 0x0800DB24 C, 0x0800DE2C L, 0x0800DD44 D / Q, 0x0800DFC4 theta): "0L" above the measurement range (R, Z, X above 10 Mohm, C above 100 mF, L above 100 H, or not finite); "0L" in every value block at 60, 100 and 120 Hz when \|Z\| (offset 41) is above 1e7 ohm, the highest impedance the manual specifies at 100 Hz (revision 14; 1, 10 and 100 kHz unchanged); a negative value by its quantity (revision 14, by offset 40): series R (main or secondary), parallel C and series L shown as 0 ("0.0000" with unit code 1 and 4 decimals, "0.0" with unit code 4 and 1 decimal, "0.0" with unit code 8 and 1 decimal; marker bit set), parallel R, series C and parallel L shown as "0L" (validity 1, unit code 0, marker bit clear), a negative D as "0.0000" and a negative Q as "0L" (the meter stores D and Q as magnitudes, so neither comes negative today); D "0L" (validity 1) and Q "0.0000" when the main value is C or L and its text is 0 ("0.0": a negative value shown as 0, or one below the last place; D goes to infinity and Q to 0 as C or L goes to 0; revision 15); revision 13 showed all of them as 0, firmware before it sent them with a '-'; a '-' in front of a negative X or theta, at most 19,999 counts (one decimal less above; C 2000.0 .. 7999.9 uF is sent in mF with 3 decimals, unit code 7; D and Q from 20,000 have no decimal to drop and keep 5 digits). Every byte after the terminating 0 is 0 (firmware before revision 12 could leave bytes of the vendor's longer text there: read the text up to its first 0) |
 
 Sources: main row 1 R 0x200050B8, 2 C 0x200050BC, 3 L 0x200050C0, 4 Z 0x200050C4; secondary 0 R
 (0x200050B8, the signed word the display formats), 1 X 0x200050C8 (sign kept), 2 D 0x200050D4, 3 Q
@@ -460,8 +460,8 @@ R shows theta as its secondary. An overload (ADC saturated with no range step le
 finite value) and the no-reading result (no in-band acquisition for 2 s) carry |Z| 1e10 and theta
 -400, the vendor firmware's values; while hold is on no result is published.
 
-|Z| (0x200050C4) is never negative on the measure and compare screens (revision 10 of
-MEASUREMENT_FIX_DESIGN): where the open / short compensation cannot be used the result is |Zbar|
+|Z| (0x200050C4) is never negative on the measure and compare screens (revision 10):
+where the open / short compensation cannot be used the result is |Zbar|
 minus the short entry, and a reading below the short entry is published as the same complex value
 with |Z| >= 0 and theta moved by 180 degrees (R, X, C, L, D, Q unchanged; firmware before it
 published a negative |Z| with the uncorrected theta). On the settings screen the field is the
@@ -602,7 +602,7 @@ with the same status 6 while a calibration runs and for SCREEN from the dialog o
 | a hold of the power key (bit 0) | the meter's power-off path switches the meter off | POWER_OFF |
 | key 0x0008 in screen 3 on menu item 6 while a dialog is open (0x200011AC != 0) | confirms the restore of the defaults | RESTORE_DEFAULTS |
 
-Key 0x0008 on menu item 5 is not refused (revision 10 of MEASUREMENT_FIX_DESIGN; refused before):
+Key 0x0008 on menu item 5 is not refused (revision 10; refused before):
 with the dialog closed it opens the calibration dialog, in the dialog it starts the calibration,
 the same sweep with the same finish and save as from the meter's keys or CALIBRATE (5.3.3); the
 keys 0x004 / 0x010 there choose the type, a long key 0x008 closes the dialog. With bit 25 the
@@ -621,7 +621,7 @@ UPDATE_MODE is refused with status 6 when the next slot bootloader would not hon
 ### 7.4 Jobs and the screen
 
 CALIBRATE goes to the settings screen for the sweep and, after its end, closes the calibration
-dialog and returns to the screen it found (revision 10 of MEASUREMENT_FIX_DESIGN; before, it stayed
+dialog and returns to the screen it found (revision 10; before, it stayed
 in the dialog and a physical long OK was needed). SETTINGS_SET and COMPARE_SET leave the screen as it is (with bit 21;
 the jobs of older firmware went to the settings screen).
 
@@ -952,7 +952,7 @@ request, `00` INFO, `df fb` CRC-16 0xFBDF over `03 00 01 01 00`.
 
 ## 16. Own calibration area (capability bit 26)
 
-OWN_CAL_DESIGN.md revision 3. Flash 0x08062000..0x08065FFF, two slots of 0x2000 bytes (slot 0 at
+Flash 0x08062000..0x08065FFF, two slots of 0x2000 bytes (slot 0 at
 0x08062000, slot 1 at 0x08064000), written by nothing but the application's ocal.s through the
 settings gate; neither bootloader, the starter nor V1.1 reach it. With both slots erased or
 invalid every reading is the one without the area.

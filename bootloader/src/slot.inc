@@ -4,7 +4,7 @@
 @ Flash layout (the starter's, starter/starter.s):
 @   0x08000000 page 0     starter
 @   0x08006000..0x08061FFF application (vector page 0x08006000..0x080067FF)
-@   0x08066000..0x08066FFF settings copy B of our application (SETTINGS_SAVE_DESIGN.md):
+@   0x08066000..0x08066FFF settings copy B of our application:
 @                          never written here
 @   0x08068000, 0x08068800 control record pages
 @   0x08069000 slot F, 0x0806F000 slot A, 0x08075000 slot B (24 KiB each, header + image)
@@ -63,7 +63,8 @@
         .equ    HANDOVER_TAG,   0x534C0000      @ "SL" << 16; low byte = SLOT_INDEX
         .equ    RESULT_WORD,    0x2001FFFC      @ written before the restart after an update
 
-@ Soft restart (slot_soft_restart, USB_CONTROL_DESIGN.md 6b): N32G45x user manual 6.3.9
+@ Soft restart (slot_soft_restart; a system reset would release the PA8 power latch and switch
+@ the meter off, so planned restarts avoid it): N32G45x user manual 6.3.9
 @ (RCC_APB1PCLKEN USBEN bit 23), 19.5.3 (USB_CTRL 0x40005C40: FRST bit 0, PD bit 1), the D+
 @ pull-up bit 28 of 0x40001820 (usb_09.s fn_08002c10 sets it); ARMv7-M NVIC ICER0..2 /
 @ ICPR0..2 (IRQ 0..95, the vector table ends with IRQ 85), SysTick CTRL, ICSR (PENDSVCLR bit 27,
@@ -89,7 +90,8 @@
 @ 0xAAAA reloads the counter, 0xCCCC starts it), PREDIV +4, RELV +8, STS +12 (PVU bit 0,
 @ CRVU bit 1). The values of the application's own start (V1.1 0x08010178..0x08010198):
 @ PREDIV 2 (LSI / 16), RELV 0x9C4 (2500): 2500 * 16 / 40 kHz = 1.0 s at the manual's LSI
-@ frequency (16.1); USB_CONTROL_DESIGN.md section 6 works with 0.67 s as the shortest period.
+@ frequency (16.1); over the manual's LSI range 30..60 kHz the period is 0.67..1.33 s, so 0.67 s
+@ is the shortest period.
         .equ    IWDG_KEY,       0x40003000
         .equ    IWDG_UNLOCK,    0x5555
         .equ    IWDG_RELOAD,    0xAAAA

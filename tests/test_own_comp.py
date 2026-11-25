@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """test_own_comp.py - stage 4 of our build's measurement core (firmware/own/meas.s meas_comp, meas_cz,
-meas_bias_wait; MEASUREMENT_FIX_DESIGN.md S4.1 with S4.2 option (K), S4.4; design 5.1 "Stage 4" m40..m45 and
-the cases revision 7 adds), in the emulator.
+meas_bias_wait; S4.1 with S4.2 option (K), S4.4; the cases m40..m45 and the
+cases revision 7 adds), in the emulator.
 
 Usage (from the repository root, after `make -C firmware own`):
     <python with unicorn 2.1.4> tests/test_own_comp.py [case-name-prefix ...]
@@ -173,8 +173,8 @@ def check_pubs(rig, z, th, what, n_min=3, since=1.0):
 def m40_fixture_recovered():
     """m40 / m44: a DUT 1000 - j500 ohm (1 kHz, 0.6 V) through the fixture: every publish equals the
     specification's value from its own window; and Zdut is recovered: |Z| within 1e-3 and theta within 0.2
-    degree of the true part (the emulator's own phase offset of about 0.12 degree on 1 kohm, NOTES
-    "Measurement path in the emulator", is inside it). The factory table holds the defaults, so the match
+    degree of the true part (the emulator's own phase offset of about 0.12 degree on 1 kohm,
+    is inside it). The factory table holds the defaults, so the match
     proves the user table was used (m44)."""
     zd = complex(1000.0, -500.0)
     blk = fixture_block()
@@ -436,7 +436,7 @@ def open_at(blk, fis, t11, th11):
 
 @case
 def m49_sixty_hertz_takes_the_100_hz_entry():
-    """S2.12 with MEASUREMENT_FIX_DESIGN revision 11 (an open point stored "not resolved", 1e10 / +400): at 60 Hz
+    """S2.12 with revision 11 (an open point stored "not resolved", 1e10 / +400): at 60 Hz
     (LCR_SET frequency index 5) meas_comp reads the 100 Hz entry of the level. (a) the 100 Hz entries (fi 0,
     three levels) hold the fixture, the other twelve the fixture with the open "not resolved": every publish at
     60 Hz equals the specification with the 100 Hz entry, and the DUT 10000 - j5000 ohm is recovered within 1e-3

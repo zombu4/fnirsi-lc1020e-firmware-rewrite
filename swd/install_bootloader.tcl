@@ -11,7 +11,7 @@
 #   STAGE=clean   after the chain has started the application through slot A (an OK record for
 #                 slot A in the record pages) and page 0 holds STARTER.bin: erase the pages of the
 #                 vendor bootloader 0x08000800..0x08005FFF and check that they read 0xFF.
-# Slot updates on an installed chain (page 0 untouched; USB_CONTROL_DESIGN.md section 6):
+# Slot updates on an installed chain (page 0 untouched):
 #   STAGE=slot_a  BOOT_A.bin of feature version 2 or later (header word +12). Slot F must pass the
 #                 starter's header check (every cut below leads to F) and a valid record must
 #                 exist; then (1) INSTALL A appended to the records as starter/starter.s

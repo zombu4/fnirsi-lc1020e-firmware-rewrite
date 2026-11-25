@@ -78,8 +78,7 @@ fn_0800a004:
 @ 1000, r0 = 0x00a7d8c0 (11000000) when it is 10000, else r0 = 0x0010c8e0
 @ (1100000).
 @ Our build (.ifdef OWN, 0x0800A03A): bls.n for the first beq.n, so every word
-@ up to 100 unsigned, 60 Hz among them, returns 110000000 (MEASUREMENT_FIX_DESIGN.md
-@ S2.12); the only other word below 100, an invalid loaded one, is repaired at
+@ up to 100 unsigned, 60 Hz among them, returns 110000000 (S2.12); the only other word below 100, an invalid loaded one, is repaired at
 @ load (own/save.s load_fix, S2.11).
 @ ----------------------------------------------------------------------------
 	.section .text.fn_0800a030,"ax",%progbits

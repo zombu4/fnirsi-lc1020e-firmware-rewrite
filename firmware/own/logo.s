@@ -1,7 +1,7 @@
 @ logo.s - the start-up logo of our build: "FU**NIRSI" (owner, 2026-11-21).
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ VENDOR_FIXES_DESIGN.md F9. The vendor's start-up animation fn_0800ce54 (ui_41.s) draws straight
+@ The vendor's start-up animation fn_0800ce54 (ui_41.s) draws straight
 @ to the panel (no GUI): the white word "FNIRSI" (picture d_08046c9c, 160 columns x 27 rows,
 @ RGB565, stored column by column: index = column * rows + row, fn_08009ba0) at x 80, y 106; the
 @ backlight ramp up to the brightness setting; three drops (8 x 8 d_08048e5c, 6 x 8 d_08048edc,
@@ -13,7 +13,7 @@
 @ U from the S's bottom-right corner under the I's stem top (and the same mirrored), with the
 @ S's bottom bar between the halves, each * from the I's stem ends crossed by the N's diagonal
 @ and its mirror. Each picture has its own piece table (the pictures differ: the blue strokes
-@ are one column wider on the left and reach row 27; measured column by column, design F9).
+@ are one column wider on the left and reach row 27; measured column by column).
 @ The word is 244 columns wide at x 38; the drops fall onto the same columns of the i as before
 @ (source columns 141 / 149 / 155 -> x 263 / 271 / 277).
 @
@@ -247,7 +247,7 @@ logo_drops:
 	.word	0
 
 @ pieces: source column, source row, width, height, flags (1 mirrored), destination column,
-@ destination row, repeat (VENDOR_FIXES_DESIGN.md F9)
+@ destination row, repeat
 logo_white:
 	.word	15
 	.byte	0, 0, 30, 27, 0, 0, 0, 1	@ F

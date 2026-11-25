@@ -7,7 +7,7 @@
  * LR_VENDOR_DEL and the 30 code pointers of the initial RAM image rely on it).
  *
  * From 0x0802AE94 the read-only data (link_rodata.ld: src/rodata_01.s .. rodata_04.s in V1.1
- * order), packed: each freed range of LANGUAGE_DESIGN.md (the CJK font tails, the Chinese
+ * order), packed: each freed range of the English-only build (the CJK font tails, the Chinese
  * speed icons, the Chinese strings) is reduced to its size mod 4 bytes of 0xFF, so every
  * kept byte keeps its V1.1 address mod 4 and stays next to its V1.1 neighbours; every pointer
  * to the data is a label (code literals, descriptor and font words, the typed initial RAM

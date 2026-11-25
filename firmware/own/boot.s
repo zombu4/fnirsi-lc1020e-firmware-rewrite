@@ -1,8 +1,7 @@
 @ boot.s - the safe clock start-up and the start-up progress word of our build.
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ Specification: MEASUREMENT_FIX_DESIGN.md revision 17, sections 17.1 (clock) and 17.2 (progress
-@ word). Manual = N32G45x user manual V3.5.0 (docs/), datasheet = N32G455 datasheet (docs/).
+@ Two parts: the clock waits and the progress word (revision 17). Manual = N32G45x user manual V3.5.0 (docs/), datasheet = N32G455 datasheet (docs/).
 @
 @ Hooks (each a same-size change inside .ifdef OWN in the ported source):
 @ - own_reset: the literal 0x0800628C of Reset_Handler (src/startup_39.s) names it instead of
@@ -17,7 +16,7 @@
 @   then tail-calls the original; own_stg_first replaces the load at 0x0802819A (stage 12 or 13).
 @   Stages 3, 4 and 14 are stored by own_pa8_level, own_start and ctl_loop (own/ctl.s).
 @
-@ The clock (17.1). The slot bootloader starts the application with the PLL as the system clock
+@ The clock. The slot bootloader starts the application with the PLL as the system clock
 @ (bootloader/src/board_02.s fn_080020c4). fn_0800c274 writes SCLKSW = 00 together with the
 @ prescalers and clears PLLEN / HSEEN two instructions later; manual 6.3.2: PLLEN "cannot be
 @ cleared when PLL is used as the system clock", HSEEN likewise; 6.2.4: the PLL parameters cannot
@@ -35,18 +34,18 @@
 @   prescalers fn_0800ba4c set before the wait cleared again, r1 = 0, and fn_0800ba4c leaves by
 @   its HSE-failure exit .L0800baf8 (clock word 8 MHz): the core stays on the HSI with the
 @   prescalers of V1.1's crystal-fault start, own_pa8_level latches the power and own_start ends
-@   in xtal_fault (VENDOR_FIXES_DESIGN F4). Flag CLKF_PLL.
+@   in xtal_fault (the crystal did not start). Flag CLKF_PLL.
 @ - Switch to the PLL: SCLKSW = 00 again, a bounded wait for SCLKSTS = 00, then the prescalers
-@   as above, r1 = 0, the same exit and F4 path. Flag CLKF_SW.
+@   as above, r1 = 0, the same exit and xtal_fault path. Flag CLKF_SW.
 @   What still differs from V1.1's crystal-fault start on these two exits: FLASH_AC LATENCY 4
 @   (stored before the PLL is enabled; more wait states than 8 MHz needs, manual 3.2.5.2.1, and
 @   nothing here touches the flash controller), the PLL fields of RCC_CFG (bits 27, 21:16; no
 @   clock uses them while the PLL is not the system clock), and on CLKF_SW the PLL left enabled.
 @ The slot bootloader runs first on every start; its own clock waits (board_02.s fn_08002598
-@ .Lslot_hsi, fn_080020c4 .Lslot_pll / .Lslot_sw) are bounded the same way from slot version 3
-@ (BOOTLOADER_DESIGN.md 7f); in version 2 they have no bound.
+@ .Lslot_hsi, fn_080020c4 .Lslot_pll / .Lslot_sw) are bounded the same way from slot version 3;
+@ in version 2 they have no bound.
 @
-@ The progress word (17.2): BOOT_PROG 0x2001FFEC = BOOT_TAG << 16 | clock flags << 8 | stage;
+@ The progress word: BOOT_PROG 0x2001FFEC = BOOT_TAG << 16 | clock flags << 8 | stage;
 @ own_reset first copies the word the previous start left into BOOT_PREV 0x2001FFE8 (0 when its
 @ tag is not BOOT_TAG), then writes tag, flags 0, stage 1; every later stage stores byte 0 only,
 @ a clock flag ors into byte 1. Both words lie outside every area a start code writes (own.inc).

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """test_own_dset.py - the direct changes of SCREEN, LCR_SET, HOLD, SETTINGS_SET and COMPARE_SET
-(firmware/own/dset.s, DIRECT_SET_DESIGN.md revision 2), in the emulator.
+(firmware/own/dset.s, revision 2), in the emulator.
 
 Usage (from the repository root, after `make -C starter`, `make -C bootloader slot` and
 `make -C firmware own`):
@@ -12,9 +12,9 @@ UsbDevice / UsbHost), imported, not changed, with three additions of this file:
     ADC3 mid-scale, ADC4 the 4.0 V supply). With a signal the results depend on the time grid of the
     sampling (measure_model: every sample is the generator at its time), so two runs of the same
     change at different times differ in the result words, the sample buffers 0x20005A38.., the
-    FFT work areas and the displayed value (run 2026-11-21, scratchpad dimpl/exp1: 1769 words and
+    FFT work areas and the displayed value (run 2026-11-21: 1769 words and
     1705 pixels between two key-path runs 37 ms apart). With Flat the results are the same at
-    every time (dimpl/exp2: two key-path runs 37 ms apart differ in no pixel), so a key-path run and
+    every time (run 2026-11-21: two key-path runs 37 ms apart differ in no pixel), so a key-path run and
     a direct run can be compared word by word.
   - FbPanel: the panel's memory (320 x 240 RGB565) built from the writes of fn_08009e30 /
     fn_08014f9c to the command port 0x6001FFFE and the data port 0x60020000 (2A x1 hi, lo, x2 hi,
@@ -27,7 +27,7 @@ UsbDevice / UsbHost), imported, not changed, with three additions of this file:
     (a capture in the middle of a call finds stack-record chains such as 0x2000049C, fn_080207f4,
     pointing into the stack).
 
-Comparison of a direct change with the key path (critique 8 of DIRECT_SET_DESIGN.md revision 1):
+Comparison of a direct change with the key path:
 from one snapshot of the whole machine (test_own_control.Snapshot) the key path runs (KEY presses
 until the value is reached, as the old jobs pressed) and, after a restore, the direct command; each
 is followed by SETTLE s, then captured at the first main-loop pass after the same number of
@@ -35,7 +35,7 @@ measurement results since the measurement restart (capture()):
   - all vendor RAM 0x20000000..0x20017FFF word by word, except: the stack 0x2001424C..0x200163A7
     (between the end of the GUI heap 0x2000824C + 0xC000, fn_08022c94, and the initial SP
     0x200163A8); the tick words TICK_WORDS and the timer records' tick words (each written by a
-    timer routine, the writer measured by a write hook, dimpl/exp3); the heap history counters
+    timer routine, the writer measured by a write hook, run of 2026-11-21); the heap history counters
     HEAP_COUNTERS; the drawing scratch DRAW_BUF, DRAW_AREA, IMAGE_REC (the drawing is compared on
     the panel); the MASKED handshake byte; the unused tail of the DAC sine table (entries from the
     count the frequency uses, ram_diff); and the GUI heap, which is compared by its block walk
@@ -71,7 +71,7 @@ from measure_model import DutSource  # noqa: E402
 CASES = []
 NOTES = []
 
-# ---- addresses (own.inc, ctl.inc, DIRECT_SET_DESIGN.md section 1) ----
+# ---- addresses (own.inc, ctl.inc) ----
 VRAM_LO, VRAM_N = 0x20000000, 0x18000           # vendor RAM below our area 0x20018000
 STACK = (0x2001424C, 0x200163A8)
 CF_OFF_WAIT = 0x04
@@ -86,7 +86,7 @@ TIM3_CCDAT = 0x40000434                         # fn_08009e60: TIM3 compare (9 x
 MAIN_CALL = 0x080281D0                          # bl ctl_loop (own/ctl.s header)
 SETTLE = 0.3                                    # s after the answer before the capture
 
-# words written by timer routines (writers measured with a write hook, dimpl/exp3, 2026-11-21)
+# words written by timer routines (writers measured with a write hook, 2026-11-21)
 TICK_WORDS = {0x20000000: 'fn_0802a720 (SysTick) counter', 0x20000004: 'fn_0802a720 counter',
               0x20005104: 'fn_0802a720 counter', 0x20005108: 'fn_0802a720 counter',
               0x2000510C: 'fn_0802a720 counter', 0x20005110: 'fn_0802a720 counter (V_CMP_DUE)',
@@ -113,7 +113,7 @@ TICK_WORDS = {0x20000000: 'fn_0802a720 (SysTick) counter', 0x20000004: 'fn_0802a
 # fn_08022c68 subtracts the block's size word and stores 0 when that is not smaller (guilib_29.s
 # 1982-1986, guilib_30.s 173-178): a count of the history, not of the live blocks (measured
 # 2026-11-21, speed 0 -> 2: 0x90 after the key path, 0x2C8 after the direct change with the same
-# allocations and frees at the end of both runs, dimpl/exp6). The live blocks are compared by
+# allocations and frees at the end of both runs, run of 2026-11-21). The live blocks are compared by
 # heap_walk instead.
 HEAP_COUNTERS = {0x200004F4: 'GUI heap history counter', 0x200004F8: 'its maximum'}
 HEAP = (0x2000824C, 0xC000)                     # fn_08022c94: fn_08027a20(0x2000824C, 0xC000)
@@ -125,7 +125,7 @@ DRAW_BUF = (0x20006700, 0x20006700 + 0xC80 * 2)
 DRAW_AREA = 0x200004B4
 # the image record 0x200080B0..0x200080D7 (0x28 bytes): fn_080218d4 (gui_19.s 2081) clears and
 # fills it for every image drawn (source +4, header +0x14 by fn_08021278); writers measured
-# 2026-11-21 (dimpl/exp3: clear_bytes, fn_080218d4, fn_08021278); after circuit 1 -> 0 it held
+# 2026-11-21 (writers: clear_bytes, fn_080218d4, fn_08021278); after circuit 1 -> 0 it held
 # the source 0x080422BC after the key path and 0x08034110 after the direct change (the last
 # image drawn), with the panel the same pixel for pixel.
 IMAGE_REC = (0x200080B0, 0x200080D8)
@@ -138,8 +138,8 @@ GLYPH_CACHE = (0x20000444, 0x2000045C)
 # gets its cover (a child object, fn_08023678, with its style keys) at its first marked draw, and the
 # cover stays, hidden, when the row is drawn unmarked again (fmt.s: "covers made once"). A key path
 # through a marked intermediate value therefore leaves covers that a direct change to an unmarked
-# value never makes. Run of 2026-11-24 (d01a Func 0 -> 2 through 1 with the flat source, scratchpad
-# dsdiag/func3.py): 6 covers of row 1, all hidden, 42 heap blocks (glyph attribute block, cover and
+# value never makes. Run of 2026-11-24 (d01a Func 0 -> 2 through 1 with the flat source):
+# 6 covers of row 1, all hidden, 42 heap blocks (glyph attribute block, cover and
 # style blocks) only in the key path's capture, none only in the direct one, 0x20000460 (the count
 # of fn_0802318c's data blocks, gui_21.s 403-410) higher by 2 per cover (writers LR 0x0802346D in
 # fn_08023678 and 0x08025E3F in the style set), the panel equal. key_only_covers() finds them and
@@ -159,7 +159,7 @@ COVER_DATA_BLOCKS = 2
 # (R / X: index 0 hides it, 4..7 set the image, fmt.s fmt_scale names 5..7 as the ohm indices;
 # theta sets it before its formatter), so a hidden unit picture's image words
 # are what an earlier, unseen value left. Run of 2026-11-24 (d01a Func 0 -> 2, d01c secondary 4 ->
-# 2, scratchpad dsdiag/func4.py): hidden in both, words +0x14 +0x18 (rectangle), +0x24 (image),
+# 2): hidden in both, words +0x14 +0x18 (rectangle), +0x24 (image),
 # +0x2C +0x30 +0x34 (image size and header) d_08036cd8 / d_08040a28, the panel equal. compare()
 # leaves those six words out only while the picture is hidden in both captures.
 UNIT_PIC = 0x20000220
@@ -196,7 +196,7 @@ LONG = 1100                                     # ctl.inc LONG_MS
 LEVELS = (0x3DCCCCCD, 0x3E99999A, 0x3F19999A)   # ctl.s tab_level
 BIASES = (0x00000000, 0x3F000000)               # ctl.s tab_bias
 FREQS = (100, 120, 1000, 10000, 100000, 60)     # ctl.s tab_freq (index 5 = 60 Hz, the key cycle's
-                                                # sixth value, MEASUREMENT_FIX_DESIGN.md S2.12)
+                                                # sixth value, S2.12)
 # LCR_SET settings: id -> (word, key mask, hold, values)
 LCR = {0: (V_FUNC, 0x0200, 0, (0, 1, 2, 3, 4)), 1: (V_SECONDARY, 0x0040, 0, (0, 1, 2, 3, 4)),
        2: (V_FREQ, 0x2000, 0, FREQS), 3: (V_LEVEL, 0x0800, 0, LEVELS), 4: (V_BIAS, 0x0100, 0, BIASES),
@@ -489,8 +489,7 @@ def cover_of(c, g):
     "none" at every step, as row_cover_of reads it (0 glyph, 0 attribute block, child count 0). A
     pointer that is not 0 is followed only into the GUI heap; one outside it fails the check while the
     capture's screen word 0x20001168 is 1 or 2 (the rows are shown there) and counts as no cover on any
-    other screen, where the glyph slots keep old pointers (GLYPHS comment; MEASUREMENT_FIX_DESIGN.md
-    revision 17, 17.5)."""
+    other screen, where the glyph slots keep old pointers (GLYPHS comment; revision 17)."""
     shown = word(c, V_SCREEN) in (1, 2)
 
     def ok(p, what):
@@ -734,7 +733,7 @@ def _lcr_case(lid, name):
         # range: with the flat source (no signal) the ADC gain bytes 0x200011C5 / 0x200011C6 of the
         # word 0x200011C4 step on about every 0.5 s once the range is fixed (fn_0800b000 /
         # fn_0800b20c windows never met), and no result comes to align on (measured 2026-11-21,
-        # dimpl/exp10: range 0 -> 3, C6 3, 2, 1, 0, 7 after the key path, 4, 6, 5, 4, 3 after the
+        # run of 2026-11-21: range 0 -> 3, C6 3, 2, 1, 0, 7 after the key path, 4, 6, 5, 4, 3 after the
         # direct change); their phase follows the time since the range left AUTO, which the key
         # path's presses through the other ranges set earlier
         # and the gain pins they drive (measure_model front_end: PC0..PC2 for 0x200011C5, PA1..PA3
@@ -750,7 +749,7 @@ def _lcr_case(lid, name):
 @case
 def d01a_lcr_func_measure_screen():
     """LCR_SET Func, screen 1: every start value x every other value against the key path (key
-    0x200; 2.3 / critique 6: AUTO touches only the Func picture)."""
+    0x200; AUTO touches only the Func picture)."""
     return _lcr_case(0, 'Func')
 
 
@@ -759,17 +758,17 @@ def d01b_lcr_func_compare_screen():
     """LCR_SET Func in screen 2 (long 0x400 first): starts R / C / L (the key path forces Func 0 and
     4 to 1 there), targets 1..3. R from C or L: the key path passes Func 4 (secondary theta, the
     screen-2 rule then Func 1), the direct change takes the R branch (secondary X): 0x200011E8
-    differs (DIRECT_SET_DESIGN.md 2.4 item 3)."""
+    differs."""
     states = lcr_states(0, lambda r: press(r, 0x0400, LONG))
     check(sorted(states) == [1, 2, 3], 'screen 2 Func values %r' % sorted(states))
     # the second row's objects the compare screen hides (fn_0800d50c, ui_42.s 17-18: 0x200001F8 with
     # the secondary picture 0x200001EC under it, the eight digits 0x200059C8..0x200059E4, the unit
     # picture 0x20000220) are drawn for theta by the key path, for X by the direct change; measured
-    # 2026-11-21 (dimpl/exp9): only these objects' heap blocks and 0x200011E8 differ, the panel not
+    # 2026-11-21: only these objects' heap blocks and 0x200011E8 differ, the panel not
     row2 = {('obj', a): '2.4 item 3: hidden second-row object' for a in [0x200001EC, 0x20000220]
             + list(range(0x200059C8, 0x200059E8, 4))}
     # and their 20-byte layout records (x offset of the digits, linked from neighbouring list nodes,
-    # not from the objects; measured 2026-11-21, dimpl/exp9: words 0x8, x, 0x1E, 0x70009, ...)
+    # not from the objects; measured 2026-11-21: words 0x8, x, 0x1E, 0x70009, ...)
     row2[('heap', 'layout')] = '2.4 item 3: layout records of the hidden second row'
     exp = lambda s, t: (({V_SECONDARY: '2.4 item 3: secondary of the R branch'} if t == 1 else {})
                         | (row2 if passes_theta(s, t) else {}))
@@ -890,7 +889,7 @@ def refused(rig, cmd, payload, status, size, what):
 
 @case
 def d02_refusals():
-    """Refusals of ds_check (DIRECT_SET_DESIGN.md 2.2), nothing changed, the record in the answer:
+    """Refusals of ds_check, nothing changed, the record in the answer:
     screen word 0 (written into RAM: the chooser is never reached in our build), CF_OFF_WAIT (the
     power-off path ran), a calibration running (0x200050E4 written 1), LCR_SET / HOLD in screen 3,
     Func 0 / 4 in screen 2, level 0.6 V with the bias at the key path's compare limit (bias bits
@@ -959,7 +958,7 @@ def d02_refusals():
 def nav_dialog(rig, item, edit=False):
     """Screen 3 (long 8), the menu item (key 0x20 steps over the visible items 0, 2..6), key 8
     (the dialog), with edit: key 8 again (the sorting dialog's row 0 being edited). Items 5 and 6:
-    physical keys (test_own_control.nav_settings), as before revision 10 of MEASUREMENT_FIX_DESIGN (when
+    physical keys (test_own_control.nav_settings), as before revision 10 (when
     key_refused refused an injected key 8 on item 5); the state reached is the same."""
     if item in (5, 6):
         T.nav_settings(rig, item, dialog=True)
@@ -1010,7 +1009,7 @@ def d03_screen_pairs_and_dialogs():
     """SCREEN between all screens (3 -> 1 / 2 with 0x200011BC = 1 and = 2) and from screen 3 with the
     sorting dialog open (item 0) and with its row being edited (the byte 0x2000000C), against the
     key path; the restore dialog (item 6): status 6, nothing changed; the calibration dialog (item 5) with
-    no calibration running (MEASUREMENT_FIX_DESIGN revision 10 item 4): status 0, the target screen, the
+    no calibration running (revision 10): status 0, the target screen, the
     dialog closed, no calibration started, the calibration type as before."""
     runs = 0
     s1 = first_result()
@@ -1096,7 +1095,7 @@ def d04_screen_round_trips_heap():
     rig = base()
     # one warm-up round trip via 3 and via 2 first: the glyphs of a rebuilt measure screen get the
     # amber covers of fmt.s own_row_draw (one child object per glyph, made at the glyph's first
-    # marked draw, MEASUREMENT_FIX_DESIGN.md S2.1) at other draws than the glyphs of the first build;
+    # marked draw, S2.1) at other draws than the glyphs of the first build;
     # they belong to live objects and are freed with them, and from then on every round trip gives
     # the same heap
     for t in (3, 1, 2, 1):
@@ -1189,7 +1188,7 @@ def f32r(x):
 
 
 def expect_compare(nominal, tol):
-    """(scale index, nominal bits, tolerance bits) as DIRECT_SET_DESIGN.md 2.3 states them: the
+    """(scale index, nominal bits, tolerance bits) from the
     scale classes of fn_0800e4f8, count = nominal * 100 / scale (single multiply and divide, as
     nom_count) rounded to the integer (fn_080116a0; the test values are chosen with the quotient
     within 0.01 of an integer, checked, so the rounding mode is not in question), limited to
@@ -1277,7 +1276,7 @@ def d06_compare_set():
                 # compare screen: the texts of its objects against the fresh build; the pixels are
                 # noted only: with the flat source the deviation is "-0.00" (from a NaN reading),
                 # whose '-' the deviation font lacks (a box glyph), and the box's last row depends on
-                # the label's redraw area (measured 2026-11-21: 14 pixels of one row, NOTES "Direct set")
+                # the label's redraw area (measured 2026-11-21: 14 pixels of one row)
                 t2 = screen2_texts(rig)
                 check(t1 == t2, '%s: compare screen texts %r, a fresh build %r' % (w, t1, t2))
                 if n:

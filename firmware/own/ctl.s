@@ -2,8 +2,7 @@
 @ its refusal and guard, events, streams, the command state machine and the BOOT_* page erase.
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ Specification: USB_CONTROL_DESIGN.md revision 4 (section 9 decisions first), the 2C53T frame
-@ format (PROTOCOL.md of the 2C53T rewrite). The commands themselves are in own/cmd.s.
+@ The frame format is that of the 2C53T rewrite (its PROTOCOL.md). The commands themselves are in own/cmd.s.
 @
 @ Hooks (each a same-size change inside .ifdef OWN in the ported source):
 @ - own_start replaces the bl fn_0801031c at 0x08028018 (system_40.s fn_08027ff4, the print of
@@ -15,11 +14,11 @@
 @ - own_pa8_level replaces the bl fn_08008350 at 0x08008210 (periph_34.s fn_08008200: PA8
 @   driven low at the start; kept high after a soft restart).
 @ - own_off_save replaces the bl own_save at 0x08009474 (app_01.s fn_08009400, the meter's
-@   power-off path: the save before fn_0800b274), MEASUREMENT_FIX_DESIGN.md revision 17.
+@   power-off path: the save before fn_0800b274), revision 17.
 @ own_pa8_level, own_start and ctl_loop's first pass also store the start-up stages 3, 4 and 14
 @ (own/boot.s, own.inc BOOT_PROG).
 @
-@ One pass of ctl_loop (design section 3; every step bounded, none waits):
+@ One pass of ctl_loop (every step bounded, none waits):
 @   on the first pass only usb_start, then ev_prime (sets CF_PRIMED); every pass save_resume (save.s), the pending action (restart / power-off after an answer), the
 @   USB-powered power-off check, one step of the calibration sweep (cal_step, own/cal.s; before
 @   the job, so OP_WAITCAL sees its finish in the same pass), (1) one step of the running job, the automatic power-off step
@@ -27,7 +26,7 @@
 @   posted, (3) the guard flag is set when the event in the slot is the injected one, 0x08009400
 @   runs, the flag is cleared; with no event in the slot 0x08009400 is not called (with code 0
 @   it does nothing, app_01.s 0x08009406), and in such a pass with no key down a pending direct
-@   change runs (dset.s ds_run, DIRECT_SET_DESIGN.md revision 2), (4) events, the screenshot step, the streams, (5) received bytes
+@   change runs (dset.s ds_run, revision 2), (4) events, the screenshot step, the streams, (5) received bytes
 @   are parsed (one request per pass, none while an answer, a job or an action is pending or a
 @   screenshot runs), (6) the pending answer is queued.
 @
@@ -37,7 +36,7 @@
 @ answer is its status. A frame is put into the TX ring whole or not at all (usb_tx_free first;
 @ only the USB interrupt takes bytes out, so the free room can only grow in between).
 @
-@ Key injection (design 4.3): a short press posts code 1 with the mask into the event slot
+@ Key injection: a short press posts code 1 with the mask into the event slot
 @ 0x20001192 / 0x20001194 with PRIMASK set around the check and both stores, only while the
 @ slot is empty and no physical key is down (0x20000008 = 0). A hold of n ms posts nothing
 @ before 1000 ms (0x080094A0 posts 0xFE only from a tick counter above 99), then one 0xFE per
@@ -101,13 +100,12 @@ since:
 @ ----------------------------------------------------------------------------
 @ own_pa8_level - replaces bl fn_08008350 at 0x08008210 (fn_08008200, the first call of main
 @   0x08027FF4: r0 = GPIOA, r1 = 0x100, r2 = 0, PA8 output low). V1.1 keeps PA8, the power
-@   latch, low from here until main sets it high after 0x08011C68(1000) (NOTES "Power latch
-@   PA8"): at a power-on the held power key keeps the meter on meanwhile, after a soft restart
-@   nothing does (a released latch switches the meter off, NOTES 2026-11-20). So when the
+@   latch, low from here until main sets it high after 0x08011C68(1000): at a power-on the held power key keeps the meter on meanwhile, after a soft restart
+@   nothing does (a released latch switches the meter off, seen over SWD 2026-11-20). So when the
 @   hand-over word 0x2001FFF8 (written by the slot, version 2, read here before own_start
 @   clears it) has the tag 0x534C and bit 9 (HO_SOFT: the slot found UPDT / RSTR), r2 = 1:
 @   fn_08008350 writes the pin mask to PBSC and PA8 stays high. The same when the system clock
-@   is not the PLL (RCC_CFG SCLKSTS: the crystal did not start, VENDOR_FIXES_DESIGN.md F4): the
+@   is not the PLL (RCC_CFG SCLKSTS: the crystal did not start): the
 @   start-up then runs on the 8 MHz HSI up to xtal_fault, and the key need not be held through
 @   it. Otherwise the call is the original one. First the start-up stage 3 (STG_GPIO, own.inc
 @   BOOT_PROG). Tail call; uses r2, r3, r12 before it.
@@ -142,7 +140,7 @@ own_pa8_level:
 @   own RAM 0x20018000..0x2001DFFF cleared (every module's
 @   area: own_load at 0x08028030 then writes save.s's words); RCC_CTRLSTS read once into
 @   CT_RSTF, then its reset flags cleared (written with the flags 0 and RMRSTF 1, then once more
-@   with RMRSTF 0; the other bits as read: manual 6.3.11, MEASUREMENT_FIX_DESIGN.md 17.2); the
+@   with RMRSTF 0; the other bits as read: manual 6.3.11); the
 @   hand-over word 0x2001FFF8
 @   read and cleared (tag 0x534C in bits 31..16, slot index 0..2 in bits 7..0, bit 8 = the
 @   watchdog runs, started by the slot for a trial or left running by soft_restart: then the
@@ -204,7 +202,7 @@ own_start:
 	bl	own_feed		@ trial start: the slot's watchdog runs (uses r0, r1)
 .Lst_slot:
 	str	r2, [r4, #CT_HAND_SLOT]
-	bl	ocal_load		@ the own calibration record (OWN_CAL_DESIGN.md 1.3): flash reads
+	bl	ocal_load		@ the own calibration record: flash reads
 					@ only, writes OWN_OCAL only; before the first own_measure call
 	ldr	r0, =RESULT_WORD
 	ldr	r1, [r0]
@@ -239,7 +237,7 @@ own_start:
 @ ----------------------------------------------------------------------------
 @ own_restore_guard - replaces bl fn_0800b4c8 at 0x08009A68 (menu restore of the defaults;
 @   r0 = mode 0, or 1 in factory mode). While own_injected is set the defaults routine is not
-@   called (guard, design 4.3) and the job is marked (status 6); otherwise tail call with r0.
+@   called (guard) and the job is marked (status 6); otherwise tail call with r0.
 @ ----------------------------------------------------------------------------
 	.global	own_restore_guard
 	.thumb_func
@@ -275,14 +273,14 @@ ctl_loop:
 	strb	r1, [r0]		@ first pass: stage 14, the main loop reached
 	bl	usb_start		@ first pass: the host sees the device only from here, when
 					@ requests are served (the start-up before took 2 s on a meter
-					@ with the port present and silent, NOTES "USB start")
+					@ with the port present and silent)
 	bl	ev_prime		@ first pass: previous values = current values; sets CF_PRIMED
 .Lcl_run:
 	bl	save_resume		@ rewrite of an interrupted copy A (save.s)
 	bl	act_step
 	bl	off_step
-	bl	cal_step		@ the calibration sweep (cal.s, MEASUREMENT_FIX_DESIGN stage 3)
-	bl	ocal_step		@ the OCAL_LOCK release rules (ocal.s, OWN_CAL_DESIGN.md 2.2)
+	bl	cal_step		@ the calibration sweep (cal.s, stage 3)
+	bl	ocal_step		@ the OCAL_LOCK release rules (ocal.s)
 	bl	job_step		@ (1)
 	bl	pwr_step		@ Off Time and low-voltage power-off (power.s); here, before
 					@ inj_post, the event slot holds only events of the key scan
@@ -562,9 +560,8 @@ act_set:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ soft_restart - restart through the starter without a system reset (USB_CONTROL_DESIGN.md
-@   6b: an AIRCR reset releases the power latch PA8 and switches the meter off, NOTES
-@   2026-11-20). r0 = request word value (REQ_RESTART or REQ_MAGIC). Called in thread mode
+@ soft_restart - restart through the starter without a system reset (an AIRCR reset releases
+@   the power latch PA8 and switches the meter off, seen over SWD 2026-11-20). r0 = request word value (REQ_RESTART or REQ_MAGIC). Called in thread mode
 @   from the main loop. Never returns. In this order:
 @   - PRIMASK set; REQ_WORD = r0 (the slot, version 2, clears it and feeds the IWDG);
 @   - only while the USB clock is on (RCC_APB1PCLKEN USBEN; usb_start sets it only with the
@@ -953,7 +950,7 @@ inj_post:
 @   refused by the guard during the call marks the job (status 6). With the slot empty
 @   0x08009400 is not called (with code 0 it does nothing, app_01.s 0x08009406): a press the
 @   scan stores after the read stays in the slot and is handled, with all of the above, in
-@   the next pass (MEASUREMENT_FIX_DESIGN.md revision 17, 17.4). IS_WAIT ends when its code was
+@   the next pass (revision 17). IS_WAIT ends when its code was
 @   consumed.
 @   The marks that depend on the event fn_08009400 actually dispatches are set there, from the
 @   slot as the vendor code reads it: MF_SECPICK by cmp.s own_sec_key (0x080097B8), the
@@ -1117,7 +1114,7 @@ own_off_save:
 
 @ ----------------------------------------------------------------------------
 @ key_refused - r0 = key mask, r1 = 1 for a hold. Returns r0 = 1 when the injection is
-@   refused before dispatch (design 4.3), else 0. Read from the words the dispatchers read:
+@   refused before dispatch, else 0. Read from the words the dispatchers read:
 @   - screen 0 (0x20001168): every key (the first-start chooser stores 0x20001140 and saves;
 @     not reached in our build, save.s set_english keeps 0x20001140 at 1);
 @   - a calibration running (cal.s cal_busy: 0x200050E4 != 0 or a sweep of cal.s in progress) or
@@ -1125,7 +1122,7 @@ own_off_save:
 @   - a hold of the power key (mask 1);
 @   - key 8 in screen 3 on menu item 6 while a dialog is open (0x200011AC != 0: restore).
 @   Key 8 on menu item 5 (the calibration dialog and its start, 0x0800F740..) is not refused
-@   (MEASUREMENT_FIX_DESIGN revision 10 item 4): the host drives that menu as the meter's keys
+@   (revision 10): the host drives that menu as the meter's keys
 @   do, and the calibration it starts is the sweep of cal.s, as one started by the key or by
 @   CALIBRATE. Uses r0..r3, r12.
 @ ----------------------------------------------------------------------------
@@ -1889,7 +1886,7 @@ ram_word:
 @   which sends its event, and the groups go on from the word after it. So every changed word
 @   still gets its event, in the order of the offsets, and the calibration count is the same;
 @   the 773-word block costs about 4 instructions per word instead of 8 when nothing changed
-@   (19.4 % of all instructions in the profile of a screen change, NOTES).
+@   (19.4 % of all instructions in the profile of a screen change).
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	ev_detect, %function
@@ -2086,7 +2083,7 @@ ev_detect:
 @   while a screenshot runs. A frame without room is dropped and counted.
 @   Called from ctl_loop and from own_flush (screen.s) at every GUI flush: the vendor refresh
 @   timer fn_08012188 redraws the screen from the main loop's timer walk fn_08027830, outside
-@   ctl_loop, for up to 3.37 M instructions (NOTES, k12), with 12 flushes per redraw. No
+@   ctl_loop, for up to 3.37 M instructions (k12), with 12 flushes per redraw. No
 @   CT_FLAGS update in ctl.s spans a call, and CT_REC has no user but this function, so the
 @   call inside a flush meets no half-done state.
 @ ----------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""test_own_func.py - the instrument functions of our build (MEASUREMENT_FIX_DESIGN.md revision 6: stage 2
+"""test_own_func.py - the instrument functions of our build (revision 6: stage 2
 S2.1..S2.7, S2.9; stage 2F S2.12 (60 Hz); stage 2G S2.8; firmware/own/fmt.s, cmp.s and the stage-2 parts
-of meas.s), in the emulator. Cases f20..f29 are the design's 5.1 lists m20..m28 and the F60 list; the
-save cases s06..s09 of the design are test_own_save.py s21..s25.
+of meas.s), in the emulator. Cases f20..f29 are the lists m20..m28 and the F60 list; the
+save cases s06..s09 are test_own_save.py s21..s25.
 
 Usage (from the repository root, after `make -C firmware` (build/app.elf for the V1.1 control) and
 `make -C firmware own`):
@@ -18,11 +18,11 @@ below the stack in use, as test_own_measure m03 places its array); the cases tha
 Expected values: every formatted text below is derived by hand from the vendor format thresholds of the
 ui_42.s headers (0x0800E028, 0x0800DB24, 0x0800DE2C, 0x0800DD44) and the rules of fmt.s: OL above the
 measurement range, one decimal less above 19,999 counts, a '-' for a negative X; a negative value by its
-quantity (MEASUREMENT_FIX_DESIGN revision 14 rule 1): series R, parallel C, series L, |Z| and D the text
+quantity (revision 14 rule 1): series R, parallel C, series L, |Z| and D the text
 of 0, parallel R, series C, parallel L and Q OL, series / parallel by the word 0x200011EC (V_SERPAR, set
 by every case that calls the R / C / L wrappers); OL for every text at 60 / 100 / 120 Hz with |Z|
 0x200050C4 above 1e7 (rule 2, V_Z set by those cases); the accuracy table
-of fmt.s fmt_spec (design S2.1); the AUTO thresholds 10 / 11 / 9 degrees (D3); series / parallel at
+of fmt.s fmt_spec (S2.1); the AUTO thresholds 10 / 11 / 9 degrees (D3); series / parallel at
 1 k / 10 k / 3162.28 ohm (D4); the compare rules of the cmp.s header. RUN LIMIT: one run of this file
 per case prefix, 12 cases.
 """
@@ -280,7 +280,7 @@ def cover(rig, g):
 
 @case
 def f21_signs():
-    """m21 (S2.2; MEASUREMENT_FIX_DESIGN revision 14 rule 1, which corrects revision 13's "every negative
+    """m21 (S2.2; revision 14 rule 1, which corrects revision 13's "every negative
     is 0"): a negative value by its quantity, with 0x200011EC = 0 (series) and = 1 (parallel): series R
     (main row and secondary R), parallel C and series L are the vendor formatter's text of 0 (marked);
     parallel R, series C and parallel L are OL ("0L  ", unit empty, index 0, not marked); D is 0 and Q OL
@@ -419,7 +419,7 @@ def f23_digits():
     for name, v, want in rows:
         t = fmt(rig, name, v, 1000)[0]
         check(t == want, '%s(%g): %r, expected %r' % (name, v, t, want))
-    # revision 12 (MEASUREMENT_FIX_DESIGN S2.4): C in the vendor's "%0.1f" uF range above 19,999 counts goes
+    # revision 12 (S2.4): C in the vendor's "%0.1f" uF range above 19,999 counts goes
     # to mF with 3 decimals (a text without '.' lies over the unit picture, fn_0800d14c), and no byte of the
     # vendor's longer text is left after the terminating 0 (fmt() clears the buffer, the vendor writes it);
     # the negative C of this list (-6.9163e6 nF) is OL in series and 0 in parallel since revision 14 (rule
@@ -663,7 +663,7 @@ def f27_compare():
     check([v for _, v in bp] == [vol, 0, vol, 0], 'beeper writes %r (volume %d)' % (bp, vol))
     on1, off1, on2, off2 = [t for t, _ in bp]
     # tick 10 ms, and a step waits for the next pass of ctl_loop: a pass with the publish's display
-    # update takes about 0.12 s in the model (design revision 5 item 10)
+    # update takes about 0.12 s in the model (revision 5)
     check(0.195 <= off1 - on1 <= 0.34 and 0.145 <= on2 - off1 <= 0.29 and 0.195 <= off2 - on2 <= 0.34,
           'beep times %.3f / %.3f / %.3f s' % (off1 - on1, on2 - off1, off2 - on2))
     passes = [t for t in loops if on1 < t < off2]
@@ -885,8 +885,7 @@ def mul565(s, d):
 @case
 def f30_marked_value_amber_digits():
     """Meter 2026-11-22: a marked main value (60 Hz) was drawn as solid amber blocks. Panel model of
-    test_own_control.py: R 1 kohm, started at 100 Hz (a stored 60 is loaded as 100: save.s load_fix, design
-    D60-a), LCR_SET frequency index 5 (60 Hz: marked), index 2 (1 kHz, inside the
+    test_own_control.py: R 1 kohm, started at 100 Hz (a stored 60 is loaded as 100: save.s load_fix, D60-a), LCR_SET frequency index 5 (60 Hz: marked), index 2 (1 kHz, inside the
     accuracy table: unmarked), then index 5 again. After each, the run goes on until
     the last row-0 draw (own_row_draw r0 = 0) lies 0.1 s back, and the panel memory of the logged flushes
     (fb_replay) is compared, on the rectangle of each of the 7 row-0 glyph objects (halfwords +0x14 x1,
@@ -973,7 +972,7 @@ BUF = 0x20014440                      # rec_measure's 66 bytes, after the text b
 
 @case
 def f31_low_frequency_ol_and_call_sites():
-    """MEASUREMENT_FIX_DESIGN revision 14 through the display rows (fn_0800d3d8 row 0 by the byte 0x200011E4,
+    """Revision 14 through the display rows (fn_0800d3d8 row 0 by the byte 0x200011E4,
     fn_0800d294 row 1 by the word 0x200011E8, called directly in the stopped base rig; the text taken at the
     entry of own_row_draw, r1) and the host record (rec_measure called directly into BUF, hold 0x200011A4 and
     the no-reading counter 0x2000120C written 0 first, so validity 1 can only come from "0L"):

@@ -3,11 +3,9 @@
 @ tables, and the reading and appending of the starter's records for the BOOT_* writer.
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ Specification: USB_CONTROL_DESIGN.md revision 4 (section 9 decisions first) and
-@ SETTINGS_SAVE_DESIGN.md revision 4; the records of the starter: starter/starter.s.
+@ The records of the starter: starter/starter.s.
 @ Frame handling, the job engine and the key injection are in own/ctl.s; the direct changes of
-@ SCREEN, LCR_SET, HOLD, SETTINGS_SET and COMPARE_SET in own/dset.s (DIRECT_SET_DESIGN.md
-@ revision 2).
+@ SCREEN, LCR_SET, HOLD, SETTINGS_SET and COMPARE_SET in own/dset.s (revision 2).
 @
 @ Handlers: r0 = request payload, r1 = its length, r2 = answer data (after the status byte,
 @ room for 511 bytes). They return r0 = status (S_*) and r1 = data length, or r0 = ST_DEFER
@@ -36,13 +34,13 @@
 @   parallel u8 (0x200011EC: 0 series, 1 parallel); |Z| f32 (0x200050C4); theta f32
 @   (0x200050CC); frequency u32, level f32, bias f32, range u8, speed u8, circuit mode u8;
 @   markers u8 (bit 0 main, bit 1 secondary: the value lies outside the manual's accuracy
-@   table, fmt.s MF_MARK; MEASUREMENT_FIX_DESIGN.md S2.1); OCAL flags u8 (bit 0 the gain
+@   table, fmt.s MF_MARK, S2.1); OCAL flags u8 (bit 0 the gain
 @   correction applied, bit 1 GAIN present for the frequency but not at this cell, bit 2
-@   OCAL_LOCK active, bit 3 OF_RETAKE; ocal.s ocal_meas_flags, OWN_CAL_DESIGN.md 2.8).
+@   OCAL_LOCK active, bit 3 OF_RETAKE; ocal.s ocal_meas_flags).
 @   Value block (15 bytes): value f32, the word the display formats, as read (R ohm, C nF, L
 @   uH, Z / X ohm, D / Q none, theta degree; fmt_value stores it before the formatter runs, so
-@   a negative R, C, L, D or Q keeps its sign here while its text is 0 or OL, MEASUREMENT_FIX_DESIGN
-@   revision 14), unit code u8 of the display text (0 none, 1 ohm, 2 kohm,
+@   a negative R, C, L, D or Q keeps its sign here while its text is 0 or OL, revision 14),
+@   unit code u8 of the display text (0 none, 1 ohm, 2 kohm,
 @   3 Mohm, 4 pF, 5 nF, 6 uF, 7 mF, 8 uH, 9 mH, 10 H, 11 degree), decimals u8 (digits after
 @   the point of the text), validity u8 (0 valid, 1 "0L" from the formatter, 2 no reading:
 @   tick counter 0x2000120C above 200, 3 held), display text 8 bytes (the formatter's text,
@@ -89,7 +87,6 @@
 	.equ	VB_SIZE,	15		@ value block of MEASURE
 	.equ	STATE_SIZE,	32
 	.equ	MEASURE_SIZE,	66		@ 64 + the marker byte (S2.1) + the OCAL flags byte
-					@ (OWN_CAL_DESIGN.md 2.8)
 	.equ	COMPARE_SIZE,	50		@ 29 + the S2.8 / S2.9 tail
 	.equ	INFO_SIZE,	58		@ 46 + the start-up diagnostics (capability bit 27)
 	.equ	LCR_LISTS,	8
@@ -272,7 +269,7 @@ sv_map:
 @ 12 bytes (0x1FFFF7F0), running slot u8 (hand-over word: 0 F, 1 A, 2 B, 0xFF unknown), slot
 @ bootloader version u32 (header word +12 of the running slot, 0 when unknown), application
 @ size u32 (end of this image - 0x08006000), last update result u32 (result word; capability
-@ bit 27, MEASUREMENT_FIX_DESIGN.md revision 17:) the previous start's progress word u32
+@ bit 27, revision 17:) the previous start's progress word u32
 @ (BOOT_PREV), this start's u32 (BOOT_PROG), RCC_CTRLSTS u32 as own_start read it (CT_RSTF).
 @ The result word 0x2001FFFC is not cleared here: ctl.s ans_step clears it once this answer
 @ is queued whole in the TX ring (own_start keeps a valid one until then, 17.3); an answer
@@ -338,7 +335,7 @@ h_ping:
 @ RESET - answer, then the soft restart after the answer has left (ctl.s act_step,
 @   soft_restart: the meter stays on). Refused (status 6, no data) unless the slot the starter
 @   will start next is feature version >= 2, as UPDATE_MODE: a version-1 slot does not feed the
-@   running watchdog after a soft restart (USB_CONTROL_DESIGN.md 6b), so the meter would end up
+@   running watchdog after a soft restart, so the meter would end up
 @   off.
 	.thumb_func
 	.type	h_reset, %function
@@ -629,7 +626,7 @@ h_lcr_set:
 	cmp	r5, r0			@ index below it
 	bhs	h_bad			@ else status 2
 	cmp	r4, #5			@ range (0x2000114C) while OCAL_LOCK holds the codes:
-	bne	.Llr_go			@ status 3, nothing changed (OWN_CAL_DESIGN.md 2.2)
+	bne	.Llr_go			@ status 3, nothing changed (OCAL_LOCK)
 	bl	ocal_locked
 	cmp	r0, #0
 	bne	h_notnow
@@ -647,7 +644,7 @@ h_lcr_set:
 	bl	ds_request		@ refused or nothing to do: answered now; else a job
 	b	h_ret			@ r0 = ST_DEFER, r1 = 0
 
-@ MONITOR - the DUT level (OWN_CAL_DESIGN.md section 5), 25 bytes: V rms f32, I rms f32,
+@ MONITOR - the DUT level monitor, 25 bytes: V rms f32, I rms f32,
 @   A_V,ref f32, A_I,ref f32, flags u8 (bit 0 kV calibrated at the window's frequency, bit 1
 @   gain applied, bit 2 no reading or overload, bit 3 OCAL_LOCK), DC midpoint ADC1 u16, ADC2 u16
 @   (0x200011D0 / 0x200011D8, counts), window u32. From the window MEASURE published last
@@ -962,7 +959,7 @@ h_compare_set:
 @ confirmation u16 0x4F4B. Refused while saves are held (3: the result could not be saved)
 @ and while a calibration runs (4). The meter's procedure with the guard off: settings, menu
 @ item 5, key 8 (dialog), keys 4 / 0x10 to the type (0x200050E0), key 8 (start: 0x200050E4
-@ = 1); then the sweep (cal_step, cal.s; MEASUREMENT_FIX_DESIGN stage 3) runs from the main
+@ = 1); then the sweep (cal_step, cal.s; stage 3) runs from the main
 @ loop until status 0x200050EC is 2 (finish, saved by cal_finish) or 3. Then (revision 10 item
 @ 4) long key 8 until the dialog is closed and the screen found at the request (0x20001168,
 @ 1..3) again; status 0x200050EC and the failed point stay for the answer (only the type keys
@@ -1237,10 +1234,10 @@ h_restore_def:
 	bl	save_answer
 	b	h_ret
 
-@ Settings recovery (SETTINGS_SAVE_DESIGN.md "Held saves", design 4.5): confirmation, the
+@ Settings recovery (held saves): confirmation, the
 @ save.s function, answer status u32 and flags u32. A restart (soft_restart after the answer)
 @ follows when the function set SF_RESTART (flash differs from the RAM block), and after
-@ every successful SETTINGS_RESTORE_B and SETTINGS_WRITE_BLOCK (design 9).
+@ every successful SETTINGS_RESTORE_B and SETTINGS_WRITE_BLOCK.
 @ recovery - r4 = function, r5 = 1: restart after SV_OK; r0 / r1 = payload, length;
 @   r6 = answer data. Ends the handler.
 	.thumb_func
@@ -1362,7 +1359,7 @@ h_write_block:
 
 	.ltorg
 
-@ SETUP_LANGUAGE (0x58) has no handler in our build (LANGUAGE_DESIGN.md: English only; the
+@ SETUP_LANGUAGE (0x58) has no handler in our build (English only; the
 @ first-start chooser, screen 0, is never reached, save.s set_english): cmd_dispatch answers
 @ status 1 (unknown command), and INFO clears its capability bit 20.
 
@@ -2498,7 +2495,7 @@ newest:
 @ ----------------------------------------------------------------------------
 @ free_slot - from CT_TAB (rec_scan first): the one of A (1) / B (2) that is not the newest
 @   slot recorded OK; when neither A nor B is recorded OK: A unless the newest record names
-@   A, then B (design 4.6). Returns r0 = 1 or 2.
+@   A, then B. Returns r0 = 1 or 2.
 @ ----------------------------------------------------------------------------
 	.global	free_slot
 	.thumb_func
@@ -2531,7 +2528,7 @@ free_slot:
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
-@ next_slot - the slot the starter will start at the next reset (design 4.6, starter.s
+@ next_slot - the slot the starter will start at the next reset (starter.s
 @   reset): fault flag 0x2001FFF0 = 0x464C5446 -> F; no record -> F; newest record TRIAL
 @   -> the newest other slot recorded OK whose header checks, else F; INSTALL or OK -> that
 @   slot when its header checks, else F. CT_TAB from rec_scan. Returns r0 = 0..2.
@@ -2867,7 +2864,7 @@ lcr_lists:
 @ (English row) or 0. English rows: menu labels 0x20000078 (row 1 of 0x20000054, vendor item
 @ n at +4 n), sorting rows 0x20000130 (row 1 of 0x2000011C), off times 0x20000184 (row 1 of
 @ 0x20000174), warn types 0x2000014C (row 1 of 0x20000144). The language (vendor item 1)
-@ has no id: our build is English only (LANGUAGE_DESIGN.md).
+@ has no id: our build is English only.
 	.p2align 2
 set_tab:
 	.byte	1, 0, 0, 0		@ 0 brightness: item 2, 10..100 step 10 (fn_0800f5e8)

@@ -5,14 +5,13 @@ Usage (from the repository root, after `make -C starter`, `make -C bootloader sl
 `make -C firmware own`):
     <python with unicorn 2.1.4> tests/test_own_lang.py [case-name-prefix ...]
 
-Specification: LANGUAGE_DESIGN.md revision 2 (section 4 lists these tests), PACKING_DESIGN.md revision
-2 (section 6: l07, l08, l09) and the interface comments of firmware/own/lang.s (own_menu), own/save.s
+Specification: revision 2 of the English-only build and of the packing (l07, l08, l09), and the interface comments of firmware/own/lang.s (own_menu), own/save.s
 (set_english, own_save, own_load, stage_seal) and src/rodata_04.s (ram_image). The rig (meter model,
 key pad, measurement path, USB host) is the one of test_own_control.py; expected values come from the
-design, from the vendor image vendor/LC1020E_V1.1_250702.bin and from the RAM words the code reads
+specification, from the vendor image vendor/LC1020E_V1.1_250702.bin and from the RAM words the code reads
 (named per check).
 
-Freed ranges (LANGUAGE_DESIGN.md 3, the 18 pieces of 10538 bytes): the CJK tails of the fonts
+Freed ranges (the 18 pieces of 10538 bytes): the CJK tails of the fonts
 0x0802ce5c (glyphs 76..125) and 0x0802f0d8 (glyphs 69..111): bitmaps, glyph entries, code lists, the
 two kerning class maps; the Chinese speed icons 0x0803C410..0x0803CBB3; the seven Chinese string
 runs. Our build packs the data (each freed range reduced to its size mod 4 bytes of 0xFF): a data
@@ -371,7 +370,7 @@ def l05_settings_set_ids_and_jobs():
     info = rig.ask_ok('INFO', size=INFO_SIZE)
     caps = struct.unpack_from('<I', info, 1)[0]
     check(caps == 0x0FEFFFFF and not caps >> 20 & 1, 'capabilities 0x%X' % caps)   # bits 22..24:
-                                                     # MEASUREMENT_FIX_DESIGN.md stage 2 (revision 6),
+                                                     # stage 2 (revision 6),
                                                      # bit 25 the stage-3 sweep (revision 7), bit 26
                                                      # the own calibration area (ocal.s), bit 27 the
                                                      # start-up diagnostics (boot.s, revision 17)
@@ -521,7 +520,7 @@ def l08_image_bytes():
 
 @case
 def l09_reset_path_ram_image():
-    """Reset path of our build (PACKING_DESIGN.md 6): RAM 0x20000000..0x200163A7 filled with a
+    """Reset path of our build: RAM 0x20000000..0x200163A7 filled with a
     pattern, the chip started at the reset vector and stopped at fn_08006260 (the call after
     __scatterload, 0x08007864). Then 0x20000000..0x2000057B equals the expected initial RAM image
     (check_pack.expected_ram: the unpacked V1.1 image, row 0 := row 1, flash words mapped; also the

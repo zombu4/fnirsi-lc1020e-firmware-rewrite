@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""test_own_cal.py - the calibration sweep of our build (firmware/own/cal.s; MEASUREMENT_FIX_DESIGN.md stage 3:
-CAL_SETTLE_DESIGN.md section 2 with every item of its critique, the cases of CAL_SETTLE 4.1 as the critique
-amended them and the new ones it lists, design 5.1 "Stage 3"), in the emulator.
+"""test_own_cal.py - the calibration sweep of our build (firmware/own/cal.s, stage 3), in the emulator.
 
 Usage (from the repository root, after `make -C firmware own`):
     <python with unicorn 2.1.4> tests/test_own_cal.py [case-name-prefix ...]
@@ -15,14 +13,14 @@ published on screen 3 between the point's cal_point and the next (expect_point).
 a no-reading / overload set or a non-finite window empties the held windows; the last 3 held are judged: the
 median |Z| (signed compare) and the theta of the same window, accepted when every |Zi| <= 2 |Zm| and 2 |Zi| >=
 |Zm|. The stored table entries must equal these bit for bit (fn_0800bb64 copies the words). Open points (type
-11, MEASUREMENT_FIX_DESIGN revisions 10 and 11): such a window is skipped and the others kept; the first 7
+11, revisions 10 and 11): such a window is skipped and the others kept; the first 7
 usable windows (or all of them when the point's 20 s ended it first) give the open admittances Y_i = 1 / (Zo_i
 - Zs), Zo_i = (|Z|_i + |t0|) e^(j theta_i), Zs = |t0| e^(j theta0) from the point's short entry (open_rule,
 float64 from the float32 words). Resolved (n >= 2, n (n - 1) |Ybar|^2 / sum |Y_i - Ybar|^2 above the 0.999
 quantile of F(2, 2n - 2)): the entry is |Zo| - |t0| and arg Zo of Zo = 1 / Ybar + Zs, within 1e-5 relative of
 |Zo| and 0.01 degree [J: float32 sums of 7 terms and the vendor's single-precision sine / cosine]; else |Z|
 1e10, theta +400 ("not resolved") bit for bit. A set whose ratio lies within 1e-3 of the limit may give
-either (float32 against float64 at the edge). Revision 14 (MEASUREMENT_FIX_DESIGN 14.4): a resolved mean with
+either (float32 against float64 at the edge). Revision 14: a resolved mean with
 |Zo| >= 1e5 is kept only when Ybar = G + jB has B >= |G|, B > 0 and B <= 2 pi f 50 pF (the gate; else
 "not resolved", kind 'gate'; a gate margin within 1e-6 of 0 may give either); after the 15th point every 100 /
 120 Hz point "not resolved" is filled from the first resolved source (stored words) of FSRC: B_src = -Im D /
@@ -92,7 +90,7 @@ def pre_block(**extra):
 
 
 def short_src():
-    """CAL_SETTLE 4.1 c1's short z = 0.005 + j 2 pi f 78 nH, scaled by 10 (0.05 ohm + 780 nH: 0.05..0.49 ohm
+    """c1's short z = 0.005 + j 2 pi f 78 nH, scaled by 10 (0.05 ohm + 780 nH: 0.05..0.49 ohm
     over the five frequencies, below the 0.9 ohm store check), so that the voltage channel keeps at least
     about 17 counts of amplitude at c5 = 7 and 0.1 V with 0.94 counts per volt, while the current channel
     stays in band at 100 ohm and a gain code the ranging reaches."""
@@ -402,7 +400,7 @@ def check_sweep_result(rig, typ, before, what, since=0.0):
 
 
 def check_restored(rig, what, typ=0):
-    """D10 / critique items 5 and 7: frequency, level, speed, bias, type and 0x200010C0.. as before the sweep."""
+    """Frequency, level, speed, bias, type and 0x200010C0.. as before the sweep."""
     check(rig.rd(V_FREQ) == 1000 and rig.rd(V_LEVEL) == 0x3E99999A and rig.rd(V_SPEED) == 1
           and rig.rd(V_BIAS) == 0x3F000000, '%s: settings %d / %08X / %d / %08X not restored' % (
               what, rig.rd(V_FREQ), rig.rd(V_LEVEL), rig.rd(V_SPEED), rig.rd(V_BIAS)))
@@ -434,7 +432,7 @@ def wait_answer(rig, seq, name, seconds):
 
 @case
 def c01_short_sweep_host():
-    """CAL_SETTLE c1 / c4 (with critique items 6, 7 and 9 and the false-window unit, c12): a short sweep started
+    """c1 / c4 (with the false-window unit, c12): a short sweep started
     by CALIBRATE from 1 kHz / 0.3 V / speed 1 / bias 0.5 V. Every stored entry is the median window of its point
     (theta of that window) and no window holds an acquisition from before the point's restart; no store before
     the end; the answer status 0 with calibration status 2, 8 bytes, no failed point; the step word rises
@@ -501,7 +499,7 @@ def c01_short_sweep_host():
 
 @case
 def c02_jump_inside_a_point():
-    """CAL_SETTLE c2 (critique item 9): the short reads 3x for 0.3 s inside point 4. The stored entry of point 4
+    """c2: the short reads 3x for 0.3 s inside point 4. The stored entry of point 4
     is the median of 3 agreeing windows (expect_point) and within 1e-3 of the windows of the true part: the
     jump's windows are not used."""
     base = short_src()
@@ -539,7 +537,7 @@ def c02_jump_inside_a_point():
 
 @case
 def c03_stall_and_limits():
-    """CAL_SETTLE c3 as the critique changed it (item 8): (a) TIM1 stopped in point 7 (no conversion, no re-arm
+    """c3: (a) TIM1 stopped in point 7 (no conversion, no re-arm
     of DMA1 channel 1): status 3 within 1.5 s plus a pass, reason stall at point 7, nothing stored or saved, the
     settings restored. (b) / (c) the point limit: CAO_TPT moved 21 s back with fewer than 3 windows held gives
     the reason "time", with 3 held "spread"."""
@@ -590,7 +588,7 @@ def c03_stall_and_limits():
 
 @case
 def c05_type_key_abort():
-    """CAL_SETTLE c5 (critique item 5): CALIBRATE, then a physical key 4 during point 4 (the vendor clears
+    """c5: CALIBRATE, then a physical key 4 during point 4 (the vendor clears
     0x200050E4 / E8 / EC and changes the type): the type restored to 0 and its dialog text set again, status 0,
     nothing stored or saved, the settings restored, OP_WAITCAL answers status 3 after 1 s."""
     rig = cal_rig(short_src(), block=pre_block(), usb=True)
@@ -624,8 +622,8 @@ def c05_type_key_abort():
 
 @case
 def c07_store_check_fails():
-    """CAL_SETTLE c7: the vendor check of fn_0800bb64 fails at the store of point 5: a 2 ohm "short" (types 0..2
-    at 0.9 ohm or above go to its 50 % test, critique item 10) against old short entries of 2 ohm at points
+    """c7: the vendor check of fn_0800bb64 fails at the store of point 5: a 2 ohm "short" (types 0..2
+    at 0.9 ohm or above go to its 50 % test) against old short entries of 2 ohm at points
     0..4 (they pass) and 0 at 5..14 (fails). Status 3, reason "check" at point 5, the entries points 0..4
     were stored with written back (cal_snap): the user table as before, no save, the settings restored, the
     fail text; m15: the user table's writers are fn_0800bb64 and cal_snap."""
@@ -802,7 +800,7 @@ def c13_noise_limited_open():
 
 @case
 def c14_open_below_100k():
-    """Design stage 3 "open validity": an open of 1 Mohm that reads 50 kohm at 10 kHz fails the sweep at point
+    """Stage 3 "open validity": an open of 1 Mohm that reads 50 kohm at 10 kHz fails the sweep at point
     9 (10 kHz / 0.1 V) with the reason "open low": nothing stored or saved, the settings restored, the text."""
     src = DutSource(z=lambda f: complex(5e4 if f == 10000 else 1e6, 0.0))
     rig = cal_rig(src, block=pre_block())
@@ -824,7 +822,7 @@ def c14_open_below_100k():
 
 @case
 def c15_factory_mode_finish():
-    """Design stage 3 / S1.9: in factory mode (PC11 at the start, the gate of fn_0800bd5c sets 2 on screen 3) a
+    """Stage 3 / S1.9: in factory mode (PC11 at the start, the gate of fn_0800bd5c sets 2 on screen 3) a
     complete short sweep stores into the user table only: the factory table stays the loaded one (m15)."""
     rig = cal_rig(DutSource('R', 0.5, counts_per_volt=M.K_SHORT), block=M.factory_block(), keys_at_start=M.KEY_PC11)
     start(rig)
@@ -1132,8 +1130,8 @@ def c20_open_fail_restores_what_the_start_found():
     the start, 0 after); the last frequency / level events carry 1000 / 0.6 V; nothing stored or saved; the
     dialog closed and screen 1 again when the answer comes.
     The source selects 100 kHz by f > 5e4 (between the sweep's 10 kHz and 100 kHz), not by f == 100000: the
-    model's generator frequency is 1 / (n x period) in float64, 100000.00000000001 at the word 100000 (scratchpad
-    rev10/diag_freq.py, 2026-11-23; 10000.0 exactly at 10 kHz, so c14's f == 10000 matched), so the equality
+    model's generator frequency is 1 / (n x period) in float64, 100000.00000000001 at the word 100000 (diagnostic
+    run of 2026-11-23; 10000.0 exactly at 10 kHz, so c14's f == 10000 matched), so the equality
     never held and every point read 1 Mohm: the sweep finished (answer 020b00000000ff00). Input check, by
     cal_accept's criterion, before the answer is judged: point 12 published usable windows on screen 3, and
     each has |Z| + the point's short entry below 1e5 (so the resolved mean of revision 11 has too: the source is
@@ -1337,10 +1335,10 @@ def windows_of_admittances(ys, t0, th0):
 
 # The open sweep of 2026-11-23 (leads open, 0.3 V, the table of backup 20261123-191801-pre-opensweep): per
 # frequency the point, its short entry (t0, theta0) and the first 7 readings after the first, turned back into
-# the screen-3 windows of an open calibration through the stored table (scratchpad opencal/r11/wins.py:
+# the screen-3 windows of an open calibration through the stored table (computed outside this file:
 # |Zdut| from the decade interpolation inverted, Y = 1 / Zdut + Yo, Zo = 1 / Y + Zs), with the result the
-# revision-11 rule gives (MEASUREMENT_FIX_DESIGN revision 11.2) and the revision-14 gate after it: the 1 kHz set's
-# mean is G -2.909e-10 S, B 1.372e-8 S, arg Ybar +91.215 degrees (scratchpad rev14/u02gate.py): B >= |G| and C
+# revision-11 rule gives (revision 11) and the revision-14 gate after it: the 1 kHz set's
+# mean is G -2.909e-10 S, B 1.372e-8 S, arg Ybar +91.215 degrees (the gate applied to that set): B >= |G| and C
 # 2.18 pF, so the gate keeps it ('res'; the first revision-14 gate, G >= 0, refused this real stray); 10 kHz
 # +85.909 degrees, C 1.954 pF and 100 kHz +73.675 degrees, C 1.982 pF pass
 METER_OPEN = [
@@ -1369,8 +1367,8 @@ def u02_open_rule_unit():
     |Zo| >= 1e5) called directly on a rig at the main loop, with the point's short entry written into the RAM
     table, on sets of 0..7 windows with the expected kind written out: none and one window (not resolved), three
     equal windows (resolved, the sum of squares 0; at 10 kHz arg Ybar +88 degrees, C 1.99 pF), a 2 pF stray at
-    10 kHz with G 5e-9 S (the stored 10 kHz opens of three backups: G 5.2e-9 .. 1.32e-8 S, scratchpad
-    rev14/opens.py) and a scatter of 3e-9 S (resolved; without G its mean lay at +89.999 degrees, on the
+    10 kHz with G 5e-9 S (the stored 10 kHz opens of three backups: G 5.2e-9 .. 1.32e-8 S, read
+    from the backups) and a scatter of 3e-9 S (resolved; without G its mean lay at +89.999 degrees, on the
     gate's edge), the same stray at 100 Hz (1.26e-9 S) with a scatter of 2e-8 S spread around it (not
     resolved), METER_OPEN, and the gate sets, each three equal windows (S = 0, resolved by the F test) at
     point 4 (120 Hz, 0.3 V) with METER_OPEN's short entry there: the stored 120 Hz opens of backup

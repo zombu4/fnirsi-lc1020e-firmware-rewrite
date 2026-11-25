@@ -798,7 +798,7 @@ fn_0800f854:
 	ldr.w	r0, [r4, #0xbcc]
 	cbnz	r0, .L0800f8d6
 .ifdef OWN
-	@ MEASUREMENT_FIX_DESIGN.md S2.5: the AUTO decision with hysteresis (own/cmp.s); the rest
+	@ S2.5: the AUTO decision with hysteresis (own/cmp.s); the rest
 	@ of the vendor block is not reached (same size, the labels the code outside uses kept)
 	bl	own_auto_class		@ 0x0800F874
 	b.n	.L0800f8ec		@ 0x0800F878
@@ -869,7 +869,7 @@ fn_0800f854:
 	cmp	r0, #2
 	bne.n	.L0800f94a
 .ifdef OWN
-	@ MEASUREMENT_FIX_DESIGN.md S2.8 / S2.9: the compare screen's result, deviation and nominal
+	@ S2.8 / S2.9: the compare screen's result, deviation and nominal
 	@ (own/cmp.s); the rest of the vendor block is not reached (same size, .L0800f94a kept)
 	bl	own_cmp_show		@ 0x0800F8FC
 	b.n	.L0800fa04		@ 0x0800F900

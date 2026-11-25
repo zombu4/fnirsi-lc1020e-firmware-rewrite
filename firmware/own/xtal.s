@@ -1,7 +1,7 @@
 @ xtal.s - the crystal-fault screen of our build and the text renderer it uses.
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ VENDOR_FIXES_DESIGN.md F4. When the 8 MHz crystal does not start, the clock set-up of the
+@ F4. When the 8 MHz crystal does not start, the clock set-up of the
 @ reset handler (fn_0800c274 -> fn_0800ba4c, branch 0x0800BAF8) leaves the core on the 8 MHz HSI
 @ with RCC_CFG SCLKSTS != PLL; V1.1 then runs on, its clock word says 144 MHz, and the IWDG resets
 @ the chip in the first main-loop pass, which switches the meter off at every start without a
@@ -21,7 +21,7 @@
 @
 @ text_draw - draws one line of font F1 (the vendor's 18-pixel font, object d_0802ce5c) straight
 @   to the panel, without the vendor GUI (which is set up only later, fn_08021e98). The font
-@   format, as the vendor font engine reads it (RESOURCE_FACTS.md section 7, fn_08020968,
+@   format, as the vendor font engine reads it (fn_08020968,
 @   fn_0801B174, fn_080169ac):
 @   - font object +8 line height, +0xA base line (signed halfwords), +0x10 the font record;
 @   - record +0 bitmap base, +4 glyph entries (8 bytes each, by glyph id), +8 range records

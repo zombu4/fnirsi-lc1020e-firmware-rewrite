@@ -97,7 +97,11 @@ with a command-line tool.
 
 - **Starter** (flash page 0, 1064 bytes): holds the power latch, reads the control records and starts
   one of three bootloader slots (factory F, A, B). An installed slot is first recorded as on trial, a
-  slot that never confirmed is replaced by the newest confirmed one, and slot F is the fallback. Every
+  slot that never confirmed is replaced by the newest confirmed one, and slot F is the fallback. The
+  records fill two flash pages of 128 cells; when the page in use is full, the other page is erased
+  and used next, and the records it held are gone. A bootloader update writes three records, so after
+  about 40 updates a slot whose newest record was on the erased page no longer counts as confirmed,
+  and a slot that then fails its trial is replaced by slot F instead of that slot. Every
   slot is checked (header, CRC-32 of the image, vector table) before it starts; every record it writes
   is read back.
 - **Slot bootloader** (`make -C bootloader slot`): the vendor bootloader port built for the three slots,

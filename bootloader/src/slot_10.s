@@ -19,7 +19,7 @@
 @                 -> slot_app_start; before the USB start -> uf2_init; after the USB start ->
 @                 slot_confirm; every pass of the update-mode loop -> slot_feed; state 2 ->
 @                 slot_finish
-@ Feature version 2 (USB_CONTROL_DESIGN.md section 6, items a..e, and 6b): the request word
+@ Feature version 2 (items a..e, and the soft restart): the request word
 @ (slot_key_check: UPDT update mode, UPDT / RSTR the application's IWDG runs), the hand-over
 @ word (slot_app_start), the result word and the soft restart after an update (slot_finish,
 @ slot_soft_restart), the watchdog of a trial start (slot_trial_wdg) and its feeds (slot_feed:
@@ -500,8 +500,7 @@ slot_app_start:
 	.ltorg
 
 @ ============================================================================
-@ Feature version 2: the no-init words and the watchdog (USB_CONTROL_DESIGN.md
-@ section 6). The words lie at 0x2001FFF4..0x2001FFFF (slot.inc), outside the
+@ Feature version 2: the no-init words and the watchdog. The words lie at 0x2001FFF4..0x2001FFFF (slot.inc), outside the
 @ RAM every start code clears; the slot clears REQ_WORD only.
 @ ============================================================================
 
@@ -581,8 +580,8 @@ slot_feed:
 @ slot_key_check - the start check of main with the request word added.
 @   r0 = GPIOC base, r1 = 0x80 (pin 7, the up key), as main passes them to
 @   fn_080007a4. Reads REQ_WORD and clears it at every start. REQ_MAGIC
-@   ("UPDT") and REQ_RESTART ("RSTR") come from the application's soft restart
-@   (USB_CONTROL_DESIGN.md 6b), which leaves its IWDG running (it cannot be
+@   ("UPDT") and REQ_RESTART ("RSTR") come from the application's soft restart,
+@   which leaves its IWDG running (it cannot be
 @   stopped, manual 16): both set WDG_ON = 3 (bit 0: slot_feed then feeds it
 @   in every wait, as on a trial start; bit 1: soft restart, hand-over bit 9;
 @   slot_trial_wdg cleared it before) and feed it once here. REQ_MAGIC
@@ -624,7 +623,7 @@ slot_key_check:
 @   wait as ten fn_0800320e(99) calls (1000 fn_08003224(1000) waits; the stock
 @   fn_0800320e(1000) makes 1001) with a watchdog feed before each, then the
 @   soft restart (slot_soft_restart; a system reset would switch the meter
-@   off, NOTES 2026-11-20). When WDG_ON is not 0 (the IWDG runs) REQ_WORD =
+@   off, seen over SWD 2026-11-20). When WDG_ON is not 0 (the IWDG runs) REQ_WORD =
 @   REQ_RESTART first, so the next start feeds it; with WDG_ON = 0 (update
 @   mode entered by the key at power-on, no IWDG) no word is written, so the
 @   next start writes nothing to the stopped IWDG (the manual is
@@ -653,7 +652,7 @@ slot_finish:
 
 @ ----------------------------------------------------------------------------
 @ slot_soft_restart - restart through the starter without a system reset
-@   (USB_CONTROL_DESIGN.md 6b; the same steps as soft_restart of the
+@   (the same steps as soft_restart of the
 @   application, firmware/own/ctl.s, without the DMA: the slot enables no DMA
 @   channel). Thread mode, called from main. Never returns. In this order:
 @   - PRIMASK set;

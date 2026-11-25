@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""test_ocal_fit.py - tools/ocal_fit.py, the host-side gain fit of the own calibration area
-(OWN_CAL_DESIGN.md section 3), on synthetic data.
+"""test_ocal_fit.py - tools/ocal_fit.py, the host-side gain fit of the own calibration area,
+on synthetic data.
 
 Usage (from the repository root):
     python3 -I tests/test_ocal_fit.py          (standard library only; no meter, no emulator)

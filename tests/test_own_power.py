@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """test_own_power.py - the automatic power-off of our application build (firmware/own/power.s), in the
-emulator: Off Time (VENDOR_FIXES_DESIGN.md F2), the low-voltage countdown (F3) and the battery icon
+emulator: Off Time (F2), the low-voltage countdown (F3) and the battery icon
 checked every 30 s (F8, p6).
 
 Usage (from the repository root, after `make -C starter`, `make -C bootloader slot` and
@@ -91,7 +91,7 @@ def run_until_off(rig, seconds):
 
 def check_power_off(rig, saves, reason, what):
     """The power-off path of POWER_OFF ran: own_save ran (count + 1, status 0, or 9 = SV_SAME when both
-    copies already held the block: nothing written, MEASUREMENT_FIX_DESIGN.md S2.10), PA8 low, the reason
+    copies already held the block: nothing written, S2.10), PA8 low, the reason
     word, and 1.2 s later (USB power in the model: the meter still runs) the powered-off mode CF_OFF."""
     check(rig.m.st['pa8'] == 0, '%s: PA8 not low' % what)
     check(rig.rd(PW_REASON) == reason, '%s: reason %d, expected %d' % (what, rig.rd(PW_REASON), reason))
@@ -99,7 +99,7 @@ def check_power_off(rig, saves, reason, what):
     check(rig.rd(SAVE_COUNT) == saves + 1 and rig.rd(SAVE_STATUS) in (0, 9),
           '%s: save count %d (before %d), status 0x%X' % (what, rig.rd(SAVE_COUNT), saves, rig.rd(SAVE_STATUS)))
     # OFF_WAIT_MS 1000 from the request, plus one main-loop pass for off_step (up to about 0.71 s on
-    # the slow core of p1..p3, MEASUREMENT_FIX_DESIGN.md revision 5 item 23); with a save that writes
+    # the slow core of p1..p3, revision 5); with a save that writes
     # nothing (SV_SAME) PA8 goes low long before the wait ends, so the bound is 2.5 s from here
     end = rig.m.run_for(seconds=2.5, until=lambda mm: rig.rd(OWN_CTL + CT_FLAGS) & CF_OFF)
     check(end is None and rig.rd(OWN_CTL + CT_FLAGS) & CF_OFF, '%s: powered-off mode not entered (%r)' % (what, end))
@@ -242,7 +242,7 @@ def p4_low_voltage_countdown_then_power_off():
     """Supply 3.0 V: within 1.1 s the popup built (fn_0800cf68(1, 10), 0x20005118 = 10, both objects
     tracked), then once a second 9, 8, .. 0 stored and shown (fn_0800cf68(0, n)), each on the 1 s grid
     of the first: stored by the first pwr_step call at or after its grid point (a redraw outside
-    ctl_loop, fn_08012188 from the timer walk, can hold that call back; NOTES "STATE stream gaps"),
+    ctl_loop, fn_08012188 from the timer walk, can hold that call back),
     never before it, and the grid does not drift; at 0 the power-off path (PA8 low within 2.5 s)."""
     rig = lowv_rig()
     saves = rig.rd(SAVE_COUNT)
@@ -373,7 +373,7 @@ ICON_PICS = ('d_08044440', 'd_0804459c', 'd_080446e8', 'd_08044844', 'd_08044990
 
 @case
 def p6_battery_icon_every_30_s():
-    """VENDOR_FIXES_DESIGN.md F8. Measure screen at 4.1 V (level 4: above 4.0 V); then 3.7 V (level 2:
+    """F8. Measure screen at 4.1 V (level 4: above 4.0 V); then 3.7 V (level 2:
     above 3.6, not above 3.8). Expected: own_batt_icon marked the icon (PF_ICON, level 4, PW_ICON_T);
     up to 28.5 s after PW_ICON_T no fn_08021c14 call from pwr_icon_step and the icon's picture
     (object +0x24) still level 4; by 31.5 s exactly one call (the icon object, the level-2 picture)

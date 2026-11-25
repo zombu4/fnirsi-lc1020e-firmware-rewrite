@@ -307,7 +307,7 @@ def c12_failed_record_word_written_again_in_next_cell():
 
 
 # ---------------------------------------------------------------- slot bootloader version 2
-# USB_CONTROL_DESIGN.md section 6 (a)..(e) and section 9; bootloader/src/slot_10.s (slot_key_check,
+# Feature version 2, items (a)..(e); bootloader/src/slot_10.s (slot_key_check,
 # slot_app_start, slot_finish, slot_soft_restart, slot_trial_wdg, slot_feed, slot_confirm) and
 # system_05.s main; the no-init words of bootloader/src/slot.inc. Cases c13..c21 need the slots built
 # with SLOT_VERSION 2 or later (version 3 keeps every feature of 2; bootloader/Makefile default 3).
@@ -319,7 +319,7 @@ WDG_ON = 0x20002228
 BOOT_STATE = 0x20000274
 IWDG_KEY, IWDG_PR, IWDG_RL = 0x40003000, 0x40003004, 0x40003008
 LSI_FAST = 60000          # datasheet fLSI max: the shortest watchdog period 2501 * 16 / 60000 s
-PERIOD_MIN = 0.67         # USB_CONTROL_DESIGN.md requirement 2 / section 6: the bound every claim uses
+PERIOD_MIN = 0.67         # the shortest IWDG period over the LSI range: the bound every claim uses
 
 
 def ram_word(m, addr):
@@ -653,7 +653,7 @@ def c18_power_key_held_longer_than_the_period_on_a_trial_start():
 
 @case
 def c19_starter_trial_append_fails_slot_starts_without_watchdog():
-    """Documented case (USB_CONTROL_DESIGN.md section 6 (d)): the starter's TRIAL append fails three
+    """Documented case (feature version 2, item (d)): the starter's TRIAL append fails three
     times (version word of the cells at 0x08068010 / 20 / 30 stuck: bit 8 stays 1, read back 0x101
     instead of 1), then starter.s goes on with `b start_slot`: the newest valid record stays INSTALL A,
     so slot A starts without the watchdog (WDG_ON 0, no IWDG key written) and confirms nothing."""

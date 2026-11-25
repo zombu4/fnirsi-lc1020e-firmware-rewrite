@@ -268,13 +268,15 @@ again and switch the meter off and on. Your backup still holds the vendor bootlo
 To update the application afterwards: hold the up key while switching on, the meter shows the
 update drive; convert the image with `tools/bin2uf2.py` and copy it with `tools/iap_write.py`.
 
-## 11. Slot bootloader version 2 and our application
+## 11. Our application (and older slots)
 
 Our application needs slot bootloader version 2 or later (it keeps the meter on over a restart and
 serves the update request of the control channel). `make -C bootloader slot` builds version 3
-(version 2 plus bounded clock waits at the start, FEATURES.md "Bootloader"); the steps and outputs
-below were written for version 2 and print the version of the images you built. On a meter with
-the version-1 slots of section 10:
+(version 2 plus bounded clock waits at the start, FEATURES.md "Bootloader"), and section 10 installs
+those images, so after section 10 go straight to "Our application" below.
+
+Only a meter whose slots were installed from an older release with version 1 needs the two slot
+stages first:
 
     make -C bootloader slot
     python3 -I tools/make_install.py --stage slot_a
@@ -282,9 +284,9 @@ the version-1 slots of section 10:
     DAP_HOST=<probe-ip> DAP_PORT=4441 STAGE=slot_a openocd -f probe-cmsis-dap-tcp.cfg -f install_bootloader.tcl
     cd .. && python3 -I tools/make_install.py --check --stage slot_a
 
-Expected: `BOOT_A.bin ... version 2 read back identical` and `newest INSTALL slot 1 version 2 ...
-INSTALL A as written`. Release the core as in section 10 and switch the meter off and on. At
-0x08068000 three more records of slot A follow the earlier ones (word 1 = 2, the version). Slot F,
+Expected: `BOOT_A.bin ... read back identical` and `records      newest INSTALL slot 1 version 3
+...`. Release the core as in section 10 and switch the meter off and on. At 0x08068000 three more
+records of slot A follow the earlier ones (word 1 = 3, the version). Slot F,
 the fallback, follows only now:
 
     python3 -I tools/make_install.py --stage slot_f
@@ -301,7 +303,7 @@ off, hold the up key and switch it on until the drive `LC1020E-IAP` appears, the
 
 The bootloader writes the application's vector page last and restarts into it. The meter appears as
 a USB serial device (19F5:1020, "LC1020E"); `python3 -I tools/lc1020e.py info` names slot A and slot
-bootloader version 2. Later updates need no key: `python3 -I tools/lc1020e.py update
+bootloader version 3. Later updates need no key: `python3 -I tools/lc1020e.py update
 firmware/build/own/APP_OWN.uf2 --yes` puts the meter into update mode, copies the file and checks
 the result (PROTOCOL.md section 13).
 
@@ -312,7 +314,9 @@ slot A confirmed and slot B empty, B is the free one (`python3 -I tools/lc1020e.
 
 The file is the slot file `make -C bootloader slot` writes (header and image), linked for slot B.
 The meter restarts, the starter starts B on trial and B confirms itself; `info` then names slot B
-and its version. A slot B that never confirms is replaced by slot A at the next start.
+and its version. A slot B that never confirms is replaced by slot A at the next start, as long as
+slot A's confirmation is still in the record pages (FEATURES.md "Bootloader": after about 40
+bootloader updates the oldest records are erased, and slot F takes A's place).
 
 ## 12. Recovery
 

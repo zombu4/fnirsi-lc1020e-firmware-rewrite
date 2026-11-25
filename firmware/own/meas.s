@@ -1,9 +1,9 @@
-@ meas.s - the measurement core of our build (MEASUREMENT_FIX_DESIGN.md stage 1, S1.1 to S1.8).
+@ meas.s - the measurement core of our build (stage 1, S1.1 to S1.8).
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
 @ own_measure replaces the vendor routine fn_0800a068 (measure_33.s) in the main loop
 @ (system_40.s 0x080281D4, .ifdef OWN). fn_0800a068 stays in the image and is no longer called.
-@ What it does differently, each item with its section of the design:
+@ What it does differently, each item with its label:
 @ - S1.1 coherent sampling: own_tim1_setup (TIM1 period AR = 144 MHz / (k f) - 1, so the 128
 @   samples are exactly 1, 4 or 16 signal periods) and own_dac_setup (150 table entries at 120 Hz,
 @   so the DAC period is exactly 1 / 120 s);
@@ -34,15 +34,15 @@
 @   in-band acquisitions between the cuts no longer clear the count 0x2000120C; meas_acq,
 @   MO_FL bits 5..7).
 @ While hold (0x200011A4) is set the measurement runs on and windows close, but nothing is
-@ published (the display freeze of design decision D1).
+@ published (the display freeze, D1).
 @ Stage 2 (revision 6): S2.6 series / parallel with hysteresis (meas_serpar), S2.7 a hold that
 @ ends at a change of frequency, level, bias, range, speed or circuit (meas_hold, D2), the
 @ publish number MF_PSEQ and the compare judgement call in meas_tail (S2.8), 60 Hz (S2.12:
 @ own_dac_setup n = 150, the 100 Hz calibration entry, own_freq_step for the frequency key).
 @ A window always holds at least 3 accepted acquisitions: it closes at the first addition with
 @ N >= 3 and T_win passed (meas_add), so a window that would hold fewer in T_win is extended
-@ until the third (the A6 D bound of the design's fix 4 needs N >= 3; revision 6).
-@ Stage 4 (revision 7, design 8.1): S4.1 the complex open / short compensation with S4.2 option
+@ until the third (the A6 D bound needs N >= 3; revision 6).
+@ Stage 4 (revision 7): S4.1 the complex open / short compensation with S4.2 option
 @ (K), the references kept as magnitude breakpoints through the compensation, on screens 1 and 2
 @ only (meas_comp; never on screen 3, so fn_0800bb64 stores the V1.1 format); S4.4 the bias
 @ transient: after a bias change a window is published only once the DC midpoints are steady
@@ -52,7 +52,7 @@
 @ MF_BT0, MF_RHV, MF_RHI, MF_RHT, MF_RHN, and MF_AUTO = 0 at a setting change (own.inc).
 @
 @ Vendor RAM words written here (each also written by fn_0800a068 in V1.1, same meaning unless
-@ the design's section 2 table says otherwise): 0x20005090 / 94 (|Zm| / theta of the last
+@ stated otherwise): 0x20005090 / 94 (|Zm| / theta of the last
 @ acquisition), 0x20005098..0x200050B4 (Xs, Xp, Rs, Rp, Cs, Cp, Ls, Lp), 0x200050B8 / BC / C0
 @ (R, C, L by series / parallel), 0x200050C4 |Z|, 0x200050C8 X (= Xs in both modes), 0x200050CC
 @ theta, 0x200050D0 Q, 0x200050D4 D, 0x200050DC (compare value), 0x200011EC (0 series,
@@ -64,7 +64,7 @@
 @ C8 change only through the vendor ranging calls fn_0800b20c / fn_0800b000 and, while OCAL_LOCK
 @ holds them (ocal.s), through meas_lockset (the vendor setters fn_0800b164 / fn_0800af58 /
 @ fn_080093b8).
-@ OWN_CAL_DESIGN.md revision 3: S4.3 the gain correction zeta nu at meas_publish (ocal_gain; where
+@ Own calibration area, revision 3: S4.3 the gain correction zeta nu at meas_publish (ocal_gain; where
 @ it is applied the decade interpolation and the S4.2 (K) references are skipped), S4.5 the clip
 @ limits (ocal_clip), S4.6 the settle times per kind and frequency (ocal_settle, the maximum rule
 @ of meas_watch, the kind in r1 of meas_change, the bound T_max + 10), S4.4's limit from the BIAS
@@ -353,8 +353,8 @@ own_measure:
 	pop	{r3, r4, r5, r6, r7, r8, r9, r10, r11, pc}
 
 @ ----------------------------------------------------------------------------
-@ meas_watch - change detection (S1.4 "Watched settings", "Restart detection", "On a change";
-@   OWN_CAL_DESIGN.md 2.3). Compares frequency, level, bias, speed, screen and the codes c5 / c6
+@ meas_watch - change detection (S1.4).
+@   Compares frequency, level, bias, speed, screen and the codes c5 / c6
 @   / c8 with the values seen last and stores the new ones; the restart marker 0x200011FC = 0,
 @   and a calibration record loaded by a commit or rollback (ocal_restart_take), count as a
 @   restart. Each change kind k (0 restart, 1 frequency, 2 level, 3 bias, 4 speed, 5 screen,
@@ -457,7 +457,7 @@ meas_watch:
 	pop	{r6, r7, r8, r9, r10, pc}
 
 @ ----------------------------------------------------------------------------
-@ meas_wkind - the maximum rule of meas_watch (OWN_CAL_DESIGN.md 2.3): r0 = change kind 0..6.
+@ meas_wkind - the maximum rule of meas_watch: r0 = change kind 0..6.
 @   r7 = SETTLE[kind][fi] and r8 = the kind when that value is larger than r7 (so the first kind
 @   found wins a tie); kinds 0..4 set r9 = 1. Works on meas_watch's r7..r9 and is called only
 @   from it. Changes r0..r2, r12.
@@ -478,7 +478,7 @@ meas_wkind:
 	pop	{r6, pc}
 
 @ ----------------------------------------------------------------------------
-@ meas_hold - S2.7 (design D1 / D2). Hold 0x200011A4 = 0: MF_HOLDP = 0. Hold set and MF_HOLDP 0
+@ meas_hold - S2.7. Hold 0x200011A4 = 0: MF_HOLDP = 0. Hold set and MF_HOLDP 0
 @   (hold went 0 -> 1, by the key 0x400, app_01.s 475-481, or HOLD, dset.s ds_hold): frequency,
 @   level, bias, range, speed and circuit (0x20001144 / 38 / 3C / 4C / 50 / 54) latched in MF_HL,
 @   MF_HOLDP = 1. Hold set and MF_HOLDP 1: any of the six differing from its latched value ends
@@ -553,7 +553,7 @@ meas_codes:
 	.type	meas_change, %function
 meas_change:
 	ldr	r2, =OWN_OCAL + OCS_KIND
-	strb	r1, [r2]		@ the kind of this change (OWN_CAL_DESIGN.md 2.3, G7)
+	strb	r1, [r2]		@ the kind of this change (G7)
 	push	{r0, lr}
 	bl	ocal_trace_change	@ changes r0..r3
 	pop	{r0, lr}
@@ -703,7 +703,7 @@ meas_acq:
 	ldr	r1, [r4, #MO_FL]
 	bic	r1, r1, #FL_LOCKCLR
 	str	r1, [r4, #MO_FL]	@ locked: no band rule, an out-of-band run ends, no hunting
-	bl	meas_lockset		@ the locked codes; no ranging call (OWN_CAL_DESIGN.md 2.2)
+	bl	meas_lockset		@ the locked codes; no ranging call
 	bl	meas_rhclear		@ locked: the p-p history is not known afterwards
 	b	.Lac_ranged
 .Lac_auto:
@@ -874,7 +874,7 @@ meas_acq:
 	pop	{r7, r8, r9, r10, r11, pc}
 
 @ ----------------------------------------------------------------------------
-@ meas_lockset - OCAL_LOCK (OWN_CAL_DESIGN.md 2.2): r0 = the lock word (c5 | c6 << 8 | c8 << 16 |
+@ meas_lockset - OCAL_LOCK: r0 = the lock word (c5 | c6 << 8 | c8 << 16 |
 @   1 << 24). Each code that differs from its byte is stored and its vendor setter called:
 @   fn_0800b164 (c5 from 0x200011C5, src/app_02.s 221-224), fn_0800af58 (c6 from 0x200011C6,
 @   src/app_01.s 1096-1099), fn_080093b8 (r0 = c8 after 0x200011C8 is stored, src/app_01.s
@@ -2132,11 +2132,11 @@ meas_divinf:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ meas_serpar - S2.6 (design D4): r0 = 0 series, 1 parallel for |Z|c = s22, with the state
+@ meas_serpar - S2.6: r0 = 0 series, 1 parallel for |Z|c = s22, with the state
 @   MF_SP (0 undecided after a setting change or restart, meas_watch; 1 series; 2 parallel):
 @   series goes parallel above 10 kohm, parallel goes series below 1 kohm, in between the mode is
-@   kept; undecided: series below sqrt(1 kohm * 10 kohm) = 3162.28 ohm, else parallel ([J] of the
-@   design). Replaces V1.1's single compare at 1.1 Mohm. Changes r0..r2, s0, s1.
+@   kept; undecided: series below sqrt(1 kohm * 10 kohm) = 3162.28 ohm, else parallel ([J]).
+@   Replaces V1.1's single compare at 1.1 Mohm. Changes r0..r2, s0, s1.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	meas_serpar, %function
@@ -2376,8 +2376,8 @@ meas_interp:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ meas_polar - the stage-1 chain of meas_publish on screens 1 and 2 (MEASUREMENT_FIX_DESIGN
-@   revision 10 item 5): s22 = |Z|c (|Zbar| minus the short entry, then the decade
+@ meas_polar - the stage-1 chain of meas_publish on screens 1 and 2
+@   (revision 10): s22 = |Z|c (|Zbar| minus the short entry, then the decade
 @   interpolation unless the OCAL gain was applied), s19 =
 @   theta, s20 / s21 = cos / sin of Zbar. The chain's value is the complex number s22 (s20 + j
 @   s21); with |Zbar| below the short entry s22 is negative, and the same number is written with
@@ -2801,7 +2801,7 @@ own_freq_step:
 	b.w	fn_08009f10
 
 @ ----------------------------------------------------------------------------
-@ meas_bias_wait - S4.4, the bias transient (design 8.1: built with the DC-midpoint rule; the
+@ meas_bias_wait - S4.4, the bias transient (built with the DC-midpoint rule; the
 @   count limit BIAS_LIM and the time bound BIAS_MAX_MS are [J], marked for M6). After a bias change
 @   (MF_BIASP != 0, set by meas_watch) a window is published only when the DC midpoints of ADC1 and
 @   ADC2 (halfwords 0x200011D0 / 0x200011D8, written by fn_08007fd4 / fn_08007f38 for the
@@ -2867,7 +2867,7 @@ meas_bias_wait:
 
 @ ----------------------------------------------------------------------------
 @ meas_comp - stage 4 on screens 1 and 2: S4.1, the complex open / short compensation, with
-@   S4.2 option (K) (design 8.1: D11 = (K), computed per reading, 0 RAM). r7 = the user-table
+@   S4.2 option (K) (D11 = (K), computed per reading, 0 RAM). r7 = the user-table
 @   entry of the frequency and level (fn_080090a4: type t at +4 t, its phase at +0x2D0 + 4 t),
 @   s16 / s17 = Re / Im Zbar.
 @   - Zs = |t0| e^(j theta0) (type 0 is stored raw). |t0| or theta0 not finite, or |theta0| > 180:
@@ -2877,8 +2877,8 @@ meas_bias_wait:
 @     theta 0 (the default), 1e10 (no reading), theta11 not finite or beyond +-180 (-400 the
 @     no-reading set, +400 an open "not resolved" by cal.s), t11 not finite, or |Zo| below 1e5 or
 @     Zo = Zs; else Yo = 1 / (Zo - Zs) and Zdut = (Zm - Zs) / (1 - (Zm - Zs) Yo) (meas_cz);
-@   - (K): b'_k = |comp((b_k + |t0|) e^(j theta_k))| for the references k = 1..10 (assumption A1
-@     of the design: b_k was stored as |Zm_k| - |t0|). One not finite, a guard at one, or b'_k not
+@   - (K): b'_k = |comp((b_k + |t0|) e^(j theta_k))| for the references k = 1..10 (assumption A1:
+@     b_k was stored as |Zm_k| - |t0|). One not finite, a guard at one, or b'_k not
 @     strictly increasing: r0 = 0 (the stage-1 chain for this reading); skipped where the OCAL
 @     gain was applied (ocal_gain_on): |Z|c = |Zdut| then;
 @   - Zdut = comp(Zbar): the guard |1 - (Zm - Zs) Yo| < 1e-6, or Zdut not finite: r0 = 2 (the
@@ -2955,7 +2955,7 @@ meas_comp:
 	vneg.f32	s27, s27	@ s27 = Im Yo
 	movs	r8, #1
 .Lco_refs:
-	bl	ocal_gain_on		@ the gain applied: no S4.2 (K) references (OWN_CAL_DESIGN 2.1)
+	bl	ocal_gain_on		@ the gain applied: no S4.2 (K) references
 	cmp	r0, #0
 	bne	.Lco_zdut
 	movs	r9, #1			@ r9 = k

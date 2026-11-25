@@ -2,10 +2,10 @@
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
 @ Replaces the vendor copy 0x08014B74 (bl at 0x08028030) and the vendor save 0x08014B94 (bl at
-@ 0x08009474, 0x0800B5C0, 0x0800BD1A, 0x0800D922) by the rules of SETTINGS_SAVE_DESIGN.md
-@ (revision 4). The vendor save erased the only copy first and programmed it without a status
+@ 0x08009474, 0x0800B5C0, 0x0800BD1A, 0x0800D922) by a save to two copies that checks
+@ every status and reads back (revision 4). The vendor save erased the only copy first and programmed it without a status
 @ check or read-back; its word program 0x08008DC0 lacks the five NOPs of the N32G45x user manual
-@ 3.2.1.4.2 (NOTES.md "Internal-flash storage used by the application").
+@ 3.2.1.4.2.
 @
 @ Flash layout (own.inc): copy A 0x0807F000..0x0807FFFF (block 0x0807F000..0x0807FC13 in the
 @ vendor format, trailer 0x0807FFF8 sequence, 0x0807FFFC CRC-32), copy B 0x08066000..0x08066FFF
@@ -19,25 +19,30 @@
 @ 0x0807F000, 0x0807F800, and, only while ctl.s has opened it with flash_boot_gate, slot A
 @ 0x0806F000..0x08074FFF or slot B 0x08075000..0x0807AFFF and the record pages
 @ 0x08068000..0x08068FFF, and, only while ocal.s has opened it with flash_ocal_gate (SVO_OCAL =
-@ OCAL_BASE exactly), the own calibration area 0x08062000..0x08065FFF (OWN_CAL_DESIGN.md 1.4).
+@ OCAL_BASE exactly), the own calibration area 0x08062000..0x08065FFF.
 @ Page 0, the application area, slot F and the option bytes are never reachable. FLASH_CTRL is written as a whole value (SMPSEL 0: SMP1 refuses a word that is not
 @ erased; no interrupt enable: the vendor code sets none, it only ORs PG / PER / START / LOCK
 @ and ANDs them away, periph_34.s fn_08008d30 / fn_08008dc0 / fn_08008db0). Each primitive
 @ leaves the controller locked.
 @
-@ Watchdog: own_feed before and after every page erase and after every 256 words. Feeds happen
-@ only inside saves, recovery calls and save_resume, which all run from the main loop after
-@ V1.1 started the IWDG (0x08010178, system_40.s fn_08027ff4 after the load). own_load writes no
+@ Watchdog: own_feed before and after every page erase and after every 256 words. In this file
+@ feeds happen only inside saves, recovery calls and save_resume, which all run from the main loop
+@ after V1.1 started the IWDG (0x08010178, system_40.s fn_08027ff4 after the load). own_feed's
+@ other callers: own_start (ctl.s, only with the hand-over bit HO_WDG: the slot's IWDG already
+@ runs), xtal_fault (xtal.s, every 10 ms on the crystal-fault screen) and the own calibration
+@ write (ocal.s, after every 256 words and after the commit word, from the main loop). The vendor
+@ start-up feeds as well: its wait fn_08011c68 (periph_35.s) writes 0xAAAA after every TIM7 wait
+@ of 1000 counts, before the IWDG start. own_load writes no
 @ flash and feeds nothing: it runs at 0x08028030, before that start, and the manual leaves open
 @ whether 0xAAAA starts a stopped IWDG (16.4.1 says it does, the description before 16.3.1 says
 @ 0xCCCC does; V1.1 itself writes 0xAAAA just before 0xCCCC, 0x08010178). The rewrite
-@ of an interrupted copy A that the design puts at load is therefore done by save_resume, which
+@ of an interrupted copy A, which belongs to the load, is therefore done by save_resume, which
 @ ctl_loop calls once per pass.
 @
 @ RAM (own.inc): the staging buffer OWN_STAGE (0xC14 bytes) and the save.s words at OWN_SAVE;
 @ own_injected (ctl.s) is only read. No section of RAM is defined here.
 @
-@ MEASUREMENT_FIX_DESIGN.md stage 2 / 2F (revision 6): own_save skips the write when both copies
+@ Stage 2 / 2F (revision 6): own_save skips the write when both copies
 @ already hold the staged block (S2.10, SV_SAME); own_load repairs invalid setting words of the
 @ loaded block in RAM only (S2.11, load_fix; the calibration tables are not examined); every block
 @ our firmware stages for a write from RAM or from the host holds 100, never 60, as its frequency
@@ -68,7 +73,7 @@
 	.equ	EV_B_VALID,	0x08
 
 @ save_stage modes
-	.equ	MODE_ORDER,	0		@ order of design step 3 (from own_save_flags)
+	.equ	MODE_ORDER,	0		@ order of step 3 (from own_save_flags)
 	.equ	MODE_A,		1		@ copy A only
 	.equ	MODE_B,		2		@ copy B only
 	.equ	MODE_BA,	3		@ B, then A
@@ -216,8 +221,8 @@ gate_ok:
 @ flash_boot_gate - open or close the BOOT part of the gate.
 @   r0 = SLOT_A or SLOT_B: that slot and the record pages become writable;
 @   r0 = 0: closed. Returns r0 = FL_OK; any other r0 closes the gate and
-@   returns FL_GATE. Whether the slot is the free one (USB_CONTROL_DESIGN.md
-@   4.6) is decided by the caller (ctl.s). Uses r1, r2.
+@   returns FL_GATE. Whether the slot is the free one
+@   is decided by the caller (ctl.s). Uses r1, r2.
 @ ----------------------------------------------------------------------------
 	.global	flash_boot_gate
 	.thumb_func
@@ -245,7 +250,7 @@ flash_boot_gate:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ flash_ocal_gate - open or close the own calibration area (OWN_CAL_DESIGN.md 1.4 step 3).
+@ flash_ocal_gate - open or close the own calibration area.
 @   r0 = OCAL_BASE: 0x08062000..0x08065FFF becomes writable; r0 = 0: closed.
 @   Returns r0 = FL_OK; any other r0 closes the gate and returns FL_GATE. Only
 @   ocal.s calls it (ocal_commit, ocal_revoke), each closing it before it
@@ -589,7 +594,7 @@ stage_freq_fix:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ stage_cal_fix - MEASUREMENT_FIX_DESIGN stage 3 (CAL_SETTLE critique item 4): while a sweep of
+@ stage_cal_fix - stage 3: while a sweep of
 @   cal.s runs (OWN_CAL CAO_ON != 0, with a recording CAO_REC != 0) the staged block gets back the
 @   words the calibration start changed: frequency, level, bias and speed (block offsets 0xBC8,
 @   0xBBC, 0xBC0, 0xBD4) and the 0x78 bytes at block offset 0xB44 (0x200010C0) from the recording
@@ -793,8 +798,8 @@ load_fix:
 @ ----------------------------------------------------------------------------
 @ set_english - r0 = block base (V_BLOCK or OWN_STAGE): the words at block
 @   offsets 0xBC4 (first-start flag) and 0xBE0 (language) set to 1, so that no
-@   path starts the language chooser 0x0800C86C or selects the Chinese row
-@   (LANGUAGE_DESIGN.md 1). Uses r1.
+@   path starts the language chooser 0x0800C86C or selects the Chinese row.
+@   Uses r1.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	set_english, %function
@@ -832,7 +837,7 @@ stage_seal:
 	.ltorg
 
 @ ----------------------------------------------------------------------------
-@ write_copy - write the staged block to one copy (design "Save" step 4).
+@ write_copy - write the staged block to one copy.
 @   r0 = copy base (SET_A or SET_B); SVO_SEQ / SVO_CRC sealed by stage_seal.
 @   (a) copy A in the vendor format (both markers, both trailer words
 @       0xFFFFFFFF): its trailer sequence word is programmed first; on any
@@ -949,7 +954,7 @@ write_copy:
 	.ltorg
 
 @ ----------------------------------------------------------------------------
-@ save_stage - write the staged block (design "Save" steps 2..4).
+@ save_stage - write the staged block.
 @   r0 = mode: MODE_ORDER (step 3: A only while SF_A_ONLY or SF_DIFFERS is
 @   set, else B then A), MODE_A, MODE_B or MODE_BA.
 @   r1 = sequence for the copies, or 0: highest valid sequence + 1 (copy A in
@@ -1059,7 +1064,7 @@ flags_ok:
 @ own_load - replaces bl copy_flash_block_to_ram at 0x08028030 (system_40.s
 @   fn_08027ff4; the block was zero-filled just before, 0x4BA4 bytes from
 @   0x2000057C). No arguments, no result. Writes no flash.
-@   Closes the BOOT gate, clears own_save_status, then (design "Load"):
+@   Closes the BOOT gate, clears own_save_status, then:
 @   - A and B valid: A when A is in the vendor format or sequence A >= B,
 @     else B; SF_DIFFERS when block offsets 0x04..0xB43 of the two copies
 @     differ;
@@ -1167,8 +1172,8 @@ own_load:
 @   block set to 1 (set_english; the defaults 0x0800B4C8 store language 0 at
 @   0x0800B4FE and leave the flag 0 before their save 0x0800B5C0, so the
 @   start-up chooser 0x080281F8 and the Chinese rows are never reached).
-@   Writes nothing and returns SV_REFUSED while own_injected is set (guard,
-@   USB_CONTROL_DESIGN.md 4.3) and SV_HELD while SF_HELD or SF_RESTART is
+@   Writes nothing and returns SV_REFUSED while own_injected is set (guard)
+@   and SV_HELD while SF_HELD or SF_RESTART is
 @   set. Otherwise: snapshot of the RAM block 0x2000057C into OWN_STAGE, the
 @   settings of before a running calibration sweep (stage_cal_fix, stage 3), its
 @   frequency 60 -> 100 (stage_freq_fix, S2.12); when both copies already
@@ -1192,7 +1197,7 @@ own_save:
 	ldr	r0, [r0]
 	tst	r0, #SF_HELD | SF_RESTART
 	bne	.Lsv_held
-	ldr	r0, =V_BLOCK		@ design step 1: snapshot
+	ldr	r0, =V_BLOCK		@ step 1: snapshot
 	bl	stage_copy
 	bl	stage_cal_fix		@ stage 3: a sweep in progress saves the settings of before it
 	bl	stage_freq_fix		@ S2.12: 60 Hz is saved as 100 Hz
@@ -1261,7 +1266,7 @@ save_resume:
 	.ltorg
 
 @ ----------------------------------------------------------------------------
-@ Recovery (USB_CONTROL_DESIGN.md 4.5, SETTINGS_SAVE_DESIGN.md "Held saves").
+@ Recovery (held saves).
 @ Each returns r0 = status (also own_save_status, own_save_count + 1):
 @ SV_REFUSED when its condition does not hold (nothing written), SV_BADCOPY
 @ when its source copy is not valid, else the result of save_stage. A

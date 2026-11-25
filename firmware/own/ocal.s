@@ -4,16 +4,15 @@
 @ and the commands OCAL_INFO .. OCAL_TRACE (0x30..0x36).
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ Specification: OWN_CAL_DESIGN.md revision 3 (sections 1, 2, 4, 5), with the integration
-@ choices of S/ocal_integration.md: capability bit 26 (CAP_OCAL), the MEASURE flags byte 65, the
-@ state of OWN_OCAL 0xA0 bytes (the level-monitor snapshot of section 5 added after OCS_KIND).
+@ Revision 3, integrated with these choices: capability bit 26 (CAP_OCAL), the MEASURE flags
+@ byte 65, the state of OWN_OCAL 0xA0 bytes (the level-monitor snapshot added after OCS_KIND).
 @
 @ Flash (never-brick): the area is two slots of 0x2000 bytes (slot 0 0x08062000, slot 1
 @ 0x08064000). Every erase and every program goes through save.s flash_erase_page /
 @ flash_word, inside save.s gate_ok, which admits [OCAL_BASE, OCAL_END) only while
 @ flash_ocal_gate has stored OCAL_BASE in SVO_OCAL. Every function here that opens the gate
 @ closes it before it returns. This file holds no flash-controller address, no store to a
-@ flash address, no literal of a vendor table or vendor function (design G8), and as flash
+@ flash address, no literal of a vendor table or vendor function, and as flash
 @ addresses only OCAL_BASE, OCAL_BASE + OCAL_SLOT and its own symbols (check_never_brick A6).
 @ The serial (chip UID 0x1FFFF7F0..0x1FFFF7FB) is only read; the option bytes, the settings
 @ copies, the calibration tables in RAM 0x2000057C..0x2000118F and OWN_STAGE are never written.
@@ -25,7 +24,7 @@
 @ state OWN_MEAS (window number, N, class, K, sums, the acquisition MO_X, noise powers) and
 @ ctl.s's state (CT_FLAGS, the job words) are only read.
 @
-@ Record (design 1.2): header 0x40 bytes: magic 0x4C41434F, format u16 1, header size u16
+@ Record: header 0x40 bytes: magic 0x4C41434F, format u16 1, header size u16
 @ 0x40, length u32 (0x40..0x2000, multiple of 4), sequence u32 (1..0xFFFFFFFE), chip UID 3
 @ words, short / open CRC u32 (2.5), 0x20..0x37 zero, revoke word +0x38 (0xFFFFFFFF in force),
 @ CRC-32 +0x3C over bytes 0x00..0x37 then 0x40..length-1 (the commit word, programmed last).
@@ -116,7 +115,7 @@
 	.equ	BODY_MAX,	0x9C0		@ staging 0xA00 - header
 	.equ	CHUNK_MAX,	502		@ 512-byte payload - 10 header bytes
 
-@ slot classes of ocal_eval (design 1.3 step 1)
+@ slot classes of ocal_eval
 	.equ	CL_VALID,	1		@ magic, sizes, sequence, CRC
 	.equ	CL_OWN,		2		@ and this chip's UID
 	.equ	CL_FORCE,	4		@ revoke word 0xFFFFFFFF
@@ -128,7 +127,7 @@
 	.equ	SC_LEN,		12
 	.equ	SC_SIZE,	16
 
-@ OCAL_INFO flags (design 4.2)
+@ OCAL_INFO flags
 	.equ	OF_ACTIVE,	1 << 0
 	.equ	OF_V0,		1 << 1		@ OF_SLOT0_VALID
 	.equ	OF_V1,		1 << 2		@ OF_SLOT1_VALID
@@ -161,7 +160,7 @@
 						@ 32..39 nu, 40 the pad halfword)
 	.equ	NFREQ,		6
 
-@ OCAL_RAW record (design 4.1)
+@ OCAL_RAW record
 	.equ	RW_WIN,		0
 	.equ	RW_C5,		4
 	.equ	RW_C6,		5
@@ -218,7 +217,7 @@
 	.equ	V_MAX1,		0x200011CA	@ halfwords: ADC1 max, min (+2), mid (+6); ADC2 max (+8),
 						@ min (+10), mid (+14) (fn_08007fd4 / fn_08007f38)
 	.equ	V_USER_TAB,	0x20000B20	@ user table: entry of point p (3 fi + li) at + 0x30 p,
-						@ type t at + 4 t, its phase at + 0x2D0 (design 2.5)
+						@ type t at + 4 t, its phase at + 0x2D0
 	.equ	UT_OPEN,	0x2C		@ type 11 (open)
 	.equ	UT_PHASE,	0x2D0
 
@@ -231,10 +230,10 @@
 
 	.section .rodata.own.ocal,"a",%progbits
 	.p2align 2
-@ ocal_freqs - the frequency of each index fi (the host list order, design 1.2)
+@ ocal_freqs - the frequency of each index fi (the host list order)
 ocal_freqs:
 	.word	100, 120, 1000, 10000, 100000, 60
-@ ocal_defaults - the section pointers of design 2.6 (no record, or the section absent /
+@ ocal_defaults - the section pointers (no record, or the section absent /
 @   rejected): META, GAIN, MONITOR none; CLIP, SETTLE, BIAS the stage-1 values below
 ocal_defaults:
 	.word	0, 0, ocal_def_clip, ocal_def_settle, 0, ocal_def_bias
@@ -256,7 +255,7 @@ ocal_def_settle:
 @ ocal_def_bias - BIAS default: the S4.4 constant BIAS_LIM of meas.s (4 counts), pad 0
 ocal_def_bias:
 	.short	4, 0
-@ ocal_lens - the body length of each known id 0..5 (design 1.2)
+@ ocal_lens - the body length of each known id 0..5
 ocal_lens:
 	.short	32, 1992, 64, 84, 28, 4
 
@@ -268,7 +267,7 @@ ocal_lens:
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
-@ ocal_eval - r0 = slot base. Design 1.3 step 1 from flash: CRC-valid = magic, header size
+@ ocal_eval - r0 = slot base. Step 1 of the load, from flash: CRC-valid = magic, header size
 @   0x40, length 0x40..0x2000 and a multiple of 4, sequence neither 0 nor 0xFFFFFFFF, CRC-32 of
 @   bytes 0..0x37 and 0x40..length-1 equal to +0x3C; own = CRC-valid and UID equal to the
 @   chip's three words; in force = revoke word 0xFFFFFFFF (only examined when CRC-valid).
@@ -358,7 +357,7 @@ ocal_scan:
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
-@ ocal_pick - r0 = scan table. Design 1.3 steps 2..3: candidates = own records in force; N =
+@ ocal_pick - r0 = scan table. Steps 2..3 of the load: candidates = own records in force; N =
 @   the candidate with the higher sequence (slot 0 on equal sequences); N of format 1 is the
 @   active record, another format gives none and OF_NEWER. Returns r0 = active slot 0 / 1 or
 @   0xFF, r1 = 1 when N exists with another format, else 0. Changes r2, r3, r12.
@@ -401,8 +400,8 @@ ocal_pick:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ ocal_target - r0 = scan table -> r0 = write target T (design 1.4 step 1, the rule of
-@   owncal/matrix_check.py `target`): (a) a record is active: the other slot; (b) a slot with
+@ ocal_target - r0 = scan table -> r0 = write target T (step 1 of the write):
+@   (a) a record is active: the other slot; (b) a slot with
 @   no CRC-valid record, slot 0 when both; (c) a slot whose record has another UID, then one
 @   whose own record is revoked; both slots of the same class: the lower sequence, slot 0 on
 @   equal sequences; (d) the lower sequence, slot 1 on equal sequences. Changes r1..r3, r12.
@@ -457,7 +456,7 @@ ocal_target:
 
 @ ----------------------------------------------------------------------------
 @ ocal_nextseq - r0 = scan table, r1 = target T -> r0 = the sequence of the new record, or 0
-@   when the write is refused (status 3). Design 1.4 step 2 with G1: highest sequence of a
+@   when the write is refused (status 3). Step 2 of the write with G1: highest sequence of a
 @   CRC-valid record in either slot + 1, 1 when none; when that would be 0xFFFFFFFF, O = the
 @   record in the slot that is not T: O own and in force with 0xFFFFFFFE refuses; otherwise
 @   O's sequence + 1 when O is CRC-valid and below 0xFFFFFFFE, else 1. Changes r1..r3, r12.
@@ -510,12 +509,12 @@ ocal_nextseq:
 	.ltorg
 
 @ ============================================================================
-@ Load (design 1.3)
+@ Load
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
 @ ocal_walk - r0 = record base, r1 = record length L, r2 = table of 6 words (cleared by the
-@   caller). Design 1.3 step 4: from o = 0x40 while o + 4 <= L: id and length s; stop with
+@   caller). Step 4 of the load: from o = 0x40 while o + 4 <= L: id and length s; stop with
 @   OF_SECT when s is not a multiple of 4, o + 4 + s > L, or id is not above the previous id;
 @   a known id (0..5) with exactly its length: table[id] = base + o + 4; a known id with another
 @   length: ignored, OF_SECT and its rejected bit; any id below 8 sets its present bit; then
@@ -582,7 +581,7 @@ ocal_walk:
 	pop	{r4, r5, r6, r7, r8, r9, r10, pc}
 
 @ ----------------------------------------------------------------------------
-@ ocal_load - design 1.3: called by own_start after the clear of our RAM, and after every
+@ ocal_load - called by own_start after the clear of our RAM, and after every
 @   commit and rollback. Both slots evaluated, the active record chosen (ocal_pick), the
 @   section walk of the active record (ocal_walk), every recorded section checked by
 @   ocal_validate_section (a failing one keeps its default, OF_SECT and its rejected bit), then
@@ -762,7 +761,7 @@ ocal_load:
 	.ltorg
 
 @ ============================================================================
-@ Value checks (design 2.4), shared by the write and the load
+@ Value checks, shared by the write and the load
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
@@ -810,7 +809,7 @@ ocal_factor_ok:
 
 @ ----------------------------------------------------------------------------
 @ ocal_validate_section - r0 = id, r1 = body (of the known length). The value rules of
-@   design 2.4. Returns r0 = 0 when the body passes (META and unknown ids always), else r0 = 1
+@   that section. Returns r0 = 0 when the body passes (META and unknown ids always), else r0 = 1
 @   and r1 = the entry index: GAIN 41 fi + k (k 0..31 zeta[k], 32..39 nu[k - 32], 40 the pad
 @   halfword), CLIP 8 channel + code, SETTLE 6 kind + fi, MONITOR fi (6: mask bits above 5),
 @   BIAS 0 the limit, 1 the pad. Changes r2, r3, r12, s0..s4.
@@ -967,7 +966,7 @@ ocal_validate_section:
 	pop	{r4, r5, r6, r7, r8, pc}
 
 @ ----------------------------------------------------------------------------
-@ ocal_validate - r0 = staged body, r1 = its length (8..0x9C0, multiple of 4). Design 2.4 for a
+@ ocal_validate - r0 = staged body, r1 = its length (8..0x9C0, multiple of 4). The value rules for a
 @   write: the sections cover the body exactly, ids strictly ascending, each length a multiple
 @   of 4, a known id with exactly its length, then the value rules of every known section.
 @   Returns r0 = 0 when it passes; else r0 = 1, r1 = section id (0xFF: a header that crosses
@@ -1002,7 +1001,7 @@ ocal_validate:
 	ble	.Lva_struct		@ not strictly ascending
 	mov	r7, r1
 	cmp	r1, #SID_LAST
-	bhi	.Lva_skip		@ unknown id: kept as it is (design 1.6)
+	bhi	.Lva_skip		@ unknown id: kept as it is
 	ldr	r3, =ocal_lens
 	ldrh	r3, [r3, r1, lsl #1]
 	cmp	r8, r3
@@ -1059,13 +1058,13 @@ ocal_find:
 	.ltorg
 
 @ ============================================================================
-@ Short / open CRC and OF_RETAKE (design 2.5)
+@ Short / open CRC and OF_RETAKE
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
 @ ocal_shopen_crc - r0 = CRC-32 of the user table's short (type 0) and open (type 11) entries:
 @   for each point p = 3 fi + li (0..14, entry at 0x20000B20 + 0x30 p, which is the
-@   0x2000057C + 0x5A4 + 0x90 fi + 0x30 li of the design) the four words magnitude t0,
+@   0x2000057C + 0x5A4 + 0x90 fi + 0x30 li) the four words magnitude t0,
 @   magnitude t11, phase t0, phase t11 (+0, +0x2C, +0x2D0, +0x2FC), 60 words in that order.
 @   Reads RAM only. Changes r1..r3, r12.
 @ ----------------------------------------------------------------------------
@@ -1158,7 +1157,7 @@ ocal_flags:
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
-@ ocal_meas_flags - r0 = MEASURE byte 65 (design 2.8): bit 0 the gain was applied at the last
+@ ocal_meas_flags - r0 = MEASURE byte 65: bit 0 the gain was applied at the last
 @   publish, bit 1 GAIN present for its frequency but not applied at its cell, bit 2 lock
 @   active, bit 3 OF_RETAKE. Changes r1..r3, r12.
 @ ----------------------------------------------------------------------------
@@ -1182,7 +1181,7 @@ ocal_meas_flags:
 	.ltorg
 
 @ ============================================================================
-@ Values for meas.s (design 2.1, 2.3) and cmd.s (section 5)
+@ Values for meas.s and cmd.s
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
@@ -1237,7 +1236,7 @@ ocal_settle:
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
-@ ocal_clip - S4.5 (design 2.3): r0 = bit 0 when ADC1 (V) is saturated, bit 1 ADC2 (I): max
+@ ocal_clip - S4.5: r0 = bit 0 when ADC1 (V) is saturated, bit 1 ADC2 (I): max
 @   >= CLIP[channel][code].hi or min <= .lo, with code c5 (0x200011C5) for V and c6
 @   (0x200011C6) for I and the extremes of the last peak scans (0x200011CA / CC, 0x200011D2 /
 @   D4). A code above 7 takes 0 / 4095. With the default table this is the stage-1 test. Reads
@@ -1322,7 +1321,7 @@ ocal_gain_on:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ ocal_gain - S4.3 at meas_publish (design 2.1), after the quotient, on the path that publishes
+@ ocal_gain - S4.3 at meas_publish, after the quotient, on the path that publishes
 @   (not under hold, not during the S4.4 wait). First the monitor snapshot of section 5 from
 @   the raw record of this window (window number, codes, A_V, A_I, |zeta| = |nu| = 1, the
 @   frequency index, OCS_MOK = 1). Then, when the GAIN pointer is set, fi is one of the six,
@@ -1470,7 +1469,7 @@ ocal_mon_get:
 	.ltorg
 
 @ ============================================================================
-@ Raw record, settle trace, notes from meas.s (design 2.2)
+@ Raw record, settle trace, notes from meas.s
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
@@ -1741,7 +1740,7 @@ ocal_trace_add:
 	.ltorg
 
 @ ============================================================================
-@ Lock release and refusals (design 2.2, 4.3)
+@ Lock release and refusals
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
@@ -1799,10 +1798,10 @@ ocal_step:
 @ ----------------------------------------------------------------------------
 @ ocal_cal_busy - r0 = 1 while a calibration runs: 0x200050E4 != 0, or the CALIBRATE job is
 @   active (the test of ctl.s key_refused), else 0. Changes r1.
-@ ocal_busy - the refusals of design 4.3 in their order: r0 = S_NOT_NOW in powered-off mode
+@ ocal_busy - the refusals in their order: r0 = S_NOT_NOW in powered-off mode
 @   or after the power-off path ran, S_SAFETY while a calibration runs, S_BUSY while another
 @   job runs or a rewrite of copy A is pending (SF_REWRITE_A), else 0. Changes r1.
-@ ocal_lock_ok - the refusals of OCAL_LOCK (design 2.2): r0 = S_SAFETY while a calibration
+@ ocal_lock_ok - the refusals of OCAL_LOCK: r0 = S_SAFETY while a calibration
 @   runs, S_NOT_NOW in powered-off mode, after the power-off path ran or off screen 1, else 0.
 @   Changes r1.
 @ ----------------------------------------------------------------------------
@@ -1885,7 +1884,7 @@ ocal_lock_ok:
 	.ltorg
 
 @ ============================================================================
-@ Write and rollback (design 1.4, 1.5)
+@ Write and rollback
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
@@ -1910,8 +1909,8 @@ ocal_revoke:
 	pop	{r4, r5, r6, pc}
 
 @ ----------------------------------------------------------------------------
-@ ocal_write_rec - r0 = slot base T, r1 = staged record, r2 = its length L (gate open). Design
-@   1.4 steps 4..7: every page of T the record spans erased (flash_erase_page feeds before and
+@ ocal_write_rec - r0 = slot base T, r1 = staged record, r2 = its length L (gate open). Steps
+@   4..7 of the write: every page of T the record spans erased (flash_erase_page feeds before and
 @   after each), the words ascending from T + 0 to T + L - 4 except T + 0x38 (left 0xFFFFFFFF)
 @   and T + 0x3C, own_feed after every 256 programmed words, then T + 0x3C (the commit word),
 @   then the read-back: T CRC-valid, own and in force with the staged sequence, and every word
@@ -1985,7 +1984,7 @@ ocal_write_rec:
 	pop	{r4, r5, r6, r7, r8, pc}
 
 @ ----------------------------------------------------------------------------
-@ ocal_socrc_new - the short / open CRC of a new record (design 2.5, F20): the active record's
+@ ocal_socrc_new - the short / open CRC of a new record (F20): the active record's
 @   +0x1C when its GAIN section is in use and the staged body (OCS_XTOT bytes, validated) holds
 @   a GAIN body byte-identical to it; else ocal_shopen_crc now. Returns r0. Changes r1..r3,
 @   r12.
@@ -2046,7 +2045,7 @@ ocal_event:
 
 @ ----------------------------------------------------------------------------
 @ ocal_commit - r0 = answer data. The staged body (OCS_STAGE + 0x40, OCS_XTOT bytes) passed
-@   ocal_validate and the refusals. Design 1.4: target T and sequence from flash (ocal_scan,
+@   ocal_validate and the refusals. The write: target T and sequence from flash (ocal_scan,
 @   ocal_target, ocal_nextseq: 0 = status 3, nothing erased); the header staged (magic,
 @   format 1, header size, length, sequence, UID, short / open CRC, reserved 0, revoke word
 @   0xFFFFFFFF, CRC-32); the slots evaluated again and T compared with the active slot (equal:
@@ -2120,7 +2119,7 @@ ocal_commit:
 	ldr	r9, =OCAL_BASE
 	add	r9, r9, r7, lsl #13	@ r9 = base of T
 	ldr	r0, =OCAL_BASE
-	bl	flash_ocal_gate		@ open (design 1.4 step 3)
+	bl	flash_ocal_gate		@ open the gate
 	movs	r10, #2			@ r10 = attempts
 .Lcm_try:
 	mov	r0, r9
@@ -2184,11 +2183,11 @@ ocal_commit:
 	.ltorg
 
 @ ============================================================================
-@ Command handlers 0x30..0x36 (cmd.s convention; MONITOR 0x37 is in cmd.s, design G8)
+@ Command handlers 0x30..0x36 (cmd.s convention; MONITOR 0x37 is in cmd.s)
 @ ============================================================================
 
 @ ----------------------------------------------------------------------------
-@ h_ocal_info - OCAL_INFO (design 4.2), 64 bytes: flags u32, active slot u8, format u8,
+@ h_ocal_info - OCAL_INFO, 64 bytes: flags u32, active slot u8, format u8,
 @   active length u16, active sequence u32, other sequence u32, active CRC u32, sections
 @   present u8, gain frequencies u8, monitor frequencies u8, sections rejected u8, T_max u16,
 @   pad u16, META time u32, META note 28 bytes, pad 4 (0).
@@ -2291,7 +2290,7 @@ h_ocal_read:
 	pop	{r4, r5, r6, r7, r8, pc}
 
 @ ----------------------------------------------------------------------------
-@ h_ocal_write - OCAL_WRITE (design 4.1): confirmation u16 0x4F4B, offset u16, total u16
+@ h_ocal_write - OCAL_WRITE: confirmation u16 0x4F4B, offset u16, total u16
 @   (8..0x9C0, multiple of 4), CRC-32 u32 of the whole body, chunk = the bytes after byte 10
 @   (1..502). A chunk at offset 0 starts a new transfer; another chunk must start at the
 @   offset the previous answer named with the same total and CRC; a chunk ending beyond the
@@ -2415,7 +2414,7 @@ h_ocal_write:
 	.ltorg
 
 @ ----------------------------------------------------------------------------
-@ h_ocal_rollback - OCAL_ROLLBACK (design 1.5): confirmation u16 0x4F4B, mode u8, exactly 3
+@ h_ocal_rollback - OCAL_ROLLBACK: confirmation u16 0x4F4B, mode u8, exactly 3
 @   bytes (else status 2); the refusals of ocal_busy. Mode 0: the active record's revoke word
 @   (status 3 when none is active). Mode 1: every own, in-force, format-1 record, the older
 @   first (slot 1 first on equal sequences; status 3 when none qualifies). Then ocal_load, the
@@ -2528,7 +2527,7 @@ h_ocal_rollback:
 	pop	{r4, r5, r6, r7, r8, pc}
 
 @ ----------------------------------------------------------------------------
-@ h_ocal_lock - OCAL_LOCK (design 2.2): c5 u8 (0..7), c6 u8 (0..7), c8 u8 (0..3), exactly 3
+@ h_ocal_lock - OCAL_LOCK: c5 u8 (0..7), c6 u8 (0..7), c8 u8 (0..3), exactly 3
 @   bytes, or 0xFF 0xFF 0xFF to release (always allowed). A code out of range or another
 @   length: status 2; then ocal_lock_ok (6 while a calibration runs; 3 powered off, after the
 @   power-off path or off screen 1). The lock word stored and its tick noted (meas.s applies
@@ -2619,7 +2618,7 @@ ocal_raw_copy:
 	bx	lr
 
 @ ----------------------------------------------------------------------------
-@ h_ocal_trace - OCAL_TRACE (design 2.2, 4.1): op u8 (0 disarm, 1 arm, 2 read), start u8 (read
+@ h_ocal_trace - OCAL_TRACE: op u8 (0 disarm, 1 arm, 2 read), start u8 (read
 @   only, 0..31; absent = 0). Op 0: idle; op 1: armed, 0 entries. Every op answers state u8,
 @   kind u8, change tick u32, count u8, n u8 (entries from start, at most 31) and the n
 @   entries of 16 bytes. Op above 2 or start above 31: status 2.

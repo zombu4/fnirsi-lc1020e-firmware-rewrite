@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
-"""test_own_ocal.py - the own calibration area of our build (firmware/own/ocal.s, OWN_CAL_DESIGN.md
-revision 3, emulator tests o01..o29 of its section 7.1), in the emulator.
+"""test_own_ocal.py - the own calibration area of our build (firmware/own/ocal.s), emulator
+tests o01..o29 of the area; o30 / o31 the event OCAL_CHANGED of PROTOCOL.md 10 / 16.
 
 Usage (from the repository root, after `make -C starter`, `make -C bootloader slot` and
-`make -C firmware own` with the integration edits of ocal_integration.md applied):
+`make -C firmware own`):
     <python with unicorn 2.1.4> tests/test_own_ocal.py [case-name-prefix ...]
 o01 also needs the build of the same tree without ocal.s (the commit before the integration, `make
 own` there): OCAL_REF=<its firmware/build/own directory> in the environment; without it o01 fails
 and says so.
 
-Specification: OWN_CAL_DESIGN.md revision 3 (sections 1, 2, 4, 5, 7.1) with the choices of the
-integration (capability bit CAP_OCAL, the MEASURE byte, O_OCAL: read from own.inc / cmd.s below,
-not assumed), and the interface comments of firmware/own/ocal.s. Expected values come from those
-texts (each case's docstring names the rule), from the slot model of the design (`model_*` below:
-the rules of owncal/matrix_check.py, rule G1), from an independent reading of the record format in
-Python (`ref_eval` / `ref_active`, design 1.3 step 1..3), or from the window sums the firmware
+Specification: the rules of the calibration area (the flash layout, the load, the atomic write, the
+validation, the commands, the level monitor) with the choices of the integration (capability bit
+CAP_OCAL, the MEASURE byte, O_OCAL: read from own.inc / cmd.s below, not assumed), and the interface
+comments of firmware/own/ocal.s. Expected values come from those rules (each case's docstring names
+the rule), from the slot model below (`model_*`: after every commit the new record is the active
+one; rule G1 refuses a write only when it could not outrank the other slot's own record in force
+with sequence 0xFFFFFFFE), from an independent reading of the record format in
+Python (`ref_eval` / `ref_active`, the load steps 1..3: CRC-valid slots, candidates, the higher sequence), or from the window sums the firmware
 used (float64 recomputation). Nothing is taken from the firmware's own answer as its expectation.
 
 Rigs:
   - DRig: our image in tests/meter_model.py flash mode 'app' without starter or slots (the
     test_own_save.py style), system memory with the test UID (test_own_control.OwnMeter), the
-    eight area pages added to the pages application code may write (until meter_model.py has them,
-    ocal_integration.md 10); functions and the command handlers called directly with SP =
+    eight area pages added to the pages application code may write (until meter_model.py has them);
+    functions and the command handlers called directly with SP =
     0x200163A8, request payloads at 0x2001E000, answers at 0x2001E401 (odd: the handlers store
     unaligned, as into CT_ANSB + 1). Every erase / program is logged by the model; a store
     outside the model's gate is a violation and ends the call.
@@ -36,7 +38,7 @@ Watches:
   The model has no read watch (unicorn read hooks are not used, meter_model.py header), so o22
   checks the section pointers and the walk's bound instead of the reads themselves.
 
-RUN LIMIT: the cases are 36 runs of this file at most (one per prefix; o01 is eight cases o01a..o01h,
+RUN LIMIT: the cases are 38 runs of this file at most (one per prefix; o01 is eight cases o01a..o01h,
 one per stage-1 input); o21 makes 674 commits in
 one DRig (each a small record), o03 / o05 about 150 cut runs.
 """
@@ -153,7 +155,7 @@ def f32(x):
     return u2f(f2u(x))
 
 
-# ---------------------------------------------------------------- records (design 1.2)
+# ---------------------------------------------------------------- records (the record layout)
 
 def section(sid, body):
     return struct.pack('<HH', sid, len(body)) + body
@@ -207,7 +209,7 @@ def bias(limit=4, pad=0):
 
 
 def record(body, seq, uid=UID, fmt=1, revoked=False, socrc=0, bad_crc=False):
-    """A record as the meter writes it (design 1.2): header 0x38 bytes, revoke word, CRC-32 of bytes
+    """A record as the meter writes it: header 0x38 bytes, revoke word, CRC-32 of bytes
     0x00..0x37 then 0x40..length-1 (zlib.crc32 = the reflected 0xEDB88320 CRC of save.s)."""
     L = 0x40 + len(body)
     h = struct.pack('<IHHII', MAGIC, fmt, 0x40, L, seq) + bytes(uid) + struct.pack('<I', socrc) + bytes(0x18)
@@ -220,7 +222,7 @@ FOREIGN = bytes(range(0x30, 0x3C))
 
 
 def ref_eval(img):
-    """Design 1.3 step 1 on the bytes of a slot: None (no CRC-valid record) or the record's fields."""
+    """Load step 1 (CRC-valid, own, in force) on the bytes of a slot: None (no CRC-valid record) or the record's fields."""
     magic, fmt, hs, L, seq = struct.unpack_from('<IHHII', img, 0)
     if magic != MAGIC or hs != 0x40 or not 0x40 <= L <= 0x2000 or L % 4 or seq in (0, 0xFFFFFFFF):
         return None
@@ -230,7 +232,7 @@ def ref_eval(img):
 
 
 def ref_active(s0, s1):
-    """Design 1.3 steps 2..3: (active slot or None, OF_NEWER)."""
+    """Load steps 2..3 (candidates, the higher sequence): (active slot or None, OF_NEWER)."""
     ev = (ref_eval(s0), ref_eval(s1))
     c = [i for i in (0, 1) if ev[i] and ev[i]['own'] and ev[i]['force']]
     if not c:
@@ -239,7 +241,7 @@ def ref_active(s0, s1):
     return (n, False) if ev[n]['fmt'] == 1 else (None, True)
 
 
-# the slot model of owncal/matrix_check.py (rule G1): a slot is None or (own, fmt, seq, revoked)
+# the slot model (rule G1 as in the module docstring): a slot is None or (own, fmt, seq, revoked)
 def model_load(s):
     c = [i for i in (0, 1) if s[i] and s[i][0] and not s[i][3]]
     if not c:
@@ -369,7 +371,7 @@ def check_ops_in_area(rig, what):
 
 
 def info(rig):
-    """OCAL_INFO of a DRig as a dict (design 4.2 layout)."""
+    """OCAL_INFO of a DRig as a dict (the 64-byte OCAL_INFO record)."""
     st, d = rig.handler('h_ocal_info')
     check(st == S_OK and len(d) == 64, 'OCAL_INFO status %d, %d bytes' % (st, len(d)))
     fl, sl, fm, ln, sq, oq, cr, pr, gf, mf, rj, tm, pad, mt = struct.unpack_from('<IBBHIIIBBBBHHI', d, 0)
@@ -535,7 +537,7 @@ def inject_sums(rig):
 
 
 def o01_compare(name, make_src, freq, seconds, hold=False, inject=False):
-    """Design 2.6 / 7.1 o01 (F16) for one MFD 5.1 stage-1 input: with the area erased, OCAL_INFO reports
+    """Erased or invalid area / o01 (F16) for one stage-1 input: with the area erased, OCAL_INFO reports
     no record (flags 0, slot 0xFF, sequence 0); ours and the build without ocal.s (OCAL_REF) run the
     same settings block (frequency freq) on an IndexSource, so acquisition k of window n has the same
     samples in both. The MEASURE records of the stream (mode 0, one per new result) are taken by
@@ -544,13 +546,13 @@ def o01_compare(name, make_src, freq, seconds, hold=False, inject=False):
     window; where that window had the same inputs in both builds (codes, the CRC of both buffers and
     MO_N of every acquisition at meas_win), both records must be equal in bytes 0..3 and 8..64 (the
     record without the OCAL byte: result number, the value blocks, |Z|, theta, the settings, the
-    markers; design o01 "bytes 0..63 equal", byte 64 the marker byte of capability bit 24 that the
+    markers; o01 "bytes 0..63 equal", byte 64 the marker byte of capability bit 24 that the
     build without ocal.s has too), at least four such results. Bytes 4..7, the time (PROTOCOL.md 6.2
     offset 4 "time (tick)"), are not a reading: cmd.s rec_measure stores `bl now` (V_TICK, +10 per
     SysTick, ctl.s) when the record is built in a later main-loop pass, and our longer path can put
     that instant on the other side of a 10-ms tick (Run of 2026-11-24, o01h window 3: record built at
     t 2.913195 with tick 2910 in ours, at t 2.913143 with tick 2900 in the build without ocal.s, the
-    readings equal); design 2.6 requires the readings to equal those of the stage-1 build. Every
+    readings equal); an erased or invalid area requires the readings to equal those of the stage-1 build. Every
     record MEASURE_SIZE bytes, the
     frequency freq, byte OCAL_BYTE = 0 in ours. A window with other inputs differs in its number of
     acquisitions: emulated time is the instruction count, the window closes at the first
@@ -561,7 +563,7 @@ def o01_compare(name, make_src, freq, seconds, hold=False, inject=False):
     acquisitions in ours): the window sums are written at every meas_publish entry as a function of
     the window number and the codes (inject_sums), so every window has the same sums in both and
     every common result is compared. hold: then HOLD on: the OCAL_RAW window number keeps rising (a
-    record per window close, design 2.2) while the result words 0x20005098..0x200050D7 and the
+    record per window close) while the result words 0x20005098..0x200050D7 and the
     MEASURE value fields stay."""
     ref = os.environ.get('OCAL_REF')
     check(ref and os.path.exists(os.path.join(ref, 'APP_OWN.bin')),
@@ -634,7 +636,7 @@ def o01_compare(name, make_src, freq, seconds, hold=False, inject=False):
     return True
 
 
-# The inputs of the MFD 5.1 stage-1 cases that publish (m01 frequencies, m02 coherence, m04 complex
+# The inputs of the stage-1 measurement cases that publish (m01 frequencies, m02 coherence, m04 complex
 # estimate, m10 unfolded theta), one case each so that they spread across processes. Noise 2 lsb in
 # all of them: with equal windows the result number would not advance (ctl.s .Ld_meas).
 
@@ -686,10 +688,10 @@ def o01h_r1k_120hz():
 
 @case
 def o02_write_in_chunks_and_the_sequence():
-    """Design 4.1 transfer rules / o02: an out-of-order chunk -> status 2, no data, the transfer as it
+    """Transfer rules of OCAL_WRITE / o02: an out-of-order chunk -> status 2, no data, the transfer as it
     was (OCS_XNEXT unchanged); a chunk at offset 0 restarts it; another total or CRC -> status 2; a
     wrong transfer CRC -> status 7 and 0 flash operations; then the good body three times: target
-    rule 1.4 step 1 (b) slot 0 (both erased), sequence 1; (a) the other slot 1, sequence 2; (a)
+    write rule step 1 (b) slot 0 (both erased), sequence 1; (a) the other slot 1, sequence 2; (a)
     slot 0, sequence 3 (step 2: highest + 1). Answer: result 0, active slot, sequence (6 bytes)."""
     rig = DRig()
     rig.load()
@@ -728,11 +730,11 @@ def two_records_rig():
 
 @case
 def o03_power_cut_after_and_inside_every_flash_operation():
-    """Design 1.4 "Cut at any point" / o03: the third write (target slot 0, sequence 3, previous
+    """Power cut at any point of a write / o03: the third write (target slot 0, sequence 3, previous
     active slot 1) replayed on a fresh flash and cut after every operation n (meter_model
     cut_after) and inside every operation (erase patterns unchanged / ff / mixed / first_half /
     second_half, word patterns unchanged / ff / mixed; the CRC word included). Expected after the
-    next load: ref_active of the resulting flash (design 1.3 in Python), which must be slot 1 (the
+    next load: ref_active of the resulting flash (the load rules in Python), which must be slot 1 (the
     previous record) or slot 0 with sequence 3 (the new one), never none; no operation outside the
     area; copies A / B and the record pages unchanged."""
     ref = two_records_rig()
@@ -777,7 +779,7 @@ def o03_power_cut_after_and_inside_every_flash_operation():
 
 @case
 def o04_stuck_bit_retry_then_status_5():
-    """Design 1.4 step 8 / o04: a bit of T + 0x40 that stays 1 (meter_model stuck; the META header
+    """Stuck bit in the target (write step 8) / o04: a bit of T + 0x40 that stays 1 (meter_model stuck; the META header
     word 0x00200000 has bit 0 clear) makes flash_word fail its read-back (FL_VERIFY 5) in both
     attempts: 2 erases of slot 0 (one per attempt), status 5 with result 5, the active record
     (slot 1, sequence 2) unchanged and still active."""
@@ -798,9 +800,9 @@ def o04_stuck_bit_retry_then_status_5():
 
 @case
 def o05_rollback_modes_order_cuts_and_the_next_target():
-    """Design 1.5 / o05 (G2, G4): mode 0 programs the active record's revoke word (slot 1 + 0x38 = 0)
+    """Rollback / o05 (G2, G4): mode 0 programs the active record's revoke word (slot 1 + 0x38 = 0)
     and slot 0 becomes active (answer slot 0, sequence 1); a following write targets the revoked
-    slot 1 (1.4 (a): slot 0 is active) with sequence 3. Mode 1 on two own format-1 records: the
+    slot 1 (write rule (a): slot 0 is active) with sequence 3. Mode 1 on two own format-1 records: the
     older (slot 0, sequence 1) revoked first, then slot 1; none active (answer slot 0xFF). A cut
     after the first revoke of mode 1 leaves slot 1 active (the state before, less its rollback
     copy); cuts inside each revoke word (unchanged / ff / mixed): ref_active of the flash. Mode 0
@@ -850,7 +852,7 @@ def o05_rollback_modes_order_cuts_and_the_next_target():
 
 @case
 def o06_foreign_uid_records():
-    """Design 1.3 step 2 / 1.4 (b), (a) / 1.5 mode 1 (F2, F5): a foreign record alone: no active
+    """Foreign record (load step 2, write rules (b), (a), rollback mode 1; F2, F5): a foreign record alone: no active
     record, OF_UID, the load writes nothing; the next write goes to the empty slot 1 (b) with
     sequence 6 (highest CRC-valid 5 + 1). A newer foreign record (slot 0, sequence 9) next to an own
     older one (slot 1, sequence 2): slot 1 active; the write overwrites slot 0 (a) with sequence 10;
@@ -876,7 +878,7 @@ def o06_foreign_uid_records():
 
 @case
 def o07_newer_format_2_record():
-    """Design 1.3 step 3 / 1.4 (d) / 1.5 (o07): own format 2 sequence 5 (slot 0) newer than own
+    """Newer format (load step 3, write rule (d), rollback; o07): own format 2 sequence 5 (slot 0) newer than own
     format 1 sequence 3 (slot 1): none active, OF_NEWER; a write goes to slot 1 by (d) (lower
     sequence) with sequence 6, which is then active (6 > 5); mode 1 on the first state revokes
     slot 1 only (format 1)."""
@@ -897,7 +899,7 @@ def o07_newer_format_2_record():
 
 @case
 def o08_unknown_id_and_wrong_length():
-    """Design 1.3 step 4 (o08): sections META (0), CLIP (2) with 60 bytes instead of 64, SETTLE (3)
+    """Section walk at load (o08): sections META (0), CLIP (2) with 60 bytes instead of 64, SETTLE (3)
     correct, id 6 (8 bytes, unknown): present bits 0, 2, 3, 6 (0x4D); rejected bit 2; OF_SECT; the
     CLIP pointer the default ocal_def_clip, SETTLE pointing at slot 0 + 0x40 + 36 + 64 + 4 (META
     36 bytes, the 60-byte CLIP section 64, its header 4); T_max 40 (the table's 40 > 26)."""
@@ -914,7 +916,7 @@ def o08_unknown_id_and_wrong_length():
 
 @case
 def o22_section_walk_bounds():
-    """Design 1.3 step 4 (F3, o22): a section whose length runs past the record, and descending
+    """Section walk bounds at load (F3, o22): a section whose length runs past the record, and descending
     ids: the walk stops (OF_SECT), the sections before stay, nothing after is recorded. With a
     record length L that is a multiple of 4 and section lengths that are multiples of 4 a header
     cannot straddle the end (o + 4 <= L holds whenever o < L), so that variant has no record. The
@@ -946,7 +948,7 @@ def o22_section_walk_bounds():
 
 @case
 def o23_values_rejected_at_load():
-    """Design 1.3 step 5 (F4, o23): CRC-valid records with SETTLE 65535 and 0, CLIP lo >= hi, a NaN
+    """Value checks at load (F4, o23): CRC-valid records with SETTLE 65535 and 0, CLIP lo >= hi, a NaN
     and an infinite zeta with its bits set, kV 0 with its bit set: each section rejected (its bit),
     its default in use (CLIP / SETTLE pointers the defaults, GAIN / MONITOR 0), T_max 26. Then the
     record with all of them on the meter (Ctl): a reading of a 1 kohm resistor within 2 s, |Z|
@@ -981,7 +983,7 @@ def o23_values_rejected_at_load():
 
 @case
 def o09_every_value_rule_once():
-    """Design 2.4 / o09: each rule violated once through OCAL_WRITE: status 2 with the section id and
+    """Validation before a write / o09: each rule violated once through OCAL_WRITE: status 2 with the section id and
     the entry index (3 bytes; index rules of ocal.s ocal_validate_section: GAIN 41 fi + k, CLIP 8 ch +
     code, SETTLE 6 kind + fi, MONITOR fi or 6 for mask bits above 5, BIAS 0 limit / 1 pad, 0xFFFF a
     structure fault), and 0 flash operations."""
@@ -1124,7 +1126,7 @@ def fixed_sums(rig, sums):
 
 @case
 def o10_gain_correction_on_the_meter():
-    """Design 2.1 / o10: front-end errors A5 (per c5) / B86 (per (c8, c6)), terminal residuals Zs = 30
+    """Gain correction / o10: front-end errors A5 (per c5) / B86 (per (c8, c6)), terminal residuals Zs = 30
     mohm + j w 20 nH, Yo = j w 2 pF at 1 kHz (IndexSource err, no noise: every acquisition at the same
     codes has the same codes on both ADCs, checked at meas_win against the rebuilt buffers) and a GAIN
     for 1 kHz (fi 2) with zeta = 1 / b, nu = 1 / a for every cell and all bits. Each publish: |Z|,
@@ -1135,8 +1137,8 @@ def o10_gain_correction_on_the_meter():
     own window sums within the same bound; MEASURE byte bit 0 set; meas_interp not called. Then two
     rigs with GAIN records of equal length: (A) fi 2 calibrated except the phase bit of the reached
     cell, (B) fi 3 only; both get the same window sums (the first publish's sums of the first rig
-    written into MO_SUM at every meas_publish entry), so the stage-1 instructions (design 2.1:
-    "bit-identical to stage 1") must give bit-identical result words 0x20005098..0x200050D7 and
+    written into MO_SUM at every meas_publish entry), so the stage-1 instructions (the correction
+    is "bit-identical to stage 1" without a gain) must give bit-identical result words 0x20005098..0x200050D7 and
     0x200011EC, the same codes and K, at four publishes; A's MEASURE byte has bit 1, B's none;
     meas_interp called at every publish. Screen 3 with type 0 (the raw value of the store): |Z| =
     |K zeta nu sum V' / sum I'|."""
@@ -1160,7 +1162,7 @@ def o10_gain_correction_on_the_meter():
         c5, c6, c8 = p['codes'][0], p['codes'][1], p['codes'][3]
         bv, bi = src.buffers(rig.meas, (c5, c6, c8))
         # the acquisitions of this window: those with its window number after the last one at other
-        # codes (a code change resets the window, MFD S1.4)
+        # codes (a code change resets the window)
         win = [a for a in acqs if a[0] == p['seq'] - 1]
         while win and any(a[1] != p['codes'] for a in win):
             win = win[[a[1] for a in win].index(next(a[1] for a in win if a[1] != p['codes'])) + 1:]
@@ -1218,7 +1220,7 @@ def o10_gain_correction_on_the_meter():
 
 @case
 def o29_info_masks_and_measure_bit_1():
-    """Design 4.2 / 2.8 (o29): GAIN with fi 0 all bits, fi 1 zeta bits only (nu masks 0), fi 2 zeta
+    """OCAL_INFO record and MEASURE flags (o29): GAIN with fi 0 all bits, fi 1 zeta bits only (nu masks 0), fi 2 zeta
     magnitude bits only, fi 4 one complete cell (8 c8 + c6 = 9, c5 = 2): gain frequencies = fi 0 and 4
     (0x11); with a CLIP failing its rule: sections rejected 0x04, present 0x07. ocal_gain at fi 4
     with the codes c5 2, c6 1, c8 1 (the raw record's): applied (flags 1); with c6 2: present, not
@@ -1242,7 +1244,7 @@ def o29_info_masks_and_measure_bit_1():
 
 @case
 def o11_lock_forces_codes_and_every_release():
-    """Design 2.2 / o11: OCAL_LOCK 3 2 1 on screen 1: within 1 s the codes 0x200011C5 / C6 / C8 are 3,
+    """Lock / o11: OCAL_LOCK 3 2 1 on screen 1: within 1 s the codes 0x200011C5 / C6 / C8 are 3,
     2, 1 and from then on no call of fn_0800b20c / fn_0800b000 (code breakpoints); a lock to c5 7,
     c6 0, c8 0 on 1 kohm saturates ADC1 (128 x the V amplitude) and publishes the overload set (|Z|
     1e10). Released (lock word 0) by: a physical key, KEY, a screen change (SCREEN 2), DTR clear,
@@ -1284,11 +1286,11 @@ def o11_lock_forces_codes_and_every_release():
 
 @case
 def o28_lock_with_lcr_set_and_hold():
-    """Design 2.2 (F14, o28): a record with SETTLE[1][fi 3] = 200 (kind 1 frequency, 10 kHz; the rest the
+    """Lock with LCR_SET (F14, o28): a record with SETTLE[1][fi 3] = 200 (kind 1 frequency, 10 kHz; the rest the
     defaults, kind 0 restart 26). Locked, LCR_SET frequency (id 2, index 3 = 10 kHz) answers status 0,
     the lock word stays, the frequency word is 10000 and meas_change runs exactly once after it, as
     (200, 1): ds_freq's restart (kind 0, 26 ms) and the frequency change (kind 1, 200 ms) are seen in
-    one meas_watch pass and the maximum rule of design 2.3 takes the frequency's settle with its kind
+    one meas_watch pass and the maximum rule (the largest settle of the changes in the pass) takes the frequency's settle with its kind
     (with the defaults both are 26 and the case could not tell the two apart). LCR_SET range (id 5)
     answers status 3 and 0x2000114C stays; HOLD on: OCAL_LOCK still allowed (status 0) and OCAL_RAW's
     window number rises while |Z| stays."""
@@ -1331,7 +1333,7 @@ def o28_lock_with_lcr_set_and_hold():
 
 @case
 def o12_settle_120_ms_for_kind_6_and_the_t_max_bound():
-    """Design 2.3 / o12: SETTLE[6][fi] = 120 for every fi. A code change by a lock: the first
+    """Settle times from the area / o12: SETTLE[6][fi] = 120 for every fi. A code change by a lock: the first
     acquisition used afterwards (meas_win entry, MO_TARM) started at least 130 ms (T + 10, the tick
     step) after the change tick. T_max = 120 (OCS_TMAX). meas_change called directly with a
     deadline pending T_max + 10 = 130 ms ahead keeps it (new deadline now + 15 lies earlier); 131
@@ -1369,7 +1371,7 @@ def o12_settle_120_ms_for_kind_6_and_the_t_max_bound():
 
 @case
 def o25_settle_at_the_kind_6_sites_and_the_maximum_rule():
-    """Design 2.3 (F7, o25): SETTLE[6][fi] = 120. meas_watch (called directly) with a frequency change
+    """Settle at the kind-6 sites (F7, o25): SETTLE[6][fi] = 120. meas_watch (called directly) with a frequency change
     (kind 1, 26 ms) and a code change (kind 6, 120 ms) in one pass: meas_change(120, 6); with
     SETTLE[1][2] = 200: meas_change(200, 1). On the meter: a resistor change 1 kohm -> 100 kohm makes
     the own ranging change codes: every meas_change of kind 6 has T 120; a short (1 mohm, ADC2
@@ -1433,7 +1435,7 @@ def o25_settle_at_the_kind_6_sites_and_the_maximum_rule():
 
 @case
 def o26_frequency_outside_the_list():
-    """Design 2.3 / 5 (F8, o26): with a record whose SETTLE holds 77 everywhere, GAIN for every fi
+    """Frequency outside the list (F8, o26): with a record whose SETTLE holds 77 everywhere, GAIN for every fi
     and MONITOR kV for every fi, and the frequency word 50 Hz: ocal_freq_index 0xFF, ocal_settle 26
     for kinds 0..4 and 5 for kinds 5, 6, ocal_kv 0, ocal_gain 0 with flags 0."""
     body = meta() + gain({fi: gain_entry(0xFFFFFFFF, 0xFFFFFFFF, 0xFF, 0xFF) for fi in range(6)}) \
@@ -1454,7 +1456,7 @@ def o26_frequency_outside_the_list():
 
 @case
 def o13_clip_limits():
-    """Design 2.3 S4.5 / o13: with CLIP[0][0].hi = 3995 (lo 300) an acquisition with ADC1 max 4000
+    """Clip limits from the area (S4.5, o13): with CLIP[0][0].hi = 3995 (lo 300) an acquisition with ADC1 max 4000
     counts is saturated (bit 0); with the defaults only max >= 4095 or min <= 0 count (stage 1),
     for both channels (ADC2 with code c6: CLIP[1][c6])."""
     d = DRig(record(meta() + clip({(0, 0): (300, 3995), (1, 2): (200, 3900)}), 1))
@@ -1479,10 +1481,10 @@ def o13_clip_limits():
 
 @case
 def o14_level_monitor():
-    """Design 5 (F13, o14): without kV: V and I NaN, A_V,ref = A_V / G[c5] and A_I,ref = A_I /
+    """DUT level monitor (F13, o14): without kV: V and I NaN, A_V,ref = A_V / G[c5] and A_I,ref = A_I /
     (G[c6] R[c8]) (|nu| = |zeta| = 1), flags bit 0 clear. With kV[2] = 1e-3 (1 kHz): V = kV A_V,ref,
     I = kV A_I,ref, and I = V / |Z| of the published reading within 1e-5 relative (|Z| = A_V ref R...
-    the identity of section 5 in float32), without and with the gain applied (o10's source). A
+    the identity of the level monitor in float32), without and with the gain applied (o10's source). A
     short (1 mohm): the overload set, all four NaN and flags bit 2."""
     for gain_body, src in ((b'', DutSource('R', 1000.0)), (full_gain(2), ErrSource(z_terminal()))):
         for kv in (None, 1e-3):
@@ -1519,7 +1521,7 @@ def o14_level_monitor():
 
 @case
 def o15_settle_trace():
-    """Design 2.2 / o15: OCAL_TRACE arm (state 1), then a code change (lock) with SETTLE[6] = 40:
+    """Settle trace / o15: OCAL_TRACE arm (state 1), then a code change (lock) with SETTLE[6] = 40:
     the trace starts at that meas_change (state 2, kind 6, its tick), 32 entries with rising ticks,
     the ones before the deadline marked bit 0 (at least one: 40 ms is several acquisitions), the
     trace full (state 3); read in two answers (start 0: 31 entries, start 31: 1). The window is not
@@ -1561,7 +1563,7 @@ def o15_settle_trace():
 
 @case
 def o16_never_brick_with_the_area_and_a6():
-    """Design 1.4 / 2.7 (F15, o16): tests/check_never_brick.py --app passes on the real build (the
+    """Never-brick check with the area (F15, o16): tests/check_never_brick.py --app passes on the real build (the
     extended gate, A6 admitting ocal.s's defaults, OCAL_BASE and OCAL_END) and its planted controls
     report 0x08066004 and 0x08061FFC by A6 and the store to 0x08062000 from ocal.s by A5 (exit 0
     with every control "found")."""
@@ -1589,7 +1591,7 @@ OCAL_FUNCS = ('ocal_eval', 'ocal_scan', 'ocal_pick', 'ocal_target', 'ocal_nextse
 
 @case
 def o17_ram_write_watch():
-    """Design 1.4 "What it never touches", m15 style (o17): from reset, through a session of every
+    """What the area code never touches, m15 style (o17): from reset, through a session of every
     OCAL command (INFO, READ, WRITE of a GAIN + CLIP + SETTLE body, ROLLBACK 0, LOCK, RAW, TRACE
     arm / read, MONITOR) and 3 s of measurement: no store by code of ocal.s outside OWN_OCAL and the
     stack (0x20010000..0x200163A7, below the vendor stack top), no store at all to OWN_STAGE during
@@ -1630,7 +1632,7 @@ def o17_ram_write_watch():
 
 @case
 def o18_watchdog_during_a_commit_with_retry():
-    """Design 1.4 "Time" (o18): a commit of a GAIN + META record (0x40 + 36 + 1996 = 2096 bytes: 2
+    """Watchdog during a commit (o18): a commit of a GAIN + META record (0x40 + 36 + 1996 = 2096 bytes: 2
     pages) whose first body word has a stuck bit (o04), so both attempts erase 2 pages and fail:
     the longest stretch between two IWDG loads overlapping the request .. answer is below 0.67 s
     (the shortest period, LSI 60 kHz), no IWDG reset; status 5."""
@@ -1661,7 +1663,7 @@ def short_entry(rig, value):
 
 @case
 def o19_retake_flag():
-    """Design 2.5 (F20, o19): after a write with GAIN, OF_RETAKE (stored CRC = the current one);
+    """Short / open before or after the gain correction (F20, o19): after a write with GAIN, OF_RETAKE (stored CRC = the current one);
     a new short entry clears it. A write of the same GAIN + CLIP after that retake keeps the active
     record's stored CRC (the old one), so OF_RETAKE stays clear; the same write before a retake keeps
     it set."""
@@ -1691,7 +1693,7 @@ def open_last_chunk(rig, body):
 
 @case
 def o20_refused_while_a_calibration_runs():
-    """Design 4.3 refusal 2 (F6 a, o20): the last OCAL_WRITE chunk, OCAL_ROLLBACK and OCAL_LOCK answer
+    """Refusal while a calibration runs (F6 a, o20): the last OCAL_WRITE chunk, OCAL_ROLLBACK and OCAL_LOCK answer
     status 6 while 0x200050E4 != 0, and while the CALIBRATE job is active (CT_J_ACTIVE 1, CT_J_CMD
     0x27) with 0x200050E4 still 0; no flash operation."""
     for setup in ((V_CAL_RUN, 1), (CT_J_ACTIVE, 1)):
@@ -1711,7 +1713,7 @@ def o20_refused_while_a_calibration_runs():
 
 @case
 def o24_refused_by_jobs_rewrite_and_power_off():
-    """Design 4.3 refusals 1, 3, 4 (F6 b, c, o24): a BOOT_BEGIN job active -> 4; SF_REWRITE_A -> 4;
+    """Refusals for another job, a rewrite of copy A, powered-off mode (F6 b, c, o24): a BOOT_BEGIN job active -> 4; SF_REWRITE_A -> 4;
     powered-off mode (CF_OFF) and after the power-off path (CF_OFF_WAIT) -> 3; for the last chunk
     and the rollback; 0 flash operations; the transfer still open at the last chunk's offset."""
     for (addr, val), exp in (((CT_J_ACTIVE, 1), S_BUSY), ((SAVE_FLAGS, SF_REWRITE_A), S_BUSY),
@@ -1750,10 +1752,10 @@ def slot_img(k, torn=False):
 
 @case
 def o21_slot_state_matrix():
-    """Design 1.4 / 7.1 o21 (F18 a, G6): per slot 25 states (no CRC-valid record, and own / foreign x
+    """Write target and sequence for every slot state (F18 a, G6, o21): per slot 25 states (no CRC-valid record, and own / foreign x
     format 1 / 2 x sequence 1 / 5 / 0xFFFFFFFE x in force / revoked), 625 pairs; the pairs with an
     empty slot again with that slot torn (a record with a wrong CRC). Expected per pair from the
-    model of owncal/matrix_check.py (rule G1; model_*): the active slot and OF_NEWER after the load,
+    slot model (rule G1; model_*): the active slot and OF_NEWER after the load,
     the write target and sequence (or status 3). Checked: load as the model; a META write answers
     status 0 with slot = target and sequence = the model's, or status 3 with no flash operation;
     after every commit the new record is active (P4); the target is never the active slot or the
@@ -1802,7 +1804,7 @@ def o21_slot_state_matrix():
 
 @case
 def o27_measure_records_carry_the_ocal_byte():
-    """Design 2.8 (F18 e, o27): MEASURE, LCR_SET and the MEASURE_STREAM frames carry MEASURE_SIZE
+    """MEASURE record size (F18 e, o27): MEASURE, LCR_SET and the MEASURE_STREAM frames carry MEASURE_SIZE
     bytes (cmd.s, 66 with the integration); INFO's capability word has CAP_OCAL. Noise 1 lsb: windows
     with equal bits are one result (ctl.s .Ld_meas), so a noiseless source streams no frame in mode 0."""
     rig = Ctl(source=DutSource('R', 1000.0, noise_lsb=1.0), patch=ocal_patch()).up()
@@ -1815,6 +1817,179 @@ def o27_measure_records_carry_the_ocal_byte():
     fr = [f for f in rig.drain(3.0) if f['type'] == T.FR_STREAM and f['cmd'] == T.C['MEASURE']]
     check(fr and all(len(f['payload']) == MEASURE_SIZE for f in fr), 'stream frames %r' % [len(f['payload']) for f in fr])
     rig.ask('MEASURE_STREAM', b'\xff\xff')
+    return True
+
+
+# ---------------------------------------------------------------- o30 / o31 (event OCAL_CHANGED)
+
+E_OCAL = _equ('E_OCAL', INC)                    # own.inc 509: 0x98
+
+
+def ocal_events(rig, seconds=0.3):
+    """OCAL_CHANGED payloads among the frames read while waiting for answers (UsbHost.frames) and in
+    the next seconds; the frames read so far are dropped afterwards."""
+    fr = list(rig.host.frames) + rig.drain(seconds)
+    del rig.host.frames[:]
+    return [f['payload'] for f in fr if f['type'] == T.FR_EVENT and f['cmd'] == E_OCAL]
+
+
+def ref_event(rig):
+    """The OCAL_CHANGED payload PROTOCOL.md 793 / 16.2 defines, computed in Python from the area's flash
+    bytes (the load rules: ref_eval / ref_active): active slot u8 (0xFF none), its sequence u32 (0 with
+    none: ocal_load stores 0, ocal.s 647), flags u32 = bit 0 a record active, bit 1 / 2 slot 0 / 1
+    CRC-valid, bit 3 a newer own record of another format, bit 4 a CRC-valid record of another UID.
+    Bits 5..9 are 0 in the cases using it: every body passes the section walk (SMALL / BODY_META), no
+    GAIN (OF_RETAKE needs one, ocal_retake 1107..1127), no OCAL_LOCK, no trace armed, and the transfer
+    is closed before the event (ocal_commit 2141..2150)."""
+    s0, s1 = rig.m.get(OCAL_BASE, OCAL_SLOT), rig.m.get(OCAL_BASE + OCAL_SLOT, OCAL_SLOT)
+    ev = (ref_eval(s0), ref_eval(s1))
+    a, newer = ref_active(s0, s1)
+    fl = ((OF['ACTIVE'] if a is not None else 0) | (OF['V0'] if ev[0] else 0) | (OF['V1'] if ev[1] else 0)
+          | (OF['NEWER'] if newer else 0) | (OF['UID'] if any(e and not e['own'] for e in ev) else 0))
+    return struct.pack('<BII', 0xFF if a is None else a, 0 if a is None else ev[a]['seq'], fl)
+
+
+def usb_write(rig, body, crc=None):
+    """OCAL_WRITE over USB in chunks of 480; (status, data) of the first refused or the last chunk."""
+    crc = zlib.crc32(body) if crc is None else crc
+    r = None
+    for off in range(0, len(body), 480):
+        r = rig.ask('OCAL_WRITE', OK2 + struct.pack('<HHI', off, len(body), crc) + body[off:off + 480],
+                    timeout=T_COMMIT)
+        if r[0] != S_OK or off + 480 >= len(body):
+            return r
+        check(r[1] == struct.pack('<H', off + 480), 'next offset %r' % r[1])
+    return r
+
+
+def info_event_fields(rig):
+    """(active slot, sequence, flags) of OCAL_INFO (PROTOCOL.md 16.2: flags u32 at 0, slot u8 at 4,
+    active sequence u32 at 8), packed like the event payload."""
+    d = rig.ask_ok('OCAL_INFO', size=64)
+    return struct.pack('<BII', d[4], u32(d, 8), u32(d, 0))
+
+
+@case
+def o30_ocal_changed_after_write_and_rollback():
+    """Event 0x98 OCAL_CHANGED (PROTOCOL.md 793, FEATURES.md; ocal.s ocal_event 2029..2044: ev_send of 9
+    bytes, slot u8, sequence u32, flags u32 from ocal_flags), sent only while DTR is set (ctl.s
+    ev_send); the Ctl rig sets DTR at enumeration (UsbHost.enumerate dtr=True). Input: the area erased
+    (ocal_patch()), a 1 kohm source. Steps and expected (target and sequence from the slot model of
+    the write rules, model_target / model_seq; every payload also equal to ref_event of the flash after the
+    step and to the fields of OCAL_INFO read right after it):
+    1. after the start: no 0x98 frame ("not at the start", PROTOCOL.md 793), OCAL_INFO slot 0xFF flags 0;
+    2. OCAL_WRITE of SMALL: answer (0, result 0, slot 0, sequence 1); one event 00 | 1 | 0x03
+       (ocal_commit .Lcm_done 2141..2150 calls ocal_event after ocal_load and the transfer close);
+    3. OCAL_WRITE of BODY_META: answer slot 1, sequence 2; one event 01 | 2 | 0x07;
+    4. OCAL_ROLLBACK mode 0 (revokes slot 1, ocal.s 2427..2515): answer status 0, data = slot 0,
+       sequence 1, flags 0x07 (the revoked record stays CRC-valid: the revoke word 0x38 is outside the
+       CRC); one event with exactly the answer's 9 bytes (.Lrb_done 2499..2515);
+    5. OCAL_ROLLBACK mode 0 again (revokes slot 0): answer and one event FF | 0 | 0x06;
+    6. OCAL_ROLLBACK mode 0 with no active record: status 3, no data, no event (.Lrb_none 2517 skips
+       ocal_event);
+    7. a refused write, transfer CRC wrong: status 7 (h_ocal_write .Lwt_crc, 2406), no event;
+    8. a refused write, value rule: SETTLE kind 1 fi 1 = 0 ms (ocal.s .Lvs_settle 906..911: 0 is
+       rejected; index 6 kind + fi = 7, 815): status 2 with data 03 0700, no event;
+    9. the area unchanged by 6..8, then a good write of SMALL: both records revoked, so the target is
+       the lower sequence, slot 0, sequence 3 (ocal_target 411..455 (c), ocal_nextseq 466); one event
+       00 | 3 | 0x07 (events still sent after the refusals)."""
+    rig = Ctl(source=DutSource('R', 1000.0), patch=ocal_patch()).up()
+    check(not ocal_events(rig), 'OCAL_CHANGED at the start')
+    check(info_event_fields(rig) == struct.pack('<BII', 0xFF, 0, 0), 'OCAL_INFO at the start')
+    slots = [None, None]
+    for n, body in enumerate((SMALL, BODY_META)):
+        t = model_target(slots)
+        q = model_seq(slots, t)
+        check((t, q) == ((0, 1), (1, 2))[n], 'model: write %d target %d sequence %r' % (n, t, q))
+        r = usb_write(rig, body)
+        check(r == (S_OK, struct.pack('<BBI', 0, t, q)), 'write %d: %r' % (n, r))
+        slots[t] = (True, 1, q, False)
+        ev = ocal_events(rig)
+        exp = struct.pack('<BII', t, q, OF['ACTIVE'] | OF['V0'] | (OF['V1'] if n else 0))
+        check(ev == [exp] and exp == ref_event(rig) and exp == info_event_fields(rig),
+              'write %d: events %r, expected %s (flash %s)' % (n, [e.hex() for e in ev], exp.hex(), ref_event(rig).hex()))
+    for slot, seq, fl in ((0, 1, OF['ACTIVE'] | OF['V0'] | OF['V1']), (0xFF, 0, OF['V0'] | OF['V1'])):
+        st, d = rig.ask('OCAL_ROLLBACK', OK2 + b'\x00', timeout=T_COMMIT)
+        exp = struct.pack('<BII', slot, seq, fl)
+        check(st == S_OK and d == exp, 'rollback to slot 0x%02X: status %d data %s' % (slot, st, d.hex()))
+        ev = ocal_events(rig)
+        check(ev == [exp] and exp == ref_event(rig) and exp == info_event_fields(rig),
+              'rollback to slot 0x%02X: events %r, expected %s' % (slot, [e.hex() for e in ev], exp.hex()))
+    area = rig.m.get(OCAL_BASE, OCAL_END - OCAL_BASE)
+    r = rig.ask('OCAL_ROLLBACK', OK2 + b'\x00', timeout=T_COMMIT)
+    check(r == (S_NOTNOW, b''), 'rollback with none active: %r' % (r,))
+    check(not ocal_events(rig), 'OCAL_CHANGED after a refused rollback')
+    r = usb_write(rig, SMALL, crc=zlib.crc32(SMALL) ^ 1)
+    check(r == (S_XCRC, b''), 'wrong transfer CRC: %r' % (r,))
+    check(not ocal_events(rig), 'OCAL_CHANGED after a write refused with status 7')
+    r = usb_write(rig, settle({(1, 1): 0}))
+    check(r == (S_BAD, struct.pack('<BH', 3, 7)), 'SETTLE 0 ms: %r' % (r,))
+    check(not ocal_events(rig), 'OCAL_CHANGED after a write refused with status 2')
+    check(rig.m.get(OCAL_BASE, OCAL_END - OCAL_BASE) == area, 'the area changed by a refused command')
+    slots = [(True, 1, 1, True), (True, 1, 2, True)]
+    t, q = model_target(slots), model_seq(slots, model_target(slots))
+    check((t, q) == (0, 3), 'model after both revoked: target %d sequence %r' % (t, q))
+    r = usb_write(rig, SMALL)
+    check(r == (S_OK, struct.pack('<BBI', 0, 0, 3)), 'write after the refusals: %r' % (r,))
+    exp = struct.pack('<BII', 0, 3, OF['ACTIVE'] | OF['V0'] | OF['V1'])
+    ev = ocal_events(rig)
+    check(ev == [exp] and exp == ref_event(rig) and exp == info_event_fields(rig),
+          'write after the refusals: events %r, expected %s' % ([e.hex() for e in ev], exp.hex()))
+    return True
+
+
+def ev_send_calls(rig):
+    """Code hook at ctl.s ev_send (r0 = event cmd, r1 = data, r2 = length): the list of (cmd, length,
+    data bytes) of every call. A DRig has no USB (ev_send returns at usb_dtr), so the hook sees the
+    events the code sends, not frames."""
+    from unicorn.arm_const import UC_ARM_REG_R2
+    calls = []
+
+    def hit(uc, a, size, user):
+        n = uc.reg_read(UC_ARM_REG_R2)
+        calls.append((uc.reg_read(UC_ARM_REG_R0), n,
+                      bytes(uc.mem_read(uc.reg_read(UC_ARM_REG_R1), n)) if n <= 14 else None))
+    a = rig.s['ev_send'] & ~1
+    rig.m.uc.hook_add(UC_HOOK_CODE, hit, begin=a, end=a)
+    return calls
+
+
+@case
+def o31_no_ocal_changed_from_the_refusals():
+    """No OCAL_CHANGED from a write or rollback refused by ocal_busy (ocal.s 1832..1857;
+    PROTOCOL.md 16.4: 3 powered-off mode / power-off path, 6 a calibration runs or the CALIBRATE job, 4
+    another job or SF_REWRITE_A): h_ocal_write returns at .Lwt_reopen before ocal_commit (2383..2385)
+    and h_ocal_rollback at .Lrb_status before ocal_event (2440..2442). Input per refusal, each in its
+    own DRig (two_records_rig: slot 0 own seq 1, slot 1 own seq 2 active, both SMALL; the o20 / o24
+    setups): V_CAL_RUN 1 -> 6; CT_J_ACTIVE 1 with CT_J_CMD CALIBRATE -> 6; CT_J_ACTIVE 1 with BOOT_BEGIN
+    -> 4; SF_REWRITE_A -> 4; CF_OFF -> 3; CF_OFF_WAIT -> 3. Expected: the last chunk and OCAL_ROLLBACK 0
+    answer that status with no data and ev_send is not called (hook ev_send_calls). Control in the same
+    rig: the setup word(s) set back to the value read before, the same last chunk (the transfer stayed
+    open at its offset, 16.4) commits: answer (0, slot 0, sequence 3: the other slot, highest 2 + 1,
+    the write rules) and exactly one ev_send call: cmd 0x98, 9 bytes 00 | 3 | 0x07 (= ref_event of the
+    flash), so the hook does see the event the refusals did not send."""
+    for setup, exp in ((((V_CAL_RUN, 1),), S_SAFETY), (((CT_J_ACTIVE, 1), (CT_J_CMD, C_CALIBRATE)), S_SAFETY),
+                       (((CT_J_ACTIVE, 1), (CT_J_CMD, C_BOOT_BEGIN)), S_BUSY), (((SAVE_FLAGS, SF_REWRITE_A),), S_BUSY),
+                       (((CT_FLAGS, CF_OFF),), S_NOTNOW), (((CT_FLAGS, CF_OFF_WAIT),), S_NOTNOW)):
+        what = ' '.join('0x%08X=%d' % w for w in setup)
+        rig = two_records_rig()
+        rig.load()
+        last = open_last_chunk(rig, SMALL)
+        before = [(addr, rig.rd(addr)) for addr, _ in setup]
+        for addr, val in setup:
+            rig.wr(addr, val)
+        calls = ev_send_calls(rig)
+        rig.clear_log()
+        r = (rig.handler('h_ocal_write', last), rig.handler('h_ocal_rollback', OK2 + b'\x00'))
+        check(all(x == (exp, b'') for x in r) and not rig.ops(), '%s: %r, %d flash operations' % (what, r, len(rig.ops())))
+        check(not calls, '%s: ev_send called %r' % (what, calls))
+        for addr, val in before:
+            rig.wr(addr, val)
+        r = rig.handler('h_ocal_write', last)
+        check(r == (S_OK, struct.pack('<BBI', 0, 0, 3)), '%s, control: %r' % (what, r))
+        ev = struct.pack('<BII', 0, 3, OF['ACTIVE'] | OF['V0'] | OF['V1'])
+        check(calls == [(E_OCAL, 9, ev)] and ev == ref_event(rig), '%s, control: ev_send calls %r, flash %s'
+              % (what, calls, ref_event(rig).hex()))
     return True
 
 

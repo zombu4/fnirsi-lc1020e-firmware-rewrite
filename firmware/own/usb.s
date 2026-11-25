@@ -1,9 +1,9 @@
 @ usb.s - USB device driver of our build: CDC ACM serial port (one control, one data interface)
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ USB_CONTROL_DESIGN.md sections 2, 3 and 9. The register handling follows the slot
+@ The register handling follows the slot
 @ bootloader's driver, which enumerates on this meter (bootloader/src/usb_08.s, usb_09.s,
-@ update_06.s; NOTES.md "USB of bootloader and application"), and the N32G45x user manual
+@ update_06.s), and the N32G45x user manual
 @ V3.5.0 chapter 19 (docs/).
 @
 @ Device: VID 0x19F5, PID 0x1020, class 0x02 (no IAD), strings 1 "FNIRSI", 2 "LC1020E", 3 the
@@ -14,8 +14,8 @@
 @ (class 0x0A: endpoint 0x81 bulk IN 64, endpoint 0x02 bulk OUT 64). bmAttributes 0xC0 (self
 @ powered: the meter runs from its battery), bMaxPower 0x32 (100 mA).
 @
-@ Bring-up (usb_start, design section 3): only when RCC_CFG SCLKSTS = PLL (the application's
-@ clock 144 MHz, NOTES.md); USBPRES = 11 (PLL / 3 = 48 MHz) before USBEN (manual: USBPRES must be
+@ Bring-up (usb_start): only when RCC_CFG SCLKSTS = PLL (the application's
+@ clock 144 MHz); USBPRES = 11 (PLL / 3 = 48 MHz) before USBEN (manual: USBPRES must be
 @ valid before the USB clock is enabled), both by read-modify-write; USB_CTRL = FRST (PD
 @ cleared), at least 1 us (datasheet Table 4-41: transceiver start-up time tSTARTUP 1 us), then
 @ USB_CTRL = 0 (manual 19.4.5.1.1), USB_STS = 0, BUFTAB = 0, our state and the endpoints set

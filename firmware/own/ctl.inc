@@ -70,7 +70,7 @@
         .equ    CT_J_NSTEPS,    0x0DC           @ steps in the program
         .equ    CT_J_GUARD,     0x0E0           @ 1: the guard refused an action of this job
         .equ    CT_J_STEPT,     0x0E4           @ tick at the start of the current step
-@ direct change (DIRECT_SET_DESIGN.md revision 2; own/dset.s)
+@ direct change (revision 2; own/dset.s)
         .equ    CT_DS_OP,       0x0E8           @ command (C_*) of the pending change, 0 none
         .equ    CT_DS_A,        0x0EC           @ its first argument (dset.s ds_check)
 @ BOOT_* writer
@@ -168,7 +168,7 @@
         .equ    OP_DIRECT,      8               @ wait for the direct change (dset.s ds_run)
         .equ    KB_LONG,        0x01            @ kind: long press (hold LONG_MS)
         .equ    KB_GOFF,        0x80            @ kind: guard off, no refusal (the command's
-                                                @ own path, USB_CONTROL_DESIGN.md 4.3 / 4.4)
+                                                @ own path)
 @ answer kinds (CT_J_ANSWER)
         .equ    AN_STATE,       0               @ STATE record
         .equ    AN_MEASURE,     1               @ MEASURE record
@@ -200,15 +200,15 @@
 
 @ commands and texts
         .equ    CONFIRM_OK,     0x4F4B          @ "OK": confirmation of every confirming command
-                                                @ except POWER_OFF (USB_CONTROL_DESIGN.md 9)
+                                                @ except POWER_OFF
         .equ    ST_DEFER,       0xFF            @ handler result: the answer comes from the job
                                                 @ (or was made pending by job_answer already)
-        .equ    CAPS_ALL,       0x0FEFFFFF      @ capability bits 0..19 (4.8; bit 20, SETUP_LANGUAGE,
+        .equ    CAPS_ALL,       0x0FEFFFFF      @ capability bits 0..19 (bit 20, SETUP_LANGUAGE,
                                                 @ clear: English only), bit 21: SCREEN, LCR_SET,
                                                 @ HOLD, SETTINGS_SET, COMPARE_SET set directly
-                                                @ (DIRECT_SET_DESIGN.md revision 2), bits 22..24:
+                                                @ (revision 2), bits 22..24:
                                                 @ CAP_F60, CAP_TOL, CAP_DISP2 (own.inc;
-                                                @ MEASUREMENT_FIX_DESIGN.md stage 2, revision 6),
+                                                @ stage 2, revision 6),
                                                 @ bit 25: CAP_CAL3 (the sweep of cal.s, stage 3,
                                                 @ revision 7); bit 26: CAP_OCAL (ocal.s); bit 27:
                                                 @ CAP_BOOTDIAG (boot.s, INFO 46..57, revision 17)

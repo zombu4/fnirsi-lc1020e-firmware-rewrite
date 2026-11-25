@@ -93,7 +93,7 @@ DIRECT = (C['SCREEN'], C['LCR_SET'], C['HOLD'], C['SETTINGS_SET'], C['COMPARE_SE
 # without it runs the vendor's 45-s sweep (limit 120 s, so 126 s).
 CAP_CAL3 = 25
 T_CAL_OLD = 126.0
-# Capability bit 26: the own calibration area (firmware/own/ocal.s, OWN_CAL_DESIGN.md revision 3):
+# Capability bit 26: the own calibration area (firmware/own/ocal.s, revision 3):
 # OCAL_* and MONITOR, event OCAL_CHANGED, MEASURE byte 65.
 CAP_OCAL = 26
 OCAL_FLAGS = ['active', 'slot 0 valid', 'slot 1 valid', 'newer format', 'foreign UID',
@@ -147,7 +147,7 @@ UPDATE_RESULT = {0: 'none', 1: 'OK', 2: 'image check failed', 3: 'programming fa
 CAL_STATUS = {0: 'start', 1: 'busy', 2: 'finish', 3: 'fail'}
 # CALIBRATE answer byte 7 (capability bit 25, firmware/own/cal.s CAL_R_*)
 # (reasons 2 and 5 end short and reference points only: an open point ends at its limit with the windows it
-# has, MEASUREMENT_FIX_DESIGN revision 10)
+# has, revision 10)
 CAL_REASON = {0: 'none', 1: 'no acquisition for 1.5 s', 2: 'point time limit, fewer than 3 windows',
               3: 'open below 100 kohm', 4: 'the store check of the table', 5: 'point time limit, 3 windows not agreeing',
               6: 'ended by a key, the dialog closed or the screen left'}
@@ -186,7 +186,7 @@ CAPS = ['STATE / STREAM', 'SCREEN', 'KEY', 'LCR_TABLES / LCR_SET', 'MEASURE / ME
         'own calibration area (OCAL_*, MONITOR)',                  # bit 26
         'start-up diagnostics (INFO 46..57)']                      # bit 27
 # INFO bytes 46..53 (capability bit 27): progress word = 0x5350 << 16 | clock flags << 8 | stage
-# (firmware/own/own.inc BOOT_PROG, MEASUREMENT_FIX_DESIGN.md revision 17, 17.2)
+# (firmware/own/own.inc BOOT_PROG, revision 17)
 BOOT_TAG = 0x5350
 BOOT_STAGE = {1: 'reset handler', 2: 'clock set-up done', 3: 'GPIO set-up', 4: 'own_start',
               5: 'settings load', 6: 'fn_0800814c', 7: 'LCD set-up', 8: 'start-up animation',

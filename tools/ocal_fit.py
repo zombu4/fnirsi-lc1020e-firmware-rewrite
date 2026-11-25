@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""ocal_fit.py - host-side gain fit of the own calibration area (OWN_CAL_DESIGN.md section 3: 1.2 GAIN
-body, 2.1, 2.4, 3.2, 3.3, 3.4, 6.2) and the body builder for the OCAL_WRITE record.
+"""ocal_fit.py - host-side gain fit of the own calibration area (the GAIN section
+body) and the body builder for the OCAL_WRITE record.
 
 Usage:
     python3 -I tools/ocal_fit.py RUNFILE [-o BODY] [--report FILE]
@@ -43,7 +43,7 @@ the pha row of the window.
 Anchors (3.2): magnitude rows for resistors of 100 ohm .. 100 kohm below 5 kHz and 100 ohm .. 10 kohm
 at 10 kHz and 100 kHz (10 ohm never); phase rows for resistors up to 10 kohm below 5 kHz (no lower
 limit) and 100 ohm .. 2 kohm at 10 kHz and 100 kHz. The anchor value is Z_anchor = Zs + 1 / (1/R + Yo):
-ln |Z_anchor| and arg Z_anchor (which is the anchor phase 0 of the design when Zs and Yo are absent).
+ln |Z_anchor| and arg Z_anchor (which is the anchor phase 0 when Zs and Yo are absent).
 Magnitude sigma = sqrt(u^2 + (dZs/R)^2) with u the resistor's relative uncertainty and dZs half the
 largest distance between the insertion means of the short; phase sigma = sqrt(1e-4^2 + (w L/R)^2 +
 (w R C)^2 + (dZs/R)^2) rad with the assumed parasitics L = 10 nH, C = 0.3 pF of 3.2 (the 1e-4 rad
@@ -785,7 +785,7 @@ def sections_from_run(run, gain):
 
 def main(argv=None):
     """Command line entry; see the module docstring."""
-    ap = argparse.ArgumentParser(description='gain fit of the own calibration area (OWN_CAL_DESIGN.md section 3)')
+    ap = argparse.ArgumentParser(description='gain fit of the own calibration area (body of OCAL_WRITE, PROTOCOL.md section 16)')
     ap.add_argument('runfile', metavar='RUNFILE')
     ap.add_argument('-o', metavar='BODY', help='write the record body here')
     ap.add_argument('--report', metavar='FILE', help='write the report here (JSON when the name ends in .json)')

@@ -374,7 +374,7 @@ d_08051510:
 @ block 08051530.bin unpacked) typed out, with two differences: every flash pointer is a label
 @ (the 129 string pointers, the 6 USB descriptor pointers, the 30 code pointers; the linker
 @ sets the Thumb bit of the code pointers), and row 0 of each of the 17 per-language text
-@ tables equals its row 1 (English in both rows; NOTES.md "Language and fonts of V1.1"), so
+@ tables equals its row 1 (English in both rows), so
 @ the language word 0x2000115C selects an English text either way.
 	.balign 4
 	.global d_08051530
@@ -441,7 +441,7 @@ ram_image:
 	.space 0x20
 	@ 0x200002A8: shutdown countdown title (1 per row)
 	.word d_080514ec, d_080514ec
-	@ 0x200002B0: SysTick reload source, 144000000 (own.inc V_SYSTICK_RLD, NOTES.md "Keys")
+	@ 0x200002B0: SysTick reload source, 144000000 (own.inc V_SYSTICK_RLD)
 	.word 0x08954400
 	@ 0x200002B4..0x200002D7: zero
 	.space 0x24
@@ -459,7 +459,7 @@ ram_image:
 	@ configuration
 	.word d_0802aefc + 0x40, 0x00000012
 	.word d_0802af4e, 0x00000020
-	@ 0x20000348: USB driver table, 10 code pointers (NOTES.md: 0x0800AC39 the USB-reset
+	@ 0x20000348: USB driver table, 10 code pointers (0x0800AC39 the USB-reset
 	@ handler, then the callbacks)
 	.word fn_0800ac38, fn_0800ab60, return_only_0800ac34, return_only_0800ac36
 	.word fn_0800aa8c, fn_0800ab10, return_2_unless_both_zero, fn_0800aad8

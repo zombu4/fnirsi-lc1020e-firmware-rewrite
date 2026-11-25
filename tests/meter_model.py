@@ -19,7 +19,7 @@ flash_mode 'boot' - memory map:
   0x0807B000..0x0807FFFF  flash with controller semantics (mmio) like above; the settings page
                           0x0807F000..0x0807FFFF is watched: any erase or program there is a violation
 
-flash_mode 'app' (our application build; SETTINGS_SAVE_DESIGN.md "Tests", USB_CONTROL_DESIGN.md 7):
+flash_mode 'app' (our application build):
   page 0, the application area 0x08006000..0x08061FFF and every slot that is not the BOOT target are
   plain memory (they execute; any CPU write is a violation). Everything else is flash with
   controller semantics (mmio), and who may erase / program what depends on the code that does it
@@ -34,7 +34,7 @@ flash_mode 'app' (our application build; SETTINGS_SAVE_DESIGN.md "Tests", USB_CO
   Strict hardware rules of this mode (N32G45x user manual 3.2.5.2.5): CTRL.SMPSEL = 1 (SMP2) at a
   word program of the application, any of the interrupt enables ECERRITE / EOPITE / FERRITE /
   ERRITE, OPTWE, PG with PER, START without PER, or a reserved CTRL bit: violation (not modelled,
-  the design writes none); a wrong KEY sequence leaves the controller locked until the next reset
+  none is written); a wrong KEY sequence leaves the controller locked until the next reset
   ("After an unsuccessful unlocking operation, this bit cannot be changed until the next system
   reset"; mode 'boot' keeps its retry); a word program from the application area must be followed
   by five NOP instructions (manual 3.2.1.4.2, read as "after every programmed word", as save.s
@@ -53,8 +53,8 @@ Both modes:
   0x00000000..0x0007FFFF  Boot alias: main flash as mapped above, at address - 0x08000000 (manual
                           3.1.3 "Boot from Main Flash: Main flash memory is mapped to the boot space
                           (0x0000_0000) ... accessible in two address areas, 0x0000_0000 or
-                          0x0800_0000"; the meter boots from main flash: the starter runs at power-on,
-                          NOTES "Two-part bootloader installed"). Reads and fetches as at 0x08xxxxxx;
+                          0x0800_0000"; the meter boots from main flash: the starter runs at power-on).
+                          Reads and fetches as at 0x08xxxxxx;
                           any CPU store through the alias is a violation (the manual does not say
                           what such a store does). The run's stop address is NO_UNTIL (odd), so a
                           branch to 0x00000000 executes there as on the meter.
@@ -63,7 +63,7 @@ Both modes:
                           RCC_CTRL 0x40021000 reads bit 17 = bit 16 (HSE ready) and bit 25 = bit 24
                           (PLL ready); RCC_CFG 0x40021004 reads SWS (bits 3:2) = SW (bits 1:0);
                           opt-in RCC rules (Meter attributes, defaults keep the lines above;
-                          MEASUREMENT_FIX_DESIGN.md revision 17): pll_locks False: bit 25 never
+                          revision 17): pll_locks False: bit 25 never
                           reads 1; pll_lock_reads n > 0: after a write that sets PLLEN (bit 24,
                           0 -> 1), bit 25 reads 0 for the next n reads of RCC_CTRL, then as above
                           (SWS is not affected by it); sws_stuck 0..3: SWS reads that value; rcc_switch_reads n > 0:
@@ -106,7 +106,7 @@ run exactly as before):
   Time base. Emulated time = instructions executed x cycles per instruction / core clock, plus the
   datasheet's maximum duration of every flash operation (N32G455 datasheet table 4-21: 32-bit
   program 225 us, page erase 100 ms). Core clock 144 MHz (the application's SysTick reload word
-  144000000 / 100 at 0x200002B0 and the PLL 144 MHz of USB_CONTROL_DESIGN.md 3). Instructions are
+  144000000 / 100 at 0x200002B0 and the PLL 144 MHz). Instructions are
   counted exactly: a UC_HOOK_BLOCK hook decodes the Thumb instruction lengths of every translated
   block (a halfword whose top five bits are 0b11101, 0b11110 or 0b11111 starts a 32-bit
   instruction) and the count is corrected to the PC wherever a run stops inside a block (the hook
@@ -202,7 +202,7 @@ SLOTS_END = 0x0807B000
 SETTINGS = 0x0807F000
 SET_A, SET_B = 0x0807F000, 0x08066000
 SETTINGS_PAGES = (0x08066000, 0x08066800, 0x0807F000, 0x0807F800)
-OCAL_PAGES = tuple(range(0x08062000, 0x08066000, 0x800))   # own calibration area (OWN_CAL_DESIGN.md 1.2)
+OCAL_PAGES = tuple(range(0x08062000, 0x08066000, 0x800))   # own calibration area
 SRAM, SRAM_SIZE = 0x20000000, 0x24000
 FLAG, FLAG_MAGIC = 0x2001FFF0, 0x464C5446
 FC = 0x40022000

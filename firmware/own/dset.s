@@ -3,10 +3,7 @@
 @ the press that lands on that value, without key presses, beeps or intermediate values.
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
-@ Specification: DIRECT_SET_DESIGN.md revision 2 (the facts of the key path in its section 1,
-@ the changes in 2.3, the refusals in 2.2, the differences from the old jobs in 2.4).
-@
-@ Flow (2.1): the handler of the command (own/cmd.s) checks the arguments, stores the command in
+@ Flow (revision 2): the handler of the command (own/cmd.s) checks the arguments, stores the command in
 @ CT_DS_OP and its arguments in CT_DS_A .. CT_DS_D, and calls ds_request: ds_check refused it or
 @ found nothing to change -> the answer at once (job_answer); else a job of one step OP_DIRECT
 @ (own/ctl.s job_step). key_step (ctl.s, main-loop step 3) calls ds_run in place of 0x08009400
@@ -24,7 +21,7 @@
 @                 << 8 | LED << 16, D = scale index 0..3
 @
 @ Never-brick: no access to the flash controller. Nothing here reaches a save or the flash
-@ (DIRECT_SET_DESIGN.md 1.6: the call-graph closure of every vendor routine called here holds
+@ (the call-graph closure of every vendor routine called here holds
 @ neither own_save, fn_08014b94, fn_0800b4c8 nor an address 0x40022xxx); ds_run sets the guard
 @ own_injected around the change anyway, so a save would be refused and the answer get status 6.
 @ RAM: only the words named per routine below (and the vendor routines' own writes).
@@ -161,7 +158,7 @@ ds_run:
 @     progress, as key_refused); SCREEN from screen 3 with the dialog of menu item 6 open
 @     (0x200011AC != 0, 0x200011A8 = 6: the restore-defaults confirmation stays the meter's).
 @     SCREEN from the calibration dialog (item 5) with no calibration running closes it as the
-@     sorting dialog (MEASUREMENT_FIX_DESIGN revision 10 item 4).
+@     sorting dialog (revision 10).
 @   The equality check of a command comes before its refusals, as the old job's first step did.
 @   Uses r0..r3, r12, s0..s15 (cs_diff).
 @ ----------------------------------------------------------------------------
@@ -345,7 +342,7 @@ ds_apply:
 	bx	r2			@ to the routine (it returns to ds_run)
 
 @ ----------------------------------------------------------------------------
-@ The LCR_SET routines, r0 = the value word (DIRECT_SET_DESIGN.md 1.1 / 2.3: what 0x08009614
+@ The LCR_SET routines, r0 = the value word (what 0x08009614
 @ does after the store of the press that lands on that value).
 @
 @ ds_func - Func 0x20001148 = r0, then: r0 = 0: fn_08021c14([0x200001FC], 0x0803DBA4) only
@@ -536,7 +533,7 @@ ds_circuit:
 	b.w	fn_08021c14		@ the picture as its source (tail call)
 
 @ ----------------------------------------------------------------------------
-@ ds_hold - hold 0x200011A4 = r0 (DIRECT_SET_DESIGN.md 1.2, app_01.s 475-486, 617-619):
+@ ds_hold - hold 0x200011A4 = r0 (app_01.s 475-486, 617-619):
 @   1: fn_08023558([0x200001DC], 1) shows the HOLD object (tail call); 0: fn_08023050
 @   ([0x200001DC], 1) hides it, byte 0x200011C4 = 1 (the measurement restart request of the
 @   DMA interrupt). Stack: 8 bytes. Also called by meas.s meas_hold (S2.7: a hold ends at a
@@ -565,7 +562,7 @@ ds_hold:
 	pop	{r4, pc}		@ back
 
 @ ----------------------------------------------------------------------------
-@ ds_screen - r0 = screen 1..3 (another than the screen now; DIRECT_SET_DESIGN.md 1.3 / 2.3):
+@ ds_screen - r0 = screen 1..3 (another than the screen now):
 @   from 1 / 2 to 3: fn_08023690([0x200001D8]) (the measure screen's objects freed),
 @     0x200011BC = the screen now, fn_0800d6e4 (app_01.s 720-733);
 @   1 -> 2: fn_08023690([0x200001D8]), fn_0800d50c; 2 -> 1: fn_08023690([0x200001D8]),

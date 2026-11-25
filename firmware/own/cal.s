@@ -1,10 +1,9 @@
-@ cal.s - the calibration sweep of our build (MEASUREMENT_FIX_DESIGN.md stage 3: CAL_SETTLE_DESIGN.md
-@ section 2 with every item of its critique, on the measurement core of meas.s).
+@ cal.s - the calibration sweep of our build (stage 3), on the measurement core of meas.s.
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
 @ The vendor sweep fn_0800bd5c (app_02.s) counts 45 one-second steps and stores whatever the
 @ averaging holds at the counts 3, 6 .. 45, so a point can store the previous point's result or a
-@ single sample (CAL_SETTLE_DESIGN 1). In our build its running test reads 0 (the .ifdef OWN at
+@ single sample. In our build its running test reads 0 (the .ifdef OWN at
 @ 0x0800BDBA, app_02.s) and cal_step, called by ctl_loop once per main-loop pass between off_step
 @ and job_step, runs the sweep instead:
 @ - guard: screen 0x20001168 = 3, menu item 0x200011A8 = 5, dialog 0x200011AC != 0 (as
@@ -18,13 +17,12 @@
 @   only acquisitions after the last change and its settle time (meas.s, S1.4), so none is
 @   discarded for settling;
 @ - a no-reading or overload window (theta -400 or |Z| 1e10) or a non-finite one is never used
-@   (cal_usable). In a short or reference point (type != 11) it starts the point's windows again
-@   (critique item 1); in an open point it is skipped and the windows taken stay (revision 10);
+@   (cal_usable). In a short or reference point (type != 11) it starts the point's windows again;
+@   in an open point it is skipped and the windows taken stay (revision 10);
 @ - short and reference points (type != 11): the last 3 windows: the median of |Z|, theta of the
-@   same window (no unwrap, items 6 / 7). The point is accepted when each of the 3 lies within a
-@   factor 2 of the median (|Zi| <= 2 |Zm| and 2 |Zi| >= |Zm|: CAL_SETTLE_DESIGN 4.2's limit,
-@   design 8.1 for D9); otherwise the oldest is dropped and the next window taken;
-@ - open points (type 11, MEASUREMENT_FIX_DESIGN revisions 10 and 11): every usable window is kept
+@   same window (no unwrap). The point is accepted when each of the 3 lies within a
+@   factor 2 of the median (|Zi| <= 2 |Zm| and 2 |Zi| >= |Zm|); otherwise the oldest is dropped and the next window taken;
+@ - open points (type 11, revisions 10 and 11): every usable window is kept
 @   in CAO_OWIN; the point ends at its CA_NO_OPEN-th usable window or at its time limit
 @   CA_POINT_MS, whichever comes first. Its result (cal_ores, revision 11) is the vector mean Ybar
 @   of the n windows' open admittances Y_i = 1 / (Zo_i - Zs), stored as Zo = 1 / Ybar + Zs in the
@@ -68,9 +66,9 @@
 @ windows, at most 2 counted), 3 x (point + 1) once a point is accepted, 45 at the store (the
 @ CALIBRATION event), and the dialog status text (word 0x20005960) "n/15" with the point's
 @ frequency and level, in font F1 (d_0802ce5c: it has '/' and '.', the dialog's F2 has letters,
-@ digits, space, '%', '(' and ')' only, RESOURCE_FACTS 1c cmap ranges). Every line of these texts
-@ is at most 75 pixels wide in F1 (the sum of the glyph advances of d_0802ce5c; revision 10 item
-@ 6), less than the 80-pixel width of the panel D that holds the text object (fn_0800e6c8 mode 5,
+@ digits, space, '%', '(' and ')' only, by the cmap ranges of the two fonts). Every line of these texts
+@ is at most 75 pixels wide in F1 (the sum of the glyph advances of d_0802ce5c; revision 10),
+@ less than the 80-pixel width of the panel D that holds the text object (fn_0800e6c8 mode 5,
 @ ui_43.s header). The names of revision 7 were 84 and 93 pixels wide ("100kHz 0.1V"), wider
 @ than the panel; the meter showed "3/15" for "13/15" (owner, 2026-11-23).
 @
@@ -90,8 +88,8 @@
 	.if	CAO_OWIN + 8 * CA_NO_OPEN > CAO_END
 	.error	"cal.s: CA_NO_OPEN windows do not fit CAO_OWIN"
 	.endif
-	.equ	CA_STALL_MS,	1500		@ no re-arm for this long: stall (critique item 8 asks 2 s; 1.5 s
-						@ [J] so that the stall is seen before meas.s publishes the
+	.equ	CA_STALL_MS,	1500		@ no re-arm for this long: stall (1.5 s
+						@ [J], so that the stall is seen before meas.s publishes the
 						@ no-reading set after 2 s, whose re-arm changes MO_G again)
 	.equ	CA_POINT_MS,	20000		@ time limit of one point [J], CAL_LIMIT_MS = 15 x this
 						@ + 30 s (ctl.inc)
@@ -555,7 +553,7 @@ cal_window:
 @ ----------------------------------------------------------------------------
 @ cal_usable - r0 = |Z| bits, r1 = theta bits of a published window: r0 = 1 when it can be used,
 @   0 for the no-reading / overload set of meas.s (theta -400 or |Z| 1e10) and for a non-finite
-@   word (critique item 1). Changes r0..r2.
+@   word. Changes r0..r2.
 @ ----------------------------------------------------------------------------
 	.thumb_func
 	.type	cal_usable, %function
@@ -594,7 +592,7 @@ cal_oend:
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
-@ cal_ores - the result of an open point (MEASUREMENT_FIX_DESIGN revision 11) from its n = CAO_NO
+@ cal_ores - the result of an open point (revision 11) from its n = CAO_NO
 @   (0..CA_NO_OPEN) usable windows in CAO_OWIN (|Z| bits, theta bits as published on screen 3 with
 @   type 11: |Z| = |Zbar| - t0, theta = arg Zbar). The point's short entry (cal_entry): t0 and its
 @   phase theta0; Zs = |t0| e^(j theta0), or |t0| when theta0 is not a finite angle within +-180
@@ -769,8 +767,8 @@ cal_zs:
 	pop	{r4, pc}
 
 @ ----------------------------------------------------------------------------
-@ cal_ofill - the low-frequency fill of an open sweep (MEASUREMENT_FIX_DESIGN revision 14 rule 3
-@   (b)), from cal_accept after the 15th result and before cal_commit: every 100 Hz and 120 Hz
+@ cal_ofill - the low-frequency fill of an open sweep (revision 14, rule 3b),
+@   from cal_accept after the 15th result and before cal_commit: every 100 Hz and 120 Hz
 @   point (0..5) whose result in CAO_RES is "not resolved" (theta +400) takes the first resolved
 @   source of cal_fsrc for its level (the same level at 1 kHz, at 10 kHz, then the other 1 kHz
 @   levels ascending). A source passed cal_ores's gate, so it is a capacitive stray of at most 50
@@ -1024,7 +1022,7 @@ cal_entry:
 	.ltorg
 
 @ ----------------------------------------------------------------------------
-@ cal_commit - the store of the 15 results (critique item 4). Step word 45; the published |Z| /
+@ cal_commit - the store of the 15 results. Step word 45; the published |Z| /
 @   theta words kept; the type 0x200050E0 = the recorded type (item 5); its 30 entries copied to
 @   CAO_SNAP; for each point: frequency and level words (no fn_08009f10), |Z| / theta words = the
 @   result, fn_0800bb64 (the vendor checks and store). r0 = 0 from it (it has set status 3,
@@ -1128,7 +1126,7 @@ cal_snap:
 	pop	{r4, r5, r6, r7, r8, pc}
 
 @ ----------------------------------------------------------------------------
-@ cal_finish - the finish (design D10, S1.9; fn_0800bcd8's steps without its 1 kHz / 0.6 V and its
+@ cal_finish - the finish (S1.9; fn_0800bcd8's steps without its 1 kHz / 0.6 V and its
 @   factory copy): status 0x200050EC = 2, fn_08008120(0x32), the running word 0, the recorded
 @   settings back (cal_restore, with fn_08009f10), CAO_ON = 0, own_save (one save; cal_save_ret is
 @   the return address the emulator's named-save gate expects), the vendor's status text in F2.
@@ -1345,7 +1343,7 @@ cal_levels:
 	.word	0x3DCCCCCD, 0x3E99999A, 0x3F19999A
 @ cal_rk - the limits of cal_ores for n = 2..7 windows: x / (n (n - 1)), x the 0.999 quantile of
 @   F(2, m), m = 2n - 2, x = (m / 2) (1e-3^(-2 / m) - 1) (P(F(2, m) > x) = (1 + 2x / m)^(-m / 2)):
-@   x = 999, 61.24555, 27, 18.49365, 14.90536, 12.97367 (MEASUREMENT_FIX_DESIGN revision 11)
+@   x = 999, 61.24555, 27, 18.49365, 14.90536, 12.97367 (revision 11)
 	.if	CA_NO_OPEN != 7
 	.error	"cal.s: cal_rk holds the limits of n = 2..7"
 	.endif

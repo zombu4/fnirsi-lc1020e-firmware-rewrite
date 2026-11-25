@@ -1,4 +1,4 @@
-@ cmp.s - AUTO L / C / R with hysteresis (MEASUREMENT_FIX_DESIGN.md S2.5), the tolerance modes
+@ cmp.s - AUTO L / C / R with hysteresis (S2.5), the tolerance modes
 @ (S2.9) and the compare judgement with its non-blocking beeper / LED (stage 2G, S2.8).
 @ Part of the FNIRSI LC1020E firmware rewrite (Thumb-2 assembly).
 @
@@ -13,7 +13,7 @@
 @ - own_cmp_step: ctl_loop (own/ctl.s) once per main-loop pass: the beeper steps and the LED idle
 @   level off screen 2;
 @ - own_cmp_key: key_step (own/ctl.s) before fn_08009400: the counter reset (long key 0x100 on
-@   screen 2, design D16);
+@   screen 2);
 @ - own_sec_key: fn_08009614's mask-0x40 block (src/app_01.s 0x080097B8, .ifdef OWN): the
 @   secondary-key mark MF_SECPICK = 1 where the press is dispatched (revision 17);
 @ - own_sec_pick: key_step after fn_08009400 and dset.s ds_secondary (MF_SECPICK);
@@ -41,7 +41,7 @@
 @   0x20001170 set: the vendor's beeps, 1 (IN) or 2 (other) of 200 ms with 150 ms between them
 @   (fn_08008120(200), fn_08011c68(150); fn_08011c68 counts 1 ms per unit: TIM7 0x40001400 with
 @   prescaler 0x47 = 71 at fn_08008CD4 on the 72 MHz APB1 timer clock gives 1 MHz, and
-@   wait_halfword_40001424_reaches_count waits for 1000 counts; a desk fact, design 8.1 Q6),
+@   wait_halfword_40001424_reaches_count waits for 1000 counts; a desk fact),
 @   timed by the tick word 0x20000480 in own_cmp_step. The beeper is TIM2 0x40000000 compare
 @   +0x38 (fn_0800c6ec): the volume halfword 0x20001160 on, 0 off, as fn_08008120.
 @ - the vendor word 0x200050D8 keeps its meaning and its arithmetic (cmp_vdev: |v - nominal| * 100
@@ -50,7 +50,7 @@
 @ Tolerance modes (RAM only, D7): 0 the vendor's symmetric % 0x20001188 (the default after every
 @ start), 1 lower / upper %, 2 lower / upper pF (compare quantity C only), 3 an IEC 60062 letter
 @ (B C D F G J K M: +-0.1 / 0.25 / 0.5 / 1 / 2 / 5 / 10 / 20 %; Z -20 / +80 %; B / C / D are
-@ +-0.1 / 0.25 / 0.5 pF for a C nominal below 10 pF, design S2.9 [P5]), resolved at each
+@ +-0.1 / 0.25 / 0.5 pF for a C nominal below 10 pF, S2.9 [P5]), resolved at each
 @ judgement. Any change of 0x20001188 (the meter's sorting editor, COMPARE_SET) after the mode was
 @ set returns to mode 0 (one tolerance in force; J). A secondary limit: none, D max, Q min, ESR max.
 @
@@ -795,7 +795,7 @@ own_cmp_step:
 @   code 0xFE (held) with mask 0x100 on screen 2 while the busy halfword 0x20001190 is 0: busy = 1
 @   (one reset per hold, as the vendor's long presses; the release 0xFF clears it, app_01.s
 @   0x08009490), both counters 0 and printed. V1.1 does nothing with this long press on screens 1
-@   and 2 (MEASUREMENT_DESIGN.md 4: free 0xFE masks). (Until revision 16 it also set MF_SECPICK
+@   and 2 (free 0xFE masks). (Until revision 16 it also set MF_SECPICK
 @   from key_step's copy of the slot; since revision 17 own_sec_key sets it where fn_08009614
 @   dispatches the press it read itself.) AAPCS.
 @ ----------------------------------------------------------------------------

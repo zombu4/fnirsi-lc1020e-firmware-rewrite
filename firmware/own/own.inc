@@ -1,14 +1,14 @@
 @ own.inc - shared constants of our own modules (firmware/own/*.s), included by every one of them.
 @ Part of the FNIRSI LC1020E firmware rewrite (assembly).
 @
-@ One place for: vendor RAM words of V1.1 (each with its evidence in NOTES.md), the no-init words,
+@ One place for: vendor RAM words of V1.1, the no-init words,
 @ the registers our modules touch (IWDG, FLASH, USB, NVIC, RCC, EXTI), the flash layout of the
 @ settings copies, records and slots, the save and flash result codes, the frame format, status
-@ codes, command and event numbers of USB_CONTROL_DESIGN.md section 4, and the layout of our RAM.
+@ codes, command and event numbers of the control channel (PROTOCOL.md), and the layout of our RAM.
 @ Only .equ lines: nothing here emits code, data or a section.
 
 @ ============================================================================
-@ Vendor RAM words (V1.1 port, firmware/src). Section names refer to NOTES.md.
+@ Vendor RAM words (V1.1 port, firmware/src).
 @ ============================================================================
 
 @ Settings / calibration block ("Internal-flash storage used by the application"): 0xC14 bytes,
@@ -29,9 +29,9 @@
         .equ    BLK_LANGUAGE,   0xBE0           @ language (V_LANGUAGE), 1 in our build
         .equ    V_ZERO_LEN,     0x4BA4          @ zero fill from V_BLOCK at start-up (system_40.s,
                                                 @ fn_08027ff4, before copy_flash_block_to_ram)
-        .equ    V_STACK_TOP,    0x200163A8      @ top of the vendor stack (USB_CONTROL_DESIGN 3)
+        .equ    V_STACK_TOP,    0x200163A8      @ top of the vendor stack
 
-@ Settings inside the block ("User functions, settings and measured values of V1.1")
+@ Settings inside the block
         .equ    V_LANG_SET,     0x20001140      @ 1 once the first-start language was chosen
         .equ    V_FREQ,         0x20001144      @ frequency, Hz: 100 / 120 / 1000 / 10000 / 100000
         .equ    V_LEVEL,        0x20001138      @ level, float volts: 0.1 / 0.3 / 0.6
@@ -77,15 +77,14 @@
         .equ    KEY_1000,       0x1000          @ PB9 (speed / long: circuit mode)
         .equ    KEY_2000,       0x2000          @ PE0
 
-@ Words the key dispatchers read (USB_CONTROL_DESIGN.md 4.3); their meaning beyond that design
-@ text is not established in NOTES.md.
+@ Words the key dispatchers read; their meaning beyond what is stated here is not established.
         .equ    V_DISP_A8,      0x200011A8
-        .equ    V_DIALOG,       0x200011AC      @ != 0 while a dialog is open (design 4.3)
+        .equ    V_DIALOG,       0x200011AC      @ != 0 while a dialog is open
         .equ    V_DISP_B0,      0x200011B0
         .equ    V_DISP_B4,      0x200011B4
         .equ    V_BYTE_000C,    0x2000000C      @ byte read by the condition of 0x08009A40
 
-@ RAM-only state ("User functions ...", "Display, keys, ...")
+@ RAM-only state
         .equ    V_HOLD,         0x200011A4      @ hold toggle (key 0x400)
         .equ    V_CORR_FLAG,    0x200011A0      @ only read, never written (vendor defect)
         .equ    V_FACTORY,      0x200011C0      @ 0, 1 or 2 (2 = factory mode), from keys held
@@ -111,7 +110,7 @@
         .equ    V_DEVIATION,    0x200050D8      @ compare deviation, percent
         .equ    V_CMP_VALUE,    0x200050DC      @ compare value
         .equ    V_CAL_TYPE,     0x200050E0      @ 0 short, 11 open, 1..10 factory references
-        .equ    V_CAL_RUN,      0x200050E4      @ != 0 while a calibration runs (design 4.3)
+        .equ    V_CAL_RUN,      0x200050E4      @ != 0 while a calibration runs
         .equ    V_CAL_STEP,     0x200050E8
         .equ    V_CAL_STATUS,   0x200050EC      @ 0 start, 1 busy, 2 finish, 3 fail
         .equ    V_PASS_COUNT,   0x200050F0      @ compare pass counter (RAM only)
@@ -140,7 +139,7 @@
 
 @ ============================================================================
 @ No-init words: absolute addresses at the top of main SRAM, never in a section and never
-@ cleared by any start code (bootloader/src/slot.inc, USB_CONTROL_DESIGN.md section 6).
+@ cleared by any start code (bootloader/src/slot.inc).
 @ ============================================================================
         .equ    FAULT_FLAG,     0x2001FFF0      @ the starter's fault flag
         .equ    FAULT_MAGIC,    0x464C5446      @ value that sends the next start to slot F
@@ -155,12 +154,12 @@
         .equ    RESULT_WORD,    0x2001FFFC      @ written by the slot before the reset after an
                                                 @ update
         .equ    RESULT_TAG,     0x5552          @ "UR": tag << 16 | result << 8 | ~result & 0xFF
-        .equ    RES_NONE,       0               @ results (INFO, design 4.1)
+        .equ    RES_NONE,       0               @ results (INFO)
         .equ    RES_OK,         1               @ update written and checked
         .equ    RES_IMAGE,      2               @ image check failed
         .equ    RES_PROGRAM,    3               @ programming failed
 
-@ Start-up diagnostics (own/boot.s; MEASUREMENT_FIX_DESIGN.md revision 17, 17.2). Two more
+@ Start-up diagnostics (own/boot.s; revision 17). Two more
 @ no-init words below FAULT_FLAG: 0x2001E000..0x2001FFEF lies outside every area a start code
 @ writes (starter below 0x20002000 and 0x20000000..0x2000003F, slot below 0x20002B00, the
 @ application's scatter-load 0x20000000..0x200163A7 (src/rodata_04.s region table) and its stack
@@ -198,7 +197,7 @@
 
 @ Independent watchdog (16.5): KEY 0x5555 unlocks PREDIV / RELV, 0xAAAA reloads, 0xCCCC starts.
 @ V1.1 starts it at 0x08010178 (PREDIV 2 = LSI / 16, RELV 0x9C4) and feeds it once per main-loop
-@ pass at 0x08010174; period 0.67..1.33 s for LSI 30..60 kHz (SETTINGS_SAVE_DESIGN.md).
+@ pass at 0x08010174; period 0.67..1.33 s for LSI 30..60 kHz.
         .equ    IWDG_KEY,       0x40003000
         .equ    IWDG_PREDIV,    0x40003004
         .equ    IWDG_RELV,      0x40003008
@@ -258,7 +257,7 @@
         .equ    USB_PULLUP,     0x40001820      @ bit 28: D+ pull-up; no other bit may change
                                                 @ (19.4.5.1.1 note 1)
         .equ    USB_PULLUP_BIT, 0x10000000
-@ Packet-memory layout (USB_CONTROL_DESIGN.md section 3; byte offsets in the 512-byte PMA)
+@ Packet-memory layout (byte offsets in the 512-byte PMA)
         .equ    PMA_BTABLE,     0x000           @ buffer table, 4 endpoints x 8 bytes
         .equ    PMA_EP0_RX,     0x040           @ 64 bytes
         .equ    PMA_EP0_TX,     0x080           @ 64 bytes
@@ -298,7 +297,7 @@
         .equ    CPACR_FPU,      0x00F00000
 
 @ EXTI pending register: line 18 (USB wake-up) cleared by writing 0x40000 (as 0x0800FB40 ->
-@ 0x08008D14, USB_CONTROL_DESIGN.md section 3)
+@ 0x08008D14)
         .equ    EXTI_PEND,      0x40010414
         .equ    EXTI_LINE18,    0x00040000
 
@@ -349,7 +348,7 @@
 @ Flash layout
 @ ============================================================================
 
-@ Settings copies (SETTINGS_SAVE_DESIGN.md "Layout"): two pages each; the block from the copy
+@ Settings copies: two pages each; the block from the copy
 @ base, the trailer in the last two words of the second page.
         .equ    SET_A,          0x0807F000      @ copy A (vendor place): 0x0807F000, 0x0807F800
         .equ    SET_B,          0x08066000      @ copy B: 0x08066000, 0x08066800
@@ -375,7 +374,7 @@
         .equ    HDR_MAGIC,      0x544F4C53      @ slot header +0 "SLOT"; +4 length, +8 image
                                                 @ CRC-32, +12 version, +16 link address
                                                 @ (slot + 0x200), +28 CRC-32 of bytes 0..27
-@ Own calibration area (OWN_CAL_DESIGN.md 1.1 / 1.2): written by nothing but ocal.s through the
+@ Own calibration area: written by nothing but ocal.s through the
 @ save.s gate (SVO_OCAL); two slots of 4 pages.
         .equ    OCAL_BASE,      0x08062000      @ slot 0; also the only value that opens the gate
         .equ    OCAL_SLOT,      0x2000          @ slot size; slot 1 at OCAL_BASE + OCAL_SLOT
@@ -386,7 +385,7 @@
 @ ============================================================================
 
 @ own_save_flags bits
-        .equ    SF_HELD,        0x01            @ saves held (SETTINGS_SAVE_DESIGN "Held saves")
+        .equ    SF_HELD,        0x01            @ saves held
         .equ    SF_DIFFERS,     0x02            @ backup differs: B valid, its calibration
                                                 @ tables differ from A's
         .equ    SF_NOVALID,     0x04            @ no valid settings copy at load
@@ -408,7 +407,7 @@
         .equ    SV_BADCOPY,     8               @ the source copy of a recovery is not valid
         .equ    SV_SAME,        9               @ own_save: both copies valid and equal to the
                                                 @ block: nothing written (S2.10)
-        .equ    STEP_MARK,      0x41            @ steps of SETTINGS_SAVE_DESIGN "Save" 4 (a)..(d)
+        .equ    STEP_MARK,      0x41            @ the save steps: mark, erase, program, verify
         .equ    STEP_ERASE,     0x42
         .equ    STEP_PROGRAM,   0x43
         .equ    STEP_VERIFY,    0x44
@@ -427,7 +426,7 @@
         .equ    FL_BLANK,       6               @ page does not read all 0xFF after its erase
 
 @ ============================================================================
-@ Frames, status codes, commands (USB_CONTROL_DESIGN.md sections 2 and 4)
+@ Frames, status codes, commands (PROTOCOL.md)
 @ ============================================================================
         .equ    FR_SYNC,        0xA5
         .equ    FR_MAX_PAYLOAD, 512
@@ -492,7 +491,7 @@
         .equ    C_BOOT_END,     0x87
         .equ    C_BOOT_INSTALL, 0x88
         .equ    C_BOOT_STATUS,  0x89
-        .equ    C_OCAL_INFO,    0x30            @ own calibration area (OWN_CAL_DESIGN.md 4.1)
+        .equ    C_OCAL_INFO,    0x30            @ own calibration area
         .equ    C_OCAL_READ,    0x31
         .equ    C_OCAL_WRITE,   0x32
         .equ    C_OCAL_ROLLBACK, 0x33
@@ -542,10 +541,10 @@
                                                 @ settings restored, CALIBRATE answer 8 bytes with
                                                 @ the failed point and its reason, CAL_LIMIT_MS
                                                 @ 330 s, step 0x200050E8 = 3 x points done + windows
-        .equ    CAP_OCAL,       1 << 26         @ the own calibration area (ocal.s, OWN_CAL_DESIGN.md
+        .equ    CAP_OCAL,       1 << 26         @ the own calibration area (ocal.s,
                                                 @ revision 3): OCAL_INFO .. OCAL_TRACE, MONITOR,
                                                 @ event OCAL_CHANGED, MEASURE byte 65
-        .equ    CAP_BOOTDIAG,   1 << 27         @ start-up diagnostics (boot.s, MEASUREMENT_FIX_DESIGN.md
+        .equ    CAP_BOOTDIAG,   1 << 27         @ start-up diagnostics (boot.s,
                                                 @ revision 17): INFO bytes 46..57 (the previous
                                                 @ start's progress word, this start's, RCC_CTRLSTS)
 
@@ -575,24 +574,22 @@
                                                 @ buffers, event queue, the previous copy of the
                                                 @ settings block for SETTING_CHANGED)
         .equ    CTL_SIZE,       0x1DE0          @ O_OCAL - O_CTL (CT_END 0x16B4, ctl.inc check)
-        .equ    O_OCAL,         0x4F00          @ ocal.s state, 0xCE0 bytes (OWN_CAL_DESIGN.md
-                                                @ revision 3, section 8 RAM: state 0xA0 = the
-                                                @ design's 0x80 + the level-monitor snapshot,
+        .equ    O_OCAL,         0x4F00          @ ocal.s state, 0xCE0 bytes (revision 3:
+                                                @ state 0xA0 = 0x80 + the level-monitor snapshot,
                                                 @ raw record 0x40, trace 0x200, staging 0xA00):
                                                 @ below O_CAL, from the unused end of O_CTL
         .equ    OCAL_SIZE,      0xCE0
         .equ    O_CAL,          0x5BE0          @ cal.s state, 0x200 bytes (the calibration sweep,
-                                                @ MEASUREMENT_FIX_DESIGN.md stage 3, revision 7):
+                                                @ stage 3, revision 7):
                                                 @ from the unused end of O_CTL (CT_END 0x16B4)
         .equ    CAL_SIZE,       0x200
         .equ    O_FUNC,         0x5DE0          @ the instrument functions (fmt.s, cmp.s and the
                                                 @ stage-2 words of meas.s), 0x100 bytes
-                                                @ (MEASUREMENT_FIX_DESIGN.md stages 2 / 2F / 2G,
+                                                @ (stages 2 / 2F / 2G,
                                                 @ revision 6): from the unused end of O_CTL
         .equ    FUNC_SIZE,      0x100
         .equ    O_MEAS,         0x5EE0          @ meas.s state, 0x100 bytes (the measurement core,
-                                                @ MEASUREMENT_FIX_DESIGN.md section 0 "RAM": taken
-                                                @ from the unused end of the former O_CTL area)
+                                                @ taken from the unused end of the former O_CTL area)
         .equ    MEAS_SIZE,      0x100
         .equ    O_PWR,          0x5FE0          @ power.s state, the last 0x20 bytes
         .equ    PWR_SIZE,       0x20
@@ -664,7 +661,7 @@
         .equ    OWN_PWR,        OWN_RAM + O_PWR
 
 @ OWN_FUNC words, each written only by the module named (cleared to 0 by own_start at every
-@ start; nothing of it is saved, design D7)
+@ start; nothing of it is saved)
         .equ    MF_MARK,        0x00            @ fmt.s: 1 when the value formatted last lies
                                                 @ outside the accuracy table (S2.1), else 0
         .equ    MF_ROW0,        0x04            @ fmt.s: 1 while row 0's amber covers are shown
@@ -719,14 +716,14 @@
         .error  "own.inc: the OWN_FUNC words do not fit O_FUNC"
         .endif
 
-@ OWN_CAL words (cal.s, the calibration sweep; MEASUREMENT_FIX_DESIGN.md stage 3). Written only by
+@ OWN_CAL words (cal.s, the calibration sweep; stage 3). Written only by
 @ cal.s; save.s reads the recorded settings (stage_cal_fix), cmd.s the failed point and reason.
         .equ    CAO_ON,         0x00            @ 0 idle, 1 a sweep runs (its points in progress)
         .equ    CAO_PT,         0x04            @ point 0..14 in progress (frequency index
                                                 @ point / 3, level index point mod 3)
         .equ    CAO_NW,         0x08            @ windows of the point held in CAO_WIN, 0..3
         .equ    CAO_NO,         0x0C            @ usable windows of an open point in CAO_OWIN,
-                                                @ 0..7 (MEASUREMENT_FIX_DESIGN revision 10)
+                                                @ 0..7 (revision 10)
         .equ    CAO_PSEQ,       0x10            @ MF_PSEQ (publishes of meas.s) as last seen
         .equ    CAO_TPT,        0x14            @ tick at the start of the point
         .equ    CAO_G,          0x18            @ the re-arm generation MO_G as last seen
@@ -765,7 +762,7 @@
                                                 @ (ui_44.s 0x0800F740, zero_bytes), block 0xB44
 
 @ OWN_OCAL words read by meas.s (the other offsets: ocal.s header). Written only by ocal.s, except
-@ OCS_KIND, which meas.s meas_change stores (OWN_CAL_DESIGN.md 2.3, G7).
+@ OCS_KIND, which meas.s meas_change stores (G7).
         .equ    OCS_TMAX,       0x3C            @ T_max: the largest settle value in use (>= 26)
         .equ    OCS_KIND,       0x7C            @ byte: kind 0..6 of the last meas_change
 
@@ -806,7 +803,7 @@
 
 @ ctl.s words read by other modules (offsets in its area)
         .equ    CTO_INJECTED,   0x00            @ own_injected: != 0 while 0x08009400 handles an
-                                                @ injected key event (USB_CONTROL_DESIGN 4.3)
+                                                @ injected key event
         .equ    own_injected,   OWN_CTL + CTO_INJECTED
 
 @ ---- screen.s block begin: screenshot (scr_start argument, band end results) ----
